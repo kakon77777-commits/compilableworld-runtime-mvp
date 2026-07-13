@@ -5,6 +5,7 @@
     "initial_state": "available",
     "canon_status": "explicit_canon",
     "requirements": ["deliver:item.firewood_bundle:npc.foreman_laotie"],
-    "note": "v0.1 quest.core is observation-only (see README known boundaries) — this quest displays via the 'quests' action but has no automated completion/reward transition yet."
+    "reward": {"currency": 15},
+    "note": "reward.currency=15 is grounded in worlds/mingyun_zhiyu/data/economy_income.csv's '普通勞工 5-10銅幣/日' row — slightly more than a day's common-labor wage for a one-off delivery, not an invented number. Completion is now event-driven: giving item.firewood_bundle to npc.foreman_laotie (the 'give' action) satisfies the requirement automatically."
   }
 ]

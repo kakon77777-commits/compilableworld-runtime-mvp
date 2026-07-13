@@ -13,6 +13,7 @@ from compilableworld.modules import install_builtin_modules
 
 ROOT = Path(__file__).resolve().parents[1]
 EXAMPLE = ROOT / "examples" / "gray_crown"
+PEACE_CITY = ROOT / "examples" / "mingyun_zhiyu_peace_city"
 
 
 class CompilerTests(unittest.TestCase):
@@ -95,6 +96,58 @@ class RuntimeTests(unittest.TestCase):
         receipts = self.runtime.advance(1)
         self.assertEqual(receipts[0].status.value, "completed")
         self.assertEqual(self.runtime.state.get("player.neo", "position", "room"), "room.market")
+
+    def test_reach_quest_completes_and_pays_reward_on_arrival(self) -> None:
+        self.assertEqual(self.runtime.state.get("player.neo", "quest", "quest.black_tide_omen"), "available")
+        self.assertEqual(self.runtime.state.get("player.neo", "wallet", "currency"), 0)
+        self.runtime.submit(ActionIR("player.neo", "take", "item.old_key"))
+        self.runtime.submit(ActionIR("player.neo", "move", args={"direction": "north"}))
+        self.runtime.submit(ActionIR("player.neo", "unlock", "door.old_vault"))
+        self.runtime.submit(ActionIR("player.neo", "open", "door.old_vault"))
+        self.runtime.submit(ActionIR("player.neo", "move", args={"direction": "down"}))
+        self.assertEqual(self.runtime.state.get("player.neo", "quest", "quest.black_tide_omen"), "completed")
+        self.assertEqual(self.runtime.state.get("player.neo", "wallet", "currency"), 20)
+        completed_events = [e for e in self.runtime.event_log.events if e.event_type == "quest.completed"]
+        self.assertEqual(len(completed_events), 1)
+        self.assertEqual(completed_events[0].payload["quest_id"], "quest.black_tide_omen")
+
+    def test_reach_quest_does_not_complete_before_arrival(self) -> None:
+        self.runtime.submit(ActionIR("player.neo", "move", args={"direction": "north"}))
+        self.assertEqual(self.runtime.state.get("player.neo", "quest", "quest.black_tide_omen"), "available")
+
+
+class PeaceCityQuestTests(unittest.TestCase):
+    """Real content, not a toy fixture — see examples/mingyun_zhiyu_peace_city."""
+
+    def setUp(self) -> None:
+        self.temp = tempfile.TemporaryDirectory()
+        package = compile_world(PEACE_CITY, self.temp.name)
+        self.runtime = WorldRuntime.from_package(package)
+        install_builtin_modules(self.runtime)
+
+    def tearDown(self) -> None:
+        self.temp.cleanup()
+
+    def test_delivering_firewood_completes_quest_and_pays_reward(self) -> None:
+        actor = "player.newcomer"
+        self.assertEqual(self.runtime.state.get(actor, "quest", "quest.find_work"), "available")
+        self.runtime.submit(ActionIR(actor, "move", args={"direction": "north"}))  # -> slum_alley
+        take = self.runtime.submit(ActionIR(actor, "take", "item.firewood_bundle"))
+        self.assertEqual(take.status.value, "completed")
+        self.runtime.submit(ActionIR(actor, "move", args={"direction": "west"}))  # -> labor_yard
+        give = self.runtime.submit(ActionIR(actor, "give", "item.firewood_bundle", args={"recipient": "npc.foreman_laotie"}))
+        self.assertEqual(give.status.value, "completed")
+        self.assertEqual(self.runtime.state.get("item.firewood_bundle", "inventory", "carrier"), "npc.foreman_laotie")
+        self.assertEqual(self.runtime.state.get(actor, "quest", "quest.find_work"), "completed")
+        self.assertEqual(self.runtime.state.get(actor, "wallet", "currency"), 15)
+
+    def test_give_rejected_when_recipient_not_in_room(self) -> None:
+        actor = "player.newcomer"
+        self.runtime.submit(ActionIR(actor, "move", args={"direction": "north"}))  # -> slum_alley
+        self.runtime.submit(ActionIR(actor, "take", "item.firewood_bundle"))
+        give = self.runtime.submit(ActionIR(actor, "give", "item.firewood_bundle", args={"recipient": "npc.foreman_laotie"}))
+        self.assertEqual(give.status.value, "failed")
+        self.assertEqual(self.runtime.state.get(actor, "quest", "quest.find_work"), "available")
 
 
 if __name__ == "__main__":

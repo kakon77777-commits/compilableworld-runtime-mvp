@@ -6,7 +6,7 @@ from dataclasses import dataclass
 from typing import Protocol
 
 from .kernel import WorldRuntime
-from .models import ActionIR
+from .models import ActionIR, EventIR
 
 
 class IntentParser(Protocol):
@@ -35,6 +35,10 @@ class DeterministicIntentParser:
         if verb in {"take", "get", "drop", "open", "unlock", "attack"}:
             target = parts[1] if len(parts) > 1 else None
             return ActionIR(actor_id, "take" if verb == "get" else verb, target_id=target)
+        if verb == "give":
+            item = parts[1] if len(parts) > 1 else None
+            recipient = parts[2] if len(parts) > 2 else None
+            return ActionIR(actor_id, "give", target_id=item, args={"recipient": recipient})
         if verb in {"status", "quests"}:
             return ActionIR(actor_id, verb)
         if verb == "say":
@@ -47,6 +51,14 @@ class TerminalGateway:
         self.runtime = runtime
         self.actor_id = actor_id
         self.parser = parser or DeterministicIntentParser()
+        self.runtime.events.subscribe("quest.completed", self._on_quest_completed)
+
+    def _on_quest_completed(self, event) -> None:
+        if event.target != self.actor_id:
+            return
+        reward = event.payload.get("reward") or {}
+        note = f"，獲得 {reward['currency']} 貨幣" if reward.get("currency") else ""
+        print(f">> 任務完成：{event.payload['title']}{note}")
 
     def run(self) -> None:
         print(f"CompilableWorld Runtime {self.runtime.package['manifest']['runtime_version']}")

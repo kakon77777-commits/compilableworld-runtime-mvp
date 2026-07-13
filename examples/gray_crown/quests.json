@@ -4,7 +4,8 @@
     "title": "黑潮前兆",
     "initial_state": "available",
     "canon_status": "gameplay_adaptation",
-    "requirements": ["reach:room.vault"]
+    "requirements": ["reach:room.vault"],
+    "reward": {"currency": 20}
   }
 ]
 

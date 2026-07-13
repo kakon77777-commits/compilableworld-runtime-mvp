@@ -14,6 +14,12 @@ class BaseModule:
     def event(self, event_type: str, action: ActionIR, payload: dict[str, Any], target: str | None = None) -> EventIR:
         return EventIR(event_type, self.contract.module_id, payload, target=target or action.actor_id)
 
+    def on_register(self, runtime: WorldRuntime) -> None:
+        """Optional hook: called once after the Kernel registers this module.
+        Default no-op; modules that need to subscribe to other modules' events
+        (e.g. QuestModule) override this instead of reaching into the Kernel
+        at evaluate()-time."""
+
 
 class RoomModule(BaseModule):
     def __init__(self) -> None:
@@ -77,7 +83,7 @@ class DoorModule(BaseModule):
 
 class InventoryModule(BaseModule):
     def __init__(self) -> None:
-        super().__init__(ModuleContract("inventory.core", "0.1.0", "TMS", ["take", "drop", "inventory"], ["inventory.item_added", "inventory.item_removed", "inventory.observed"], ["position.*", "inventory.*"], ["position.*", "inventory.*"], ["entity", "state", "action", "event"]))
+        super().__init__(ModuleContract("inventory.core", "0.1.0", "TMS", ["take", "drop", "give", "inventory"], ["inventory.item_added", "inventory.item_removed", "inventory.item_given", "inventory.observed"], ["position.*", "inventory.*"], ["position.*", "inventory.*"], ["entity", "state", "action", "event"]))
 
     def evaluate(self, action: ActionIR, runtime: WorldRuntime) -> TransitionResult:
         if action.verb == "inventory":
@@ -97,6 +103,17 @@ class InventoryModule(BaseModule):
                 StateDelta(item, "inventory", "carrier", "set", action.actor_id, source_module=self.contract.module_id),
             ]
             return TransitionResult(True, deltas, [self.event("inventory.item_added", action, {"item": item})], f"你拿起了 {runtime.registry.get(item).name}。")
+        if action.verb == "give":
+            recipient = str(action.args.get("recipient", "")).strip()
+            if not recipient or not runtime.registry.contains(recipient):
+                return TransitionResult(False, message="找不到交付對象")
+            if runtime.state.get(item, "inventory", "carrier") != action.actor_id:
+                return TransitionResult(False, message="物品不在你的物品欄")
+            if runtime.state.get(recipient, "position", "room") != room:
+                return TransitionResult(False, message="交付對象不在此處")
+            deltas = [StateDelta(item, "inventory", "carrier", "set", recipient, source_module=self.contract.module_id)]
+            payload = {"item": item, "actor": action.actor_id, "recipient": recipient}
+            return TransitionResult(True, deltas, [self.event("inventory.item_given", action, payload)], f"你把 {runtime.registry.get(item).name} 交給了 {runtime.registry.get(recipient).name}。")
         if runtime.state.get(item, "inventory", "carrier") != action.actor_id:
             return TransitionResult(False, message="物品不在你的物品欄")
         deltas = [
@@ -153,8 +170,16 @@ class DialogueModule(BaseModule):
 
 
 class QuestModule(BaseModule):
+    """Requirement grammar (already present, previously unused, in quests.json):
+    `deliver:<item_id>:<target_id>` and `reach:<room_id>`. Completion is
+    event-reactive (paper 05 §8.2's "Quest System" subscriber pattern), not
+    polled on the `quests` action — re-checked whenever inventory.item_given
+    or movement.actor_moved fires for the actor. Unknown requirement kinds
+    fail closed (never silently satisfied)."""
+
     def __init__(self) -> None:
-        super().__init__(ModuleContract("quest.core", "0.1.0", "TMS", ["quests"], ["quest.observed"], ["quest.*"], [], ["entity", "state", "event"]))
+        super().__init__(ModuleContract("quest.core", "0.1.0", "TMS", ["quests"], ["quest.observed", "quest.completed"], ["quest.*", "inventory.*", "position.*"], ["quest.*", "wallet.*"], ["entity", "state", "event"]))
+        self._runtime: WorldRuntime | None = None
 
     def evaluate(self, action: ActionIR, runtime: WorldRuntime) -> TransitionResult:
         summaries = []
@@ -162,6 +187,48 @@ class QuestModule(BaseModule):
             state = runtime.state.get(action.actor_id, "quest", quest["quest_id"], quest.get("initial_state", "available"))
             summaries.append(f"{quest['title']}[{state}]")
         return TransitionResult(True, events=[self.event("quest.observed", action, {"quests": summaries})], message="任務: " + (", ".join(summaries) or "無"))
+
+    def on_register(self, runtime: WorldRuntime) -> None:
+        self._runtime = runtime
+        runtime.events.subscribe("inventory.item_given", self._on_progress_event)
+        runtime.events.subscribe("movement.actor_moved", self._on_progress_event)
+
+    def _on_progress_event(self, event: EventIR) -> None:
+        runtime = self._runtime
+        assert runtime is not None
+        actor_id = event.payload.get("actor") or event.target
+        if not actor_id or not runtime.registry.contains(actor_id):
+            return
+        for quest in runtime.package.get("quests", []):
+            quest_id = quest["quest_id"]
+            current = runtime.state.get(actor_id, "quest", quest_id, quest.get("initial_state", "available"))
+            if current != "available" or not self._requirements_met(actor_id, quest, runtime):
+                continue
+            deltas = [StateDelta(actor_id, "quest", quest_id, "set", "completed", source_module=self.contract.module_id)]
+            reward = quest.get("reward") or {}
+            currency = int(reward.get("currency", 0))
+            if currency:
+                deltas.append(StateDelta(actor_id, "wallet", "currency", "add", currency, source_module=self.contract.module_id))
+            completed = EventIR(
+                "quest.completed", self.contract.module_id, {"quest_id": quest_id, "title": quest["title"], "reward": reward},
+                target=actor_id, causation_id=event.event_id, correlation_id=event.correlation_id,
+            )
+            runtime.commit_reaction(self, deltas, [completed])
+
+    @staticmethod
+    def _requirements_met(actor_id: str, quest: dict[str, Any], runtime: WorldRuntime) -> bool:
+        for requirement in quest.get("requirements", []):
+            parts = str(requirement).split(":")
+            if parts[0] == "deliver" and len(parts) == 3:
+                _, item_id, target_id = parts
+                if runtime.state.get(item_id, "inventory", "carrier") != target_id:
+                    return False
+            elif parts[0] == "reach" and len(parts) == 2:
+                if runtime.state.get(actor_id, "position", "room") != parts[1]:
+                    return False
+            else:
+                return False
+        return True
 
 
 def install_builtin_modules(runtime: WorldRuntime) -> None:

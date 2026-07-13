@@ -30,9 +30,20 @@ PYTHONPATH=src python3 -m unittest discover -s tests -v
 ## 範例世界
 
 - `examples/gray_crown` — 原始參考範例（示範資料）。
-- `examples/mingyun_zhiyu_peace_city` — 真實內容切片，改編自 Neo.K 的《命運之欲》小說世界觀（透過既有的 `worlds/mingyun_zhiyu_peace_city/world-ir.yaml`，見 CompilableWorld-Evennia-Prototype 姊妹 repo），涵蓋全部 8 個模組：移動、對話、上鎖的門（需攜帶鑰匙道具解鎖）、戰鬥、拾取物品、任務列表。實際跑過完整流程驗證過。
+- `examples/mingyun_zhiyu_peace_city` — 真實內容切片，改編自 Neo.K 的《命運之欲》小說世界觀（透過既有的 `worlds/mingyun_zhiyu_peace_city/world-ir.yaml`，見 CompilableWorld-Evennia-Prototype 姊妹 repo；世界觀 canon 資料庫本身在 `worlds/mingyun_zhiyu/data/` 已擴充到 16 城/48 具名角色/公理/魔法系統等規模，本切片仍只用了和平之城賤民區這一小塊，其餘 canon 尚待未來擴充），涵蓋全部 8 個模組：移動、對話、上鎖的門（需攜帶鑰匙道具解鎖）、戰鬥、拾取物品、**交付物品給 NPC 以事件驅動完成任務並發放報酬**、任務列表。實際跑過完整流程驗證過。
 
-在 CLI 中依序輸入（以 `examples/gray_crown` 為例）：
+在 CLI 中依序輸入（以 `examples/mingyun_zhiyu_peace_city` 為例，完成「找份差事」任務）：
+
+```text
+n
+take item.firewood_bundle
+w
+give item.firewood_bundle npc.foreman_laotie
+quests
+status
+```
+
+或以 `examples/gray_crown` 驗證上鎖門與抵達型任務：
 
 ```text
 take item.old_key
@@ -67,7 +78,7 @@ Python 版本用於凍結語言無關契約與快速驗證。後續 Rust 重寫�
 
 - 目前是單程序、單世界實例；沒有帳號、多人網路與分散式鎖。
 - Scheduler 支援延遲 Action，但 CLI 尚未暴露複合行為編輯器。
-- Quest 模組目前只做狀態投影，事件驅動的任務轉移留待 v0.2。
+- Quest 模組現在支援兩種事件驅動的完成條件（`deliver:<item>:<target>`、`reach:<room>`）與貨幣報酬，透過 `WorldRuntime.commit_reaction()`（Kernel 新增的事件反應提交路徑，語義與 `_execute()` 相同：只接受 Delta+Event，權限照樣強制檢查）在 EventBus 上被動觸發，不需要玩家額外下指令；未知條件類型一律視為未滿足（fail closed），不會誤判完成。仍未支援的部分：多階段/分支任務、失敗狀態、道具型報酬（只有貨幣，因為 Kernel 目前不支援執行期生成新實體）。
 - 世界、區域與場景的初始階層狀態已編入 State Store；跨層事件轉移規則留待 v0.2。
 - Intent Parser 是確定性參考實作；AI Adapter 必須輸出同一 `ActionIR` 並接受 Kernel 驗證。
 - Module Contract 的寫入範圍已由 Kernel 強制檢查；讀取範圍與 Action authority 的強制隔離留待 v0.2。

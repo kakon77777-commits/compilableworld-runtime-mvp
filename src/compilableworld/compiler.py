@@ -121,6 +121,10 @@ def compile_world(source_dir: str | Path, output_dir: str | Path) -> Path:
         if not isinstance(quest, dict):
             raise CompileError("quests.json 的每筆任務必須是物件")
         _required(quest, ["quest_id", "title", "initial_state"], "quests.json")
+        reward = quest.get("reward")
+        if reward is not None:
+            if not isinstance(reward, dict) or not isinstance(reward.get("currency", 0), int):
+                raise CompileError(f"任務 {quest['quest_id']} 的 reward.currency 必須是整數")
     _unique(quests, "quest_id", "quests.json")
 
     for row in exits:
@@ -184,6 +188,7 @@ def compile_world(source_dir: str | Path, output_dir: str | Path) -> Path:
         state_owner = manifest["world_id"] if owner == "world" else owner
         initial_state.append(_state(state_owner, "fsm", "state", state_name))
     if default_player:
+        initial_state.append(_state(default_player, "wallet", "currency", 0))
         for quest in quests:
             initial_state.append(_state(default_player, "quest", quest["quest_id"], quest["initial_state"]))
 

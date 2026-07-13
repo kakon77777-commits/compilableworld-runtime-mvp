@@ -207,6 +207,27 @@ class WorldRuntime:
         if contract.module_id in self.modules:
             raise RuntimeErrorBase(f"重複模組: {contract.module_id}")
         self.modules[contract.module_id] = module
+        on_register = getattr(module, "on_register", None)
+        if callable(on_register):
+            on_register(self)
+
+    def commit_reaction(
+        self, module: RuntimeModule, deltas: list[StateDelta], events: list[EventIR],
+    ) -> list[dict[str, Any]]:
+        """Event-subscriber commit path: same Delta+Event contract as `_execute`,
+        for modules reacting to another module's event instead of a submitted
+        Action (paper 07 §4.6 — modules cooperate via events, never direct calls)."""
+        applied = self.state.commit(deltas, module.contract.write)
+        commit_event = EventIR(
+            event_type="state.committed", source=module.contract.module_id,
+            timestamp_tick=self.scheduler.tick, visibility="audit", payload={"applied": applied},
+        )
+        for event in (commit_event, *events):
+            event.timestamp_tick = self.scheduler.tick
+            self.event_log.append(event)
+            self.events.publish(event)
+            self.metrics[f"event:{event.event_type}"] += 1
+        return applied
 
     def module_for(self, verb: str) -> RuntimeModule:
         candidates = [m for m in self.modules.values() if verb in m.contract.actions]
