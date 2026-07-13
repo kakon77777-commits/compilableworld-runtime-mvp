@@ -4,6 +4,7 @@ import json
 import tempfile
 import unittest
 from pathlib import Path
+from unittest.mock import patch
 
 from compilableworld.compiler import CompileError, compile_world, validate_world
 from compilableworld.gateway import DeterministicIntentParser
@@ -129,18 +130,38 @@ class RuntimeTests(unittest.TestCase):
         self.assertIn("不是", result.message)
 
     def test_attack_retaliates_and_kill_message_differs_from_hit_message(self) -> None:
-        hit = self.runtime.submit(ActionIR("player.neo", "attack", "npc.guard"))
-        self.assertEqual(hit.status.value, "completed")
-        self.assertIn("反擊", hit.message)
-        self.assertEqual(self.runtime.state.get("npc.guard", "health", "current"), 15)
-        self.assertEqual(self.runtime.state.get("player.neo", "health", "current"), 28)
+        # random.random() always 0.0 satisfies both "attacker hits" (not > HIT_CHANCE)
+        # and "counter hits" (<= COUNTER_HIT_CHANCE); randint fixed to 5 dmg / 2 counter.
+        with patch("compilableworld.modules.random.random", return_value=0.0), \
+             patch("compilableworld.modules.random.randint", side_effect=[5, 2, 5, 2, 5, 2, 5]):
+            hit = self.runtime.submit(ActionIR("player.neo", "attack", "npc.guard"))
+            self.assertEqual(hit.status.value, "completed")
+            self.assertIn("反擊", hit.message)
+            self.assertEqual(self.runtime.state.get("npc.guard", "health", "current"), 15)
+            self.assertEqual(self.runtime.state.get("player.neo", "health", "current"), 28)
 
-        self.runtime.submit(ActionIR("player.neo", "attack", "npc.guard"))
-        self.runtime.submit(ActionIR("player.neo", "attack", "npc.guard"))
-        kill = self.runtime.submit(ActionIR("player.neo", "attack", "npc.guard"))
+            self.runtime.submit(ActionIR("player.neo", "attack", "npc.guard"))
+            self.runtime.submit(ActionIR("player.neo", "attack", "npc.guard"))
+            kill = self.runtime.submit(ActionIR("player.neo", "attack", "npc.guard"))
         self.assertEqual(self.runtime.state.get("npc.guard", "health", "current"), 0)
         self.assertIn("倒下了", kill.message)
         self.assertNotIn("反擊", kill.message)
+
+    def test_attack_can_miss_outright(self) -> None:
+        with patch("compilableworld.modules.random.random", return_value=1.0):
+            missed = self.runtime.submit(ActionIR("player.neo", "attack", "npc.guard"))
+        self.assertEqual(missed.status.value, "completed")
+        self.assertIn("閃開", missed.message)
+        self.assertEqual(self.runtime.state.get("npc.guard", "health", "current"), 20)
+
+    def test_counter_attack_can_miss(self) -> None:
+        with patch("compilableworld.modules.random.random", side_effect=[0.0, 1.0]), \
+             patch("compilableworld.modules.random.randint", return_value=5):
+            hit = self.runtime.submit(ActionIR("player.neo", "attack", "npc.guard"))
+        self.assertIn("反擊", hit.message)
+        self.assertIn("撲了空", hit.message)
+        self.assertEqual(self.runtime.state.get("npc.guard", "health", "current"), 15)
+        self.assertEqual(self.runtime.state.get("player.neo", "health", "current"), 30)
 
 
 class PeaceCityQuestTests(unittest.TestCase):

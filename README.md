@@ -95,6 +95,7 @@ Python 版本用於凍結語言無關契約與快速驗證。後續 Rust 重寫�
 - Module Contract 的寫入範圍已由 Kernel 強制檢查；讀取範圍與 Action authority 的強制隔離留待 v0.2。
 - JSON Schema 與 CSV Schema 目前由程式內驗證器實作；v0.2 應外部化為正式 Schema 檔。
 - Replay 重放已提交 Delta；跨版本重放仍需 migration registry。
+- 戰鬥現在是分階段判定（命中率 85% → 傷害區間 3-7；具 `combatant` component 的目標存活時有 75% 機率反擊，傷害區間 1-3），不是 v0.1 那種保證命中的固定 5 點傷害——設計取材自對真實 LPC MUD（mhsj）戰鬥系統的研究（見 `docs/whitepapers/`），但刻意沒有引入完整的屬性/裝備系統（STR、武器傷害、護甲等 Authoring Schema 尚未定義這些欄位）。仍是單一招式，沒有技能、法術或異常狀態。
 - Web Gateway 是單一 actor、單一瀏覽器分頁假設下的 request/response API（無 WebSocket、無帳號/session），與已知的單程序/單世界限制一致；`/api/action` 與 `/api/state` 共用同一把 lock 序列化存取，避免併發提交造成的版本衝突，但不是為多人設計的。
 - （已修復，記錄供參考）CLI 曾在非 UTF-8 系統 locale（例如繁體中文 Windows 的 cp950）下對含中文標點的 `say` 輸入拋出編碼錯誤；`cli.py` 現在會在啟動時強制 stdin/stdout 為 UTF-8。
 - （已修復，源自一次真實的 AI 玩家試玩）指令目標現在可以用場景內可見的顯示名稱（例如「老鐵」）指定，不再強制要求內部 ID（`npc.foreman_laotie`）——`DeterministicIntentParser` 會在目前房間與玩家物品欄中做名稱解析，找不到或有歧義時一律不猜測、原樣傳給下層模組，讓玩家看到正常的「找不到」訊息，不會誤觸錯的目標。同一輪試玩也發現 `give` 沒有保護機制、可以把仍在使用中的鑰匙道具送給不相關 NPC 且無法復原——現在會在該鑰匙鎖著的門還沒開之前擋下交付。另外修正：裸方向詞（`north`）現在可直接使用；`unlock` 對非門實體會給出正確訊息而非誤導的「門沒有上鎖」；戰鬥現在有反擊傷害與獨立的擊殺訊息。

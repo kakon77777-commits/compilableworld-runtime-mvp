@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import random
 from dataclasses import dataclass
 from typing import Any
 
@@ -140,8 +141,26 @@ class HealthModule(BaseModule):
 
 
 class CombatModule(BaseModule):
+    """Staged hit-chance -> damage-range resolver, replacing v0.1's guaranteed-hit
+    fixed-5-damage attack. Modeled on a real, battle-tested precedent (mhsj's
+    FluffOS combat: AP/DP roll to resolve a miss before damage is computed at
+    all) rather than invented from nothing — see docs research notes in
+    project memory. Deliberately NOT a full stat system (no STR/weapon/armor
+    columns exist in the Authoring Layer yet, per AGENTS.md #7 that would need
+    schema changes first) — just the structural idea: an attack can fail
+    outright, and a surviving "combatant" can fail its retaliation too."""
+
+    HIT_CHANCE = 0.85
+    DAMAGE_RANGE = (3, 7)
+    COUNTER_HIT_CHANCE = 0.75
+    COUNTER_DAMAGE_RANGE = (1, 3)
+
     def __init__(self) -> None:
-        super().__init__(ModuleContract("combat.basic", "0.1.0", "TMS", ["attack"], ["combat.damage_applied", "combat.actor_defeated"], ["position.*", "health.*", "status.*"], ["health.*", "status.*"], ["entity", "state", "action", "event"]))
+        super().__init__(ModuleContract(
+            "combat.basic", "0.1.0", "TMS", ["attack"],
+            ["combat.damage_applied", "combat.actor_defeated", "combat.attack_missed"],
+            ["position.*", "health.*", "status.*"], ["health.*", "status.*"], ["entity", "state", "action", "event"],
+        ))
 
     def evaluate(self, action: ActionIR, runtime: WorldRuntime) -> TransitionResult:
         target = action.target_id
@@ -154,11 +173,14 @@ class CombatModule(BaseModule):
         health = runtime.state.get(target, "health", "current")
         if health is None:
             return TransitionResult(False, message="目標沒有生命元件")
-        damage = max(1, min(int(action.args.get("damage", 5)), 20))
+        target_name = runtime.registry.get(target).name
+        if random.random() > self.HIT_CHANCE:
+            event = self.event("combat.attack_missed", action, {"target": target}, target)
+            return TransitionResult(True, events=[event], message=f"你的攻擊被 {target_name} 閃開了。")
+        damage = random.randint(*self.DAMAGE_RANGE)
         remaining = max(0, health - damage)
         deltas = [StateDelta(target, "health", "current", "set", remaining, source_module=self.contract.module_id)]
         events = [self.event("combat.damage_applied", action, {"target": target, "damage": damage, "remaining": remaining}, target)]
-        target_name = runtime.registry.get(target).name
         if remaining == 0:
             deltas.append(StateDelta(target, "status", "alive", "set", False, source_module=self.contract.module_id))
             events.append(self.event("combat.actor_defeated", action, {"target": target}, target))
@@ -166,8 +188,11 @@ class CombatModule(BaseModule):
         if "combatant" in runtime.registry.get(target).components:
             actor_health = runtime.state.get(action.actor_id, "health", "current")
             if actor_health is not None and actor_health > 0:
-                counter = min(2, actor_health)
-                actor_remaining = actor_health - counter
+                if random.random() > self.COUNTER_HIT_CHANCE:
+                    events.append(self.event("combat.attack_missed", action, {"target": action.actor_id}, action.actor_id))
+                    return TransitionResult(True, deltas, events, f"攻擊造成 {damage} 點傷害，{target_name} 的反擊撲了空。")
+                counter = random.randint(*self.COUNTER_DAMAGE_RANGE)
+                actor_remaining = max(0, actor_health - counter)
                 deltas.append(StateDelta(action.actor_id, "health", "current", "set", actor_remaining, source_module=self.contract.module_id))
                 events.append(self.event("combat.damage_applied", action, {"target": action.actor_id, "damage": counter, "remaining": actor_remaining}, action.actor_id))
                 if actor_remaining == 0:
