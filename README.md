@@ -27,9 +27,12 @@ cw-runtime play build/gray_crown/world.package.json
 PYTHONPATH=src python3 -m unittest discover -s tests -v
 ```
 
-## 範例流程
+## 範例世界
 
-在 CLI 中依序輸入：
+- `examples/gray_crown` — 原始參考範例（示範資料）。
+- `examples/mingyun_zhiyu_peace_city` — 真實內容切片，改編自 Neo.K 的《命運之欲》小說世界觀（透過既有的 `worlds/mingyun_zhiyu_peace_city/world-ir.yaml`，見 CompilableWorld-Evennia-Prototype 姊妹 repo），涵蓋全部 8 個模組：移動、對話、上鎖的門（需攜帶鑰匙道具解鎖）、戰鬥、拾取物品、任務列表。實際跑過完整流程驗證過。
+
+在 CLI 中依序輸入（以 `examples/gray_crown` 為例）：
 
 ```text
 take item.old_key
@@ -70,3 +73,4 @@ Python 版本用於凍結語言無關契約與快速驗證。後續 Rust 重寫�
 - Module Contract 的寫入範圍已由 Kernel 強制檢查；讀取範圍與 Action authority 的強制隔離留待 v0.2。
 - JSON Schema 與 CSV Schema 目前由程式內驗證器實作；v0.2 應外部化為正式 Schema 檔。
 - Replay 重放已提交 Delta；跨版本重放仍需 migration registry。
+- （已修復，記錄供參考）CLI 曾在非 UTF-8 系統 locale（例如繁體中文 Windows 的 cp950）下對含中文標點的 `say` 輸入拋出編碼錯誤；`cli.py` 現在會在啟動時強制 stdin/stdout 為 UTF-8。
