@@ -1,0 +1,12 @@
+{
+  "title": "灰冠南門",
+  "default_language": "zh-TW",
+  "player_spawn": "room.south_gate",
+  "default_player_entity": "player.neo",
+  "world_state_machines": {
+    "world": "stable",
+    "region.gray_crown": "watchful",
+    "scene.south_gate": "guarded"
+  },
+  "provenance": {"source_type": "reference_demo", "canon_status": "gameplay_adaptation"}
+}

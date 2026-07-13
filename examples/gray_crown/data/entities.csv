@@ -1,0 +1,5 @@
+entity_id,entity_type,name,room,health,components,provenance
+player.neo,character,旅人 Neo.K,room.south_gate,30,position|health|inventory|quest,human_authored
+npc.guard,character,沉默守衛,room.south_gate,20,position|health|combatant,gameplay_adaptation
+door.old_vault,door,舊王室庫門,room.market,,position|door,gameplay_adaptation
+

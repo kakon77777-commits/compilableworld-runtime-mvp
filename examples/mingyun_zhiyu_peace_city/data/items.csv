@@ -1,0 +1,4 @@
+item_id,name,room,portable,provenance
+item.provisional_id_tag,臨時身份牌,room.registration_office,true,explicit_canon
+item.firewood_bundle,柴薪捆,room.slum_alley,true,explicit_canon
+item.sewer_rat_fang,下水道巨鼠獠牙,room.slum_sewers,true,explicit_canon

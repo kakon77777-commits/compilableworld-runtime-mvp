@@ -1,0 +1,4 @@
+exit_id,from_room,to_room,direction,bidirectional,door_entity,open,locked,key_id
+exit.south_market,room.south_gate,room.market,north,true,,true,false,
+exit.market_vault,room.market,room.vault,down,true,door.old_vault,false,true,item.old_key
+

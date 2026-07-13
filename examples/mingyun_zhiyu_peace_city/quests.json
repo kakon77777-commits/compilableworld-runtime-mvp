@@ -1,0 +1,10 @@
+[
+  {
+    "quest_id": "quest.find_work",
+    "title": "找份差事",
+    "initial_state": "available",
+    "canon_status": "explicit_canon",
+    "requirements": ["deliver:item.firewood_bundle:npc.foreman_laotie"],
+    "note": "v0.1 quest.core is observation-only (see README known boundaries) — this quest displays via the 'quests' action but has no automated completion/reward transition yet."
+  }
+]

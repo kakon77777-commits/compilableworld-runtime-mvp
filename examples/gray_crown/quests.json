@@ -1,0 +1,10 @@
+[
+  {
+    "quest_id": "quest.black_tide_omen",
+    "title": "黑潮前兆",
+    "initial_state": "available",
+    "canon_status": "gameplay_adaptation",
+    "requirements": ["reach:room.vault"]
+  }
+]
+

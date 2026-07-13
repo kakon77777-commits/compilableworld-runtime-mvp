@@ -1,0 +1,27 @@
+{
+  "world_id": "mingyun_zhiyu_peace_city_slice",
+  "world_version": "0.1.0",
+  "schema_version": "0.1.0",
+  "namespace": "myzy",
+  "compiler_version": "0.1.0",
+  "targets": ["mssp-python-runtime"],
+  "sources": {
+    "world": "world.json",
+    "rooms": "data/rooms.csv",
+    "exits": "data/exits.csv",
+    "entities": "data/entities.csv",
+    "items": "data/items.csv",
+    "quests": "quests.json"
+  },
+  "modules": [
+    "room.core",
+    "movement.core",
+    "door.core",
+    "inventory.core",
+    "health.core",
+    "combat.basic",
+    "dialogue.core",
+    "quest.core"
+  ],
+  "build": {"strict": true, "fail_on_warning": false}
+}

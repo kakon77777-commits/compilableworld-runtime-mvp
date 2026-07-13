@@ -1,0 +1,4 @@
+item_id,name,room,portable,provenance
+item.old_key,古老鑰匙,room.south_gate,true,gameplay_adaptation
+item.stone_marker,沉重界石,room.market,false,explicit_canon
+

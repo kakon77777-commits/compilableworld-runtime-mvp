@@ -1,0 +1,16 @@
+{
+  "title": "命運之欲：和平之城·賤民區切片",
+  "default_language": "zh-TW",
+  "player_spawn": "room.registration_office",
+  "default_player_entity": "player.newcomer",
+  "world_state_machines": {
+    "world": "barrier_era",
+    "region.slum_district": "watchful"
+  },
+  "provenance": {
+    "source_type": "novel_adaptation",
+    "canon_status": "gameplay_adaptation",
+    "source_ref": "converted from worlds/mingyun_zhiyu_peace_city/world-ir.yaml (D:\\Ai\\work together\\CompilableWorld-Evennia-Prototype), itself adapted from Neo.K's 命運之欲 worldbuilding docx set",
+    "note": "Room-for-room subset of a richer World IR slice, re-shaped to this engine's rooms/exits/entities/items/quests CSV+JSON format. See docs/whitepapers/06-novel-to-mud-world-adaptation.md for the Canon-tier source this was adapted from."
+  }
+}
