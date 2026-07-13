@@ -397,6 +397,39 @@ class FormulaCombatIntegrationTests(unittest.TestCase):
         self.assertEqual(runtime.state.get("npc.tank", "health", "current"), 1600 - 32)
         self.assertEqual(runtime.state.get("npc.swift", "health", "current"), 800 - 1)  # defender: 1 action, 1 dmg
 
+    def test_haste_status_pushes_action_count_across_the_threshold(self) -> None:
+        """IV ratio 100/70=1.43 -> 1 action without haste; x1.5 haste makes it
+        150/70=2.14 -> 2 actions. Proves attacker_haste actually reaches the
+        action_economy() call inside a real Exchange, not just the pure
+        combat_formulas functions in isolation."""
+        package = {
+            "format": "compilableworld.runtime-package/v0.1",
+            "manifest": {"world_id": "haste_check", "world_version": "0.1.0", "schema_version": 1, "namespace": "test", "runtime_version": "0.1.0", "modules": ["combat.basic"]},
+            "world": {}, "rooms": [], "exits": [], "quests": [],
+            "entities": [
+                {"entity_id": "npc.a", "entity_type": "character", "name": "甲", "components": ["combatant"], "metadata": {}},
+                {"entity_id": "npc.b", "entity_type": "character", "name": "乙", "components": ["combatant"], "metadata": {}},
+            ],
+            "initial_state": [
+                {"owner": "npc.a", "namespace": "position", "key": "room", "value": "room.arena", "version": 0},
+                {"owner": "npc.b", "namespace": "position", "key": "room", "value": "room.arena", "version": 0},
+                {"owner": "npc.a", "namespace": "health", "key": "current", "value": 800, "version": 0},
+                {"owner": "npc.a", "namespace": "health", "key": "max", "value": 800, "version": 0},
+                {"owner": "npc.b", "namespace": "health", "key": "current", "value": 800, "version": 0},
+                {"owner": "npc.b", "namespace": "health", "key": "max", "value": 800, "version": 0},
+                {"owner": "npc.a", "namespace": "combat", "key": "status_effects", "value": [{"id": "haste_疾風", "exchanges_remaining": 3}], "version": 0},
+                *self._attribute_states("npc.a", {"str": 50, "con": 50, "mag": 10, "agi": 100, "dex": 0, "phase_tier": 0}),
+                *self._attribute_states("npc.b", {"str": 50, "con": 50, "mag": 10, "agi": 70, "dex": 0, "phase_tier": 0}),
+            ],
+            "source_checksums": {},
+        }
+        runtime = WorldRuntime(package)
+        install_builtin_modules(runtime)
+        with patch("compilableworld.modules.random.random", return_value=0.0):
+            receipt = runtime.submit(ActionIR("npc.a", "attack", "npc.b"))
+        self.assertIn("連續攻擊 2 次", receipt.message)
+        self.assertEqual(runtime.state.get("npc.a", "combat", "status_effects"), [{"id": "haste_疾風", "exchanges_remaining": 2}])
+
 
 if __name__ == "__main__":
     unittest.main()

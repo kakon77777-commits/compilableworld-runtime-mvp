@@ -5,8 +5,9 @@ from dataclasses import dataclass
 from typing import Any
 
 from .combat_formulas import (
-    ATTRIBUTE_FLOOR, Attributes, action_economy, apply_damage, damage, hit_chance,
-    initiative_value, melee_ar, melee_dr, tier_effective_ar,
+    ATTRIBUTE_FLOOR, Attributes, action_economy, apply_damage, damage,
+    decay_status_effects, has_status, hit_chance, initiative_value, melee_ar,
+    melee_dr, refresh_status, tier_effective_ar,
 )
 from .kernel import WorldRuntime
 from .models import ActionIR, EventIR, ModuleContract, StateDelta, TransitionResult
@@ -172,7 +173,7 @@ class CombatModule(BaseModule):
         super().__init__(ModuleContract(
             "combat.basic", "0.1.0", "TMS", ["attack"],
             ["combat.damage_applied", "combat.actor_defeated", "combat.attack_missed"],
-            ["position.*", "health.*", "status.*", "combat.*"], ["health.*", "status.*", "combat.temp_hp"], ["entity", "state", "action", "event"],
+            ["position.*", "health.*", "status.*", "combat.*"], ["health.*", "status.*", "combat.temp_hp", "combat.status_effects"], ["entity", "state", "action", "event"],
         ))
 
     def evaluate(self, action: ActionIR, runtime: WorldRuntime) -> TransitionResult:
@@ -235,21 +236,32 @@ class CombatModule(BaseModule):
 
     def _resolve_formula(self, action: ActionIR, runtime: WorldRuntime, target: str, target_name: str, health: int) -> TransitionResult:
         """turn_and_initiative_structure: one submitted `attack` = one Exchange.
-        IV = AGI+0.5*DEX decides Actions_per_exchange per side (clamped 1-4);
-        the faster side's hits all resolve before the slower side's, which is
-        a real simplification of the source file's "interleaved" narration —
-        documented, not hidden. Attributes/tier don't change mid-exchange, so
-        AR/DR are computed once; only the hit-roll and damage-roll vary per
-        swing. health/temp_hp are threaded as local values across the loop
-        (nothing is committed mid-evaluate(), so re-reading runtime.state
-        between swings would see stale pre-exchange numbers)."""
+        IV = AGI+0.5*DEX (x1.5 under haste_疾風) decides Actions_per_exchange
+        per side (clamped 1-4); the faster side's hits all resolve before the
+        slower side's, which is a real simplification of the source file's
+        "interleaved" narration — documented, not hidden. Attributes/tier
+        don't change mid-exchange, so AR/DR are computed once; only the
+        hit-roll and damage-roll vary per swing. health/temp_hp are threaded
+        as local values across the loop (nothing is committed mid-evaluate(),
+        so re-reading runtime.state between swings would see stale
+        pre-exchange numbers). Status effects decay by exactly one Exchange
+        for BOTH participants, computed once right after the attacker's
+        volley (before any early return) so every exit path includes it —
+        both sides "experienced" this Exchange regardless of whether the
+        defender gets to counter. A status hitting zero exchanges is removed;
+        if that status was shield_buff, any temp_hp still standing dissipates
+        with it (source: "持續至耗盡或3次交鋒" — whichever comes first)."""
         attacker_attrs = self._attributes_of(action.actor_id, runtime)
         defender_attrs = self._attributes_of(target, runtime)
         attacker_tier = runtime.state.get(action.actor_id, "combat", "phase_tier", 0)
         defender_tier = runtime.state.get(target, "combat", "phase_tier", 0)
+        attacker_statuses = runtime.state.get(action.actor_id, "combat", "status_effects", [])
+        defender_statuses = runtime.state.get(target, "combat", "status_effects", [])
+        attacker_haste = 1.5 if has_status(attacker_statuses, "haste_疾風") else 1.0
+        defender_haste = 1.5 if has_status(defender_statuses, "haste_疾風") else 1.0
         attacker_ar_eff = tier_effective_ar(melee_ar(attacker_attrs), attacker_tier, defender_tier)
         defender_dr = melee_dr(defender_attrs)
-        attacker_actions = action_economy(initiative_value(attacker_attrs), initiative_value(defender_attrs))
+        attacker_actions = action_economy(initiative_value(attacker_attrs) * attacker_haste, initiative_value(defender_attrs) * defender_haste)
 
         deltas: list[StateDelta] = []
         events: list[EventIR] = []
@@ -268,10 +280,25 @@ class CombatModule(BaseModule):
             if target_health == 0:
                 defeated = True
                 break
+
+        actor_temp_hp = runtime.state.get(action.actor_id, "combat", "temp_hp", 0)
+        decayed_defender_statuses = decay_status_effects(defender_statuses)
+        decayed_attacker_statuses = decay_status_effects(attacker_statuses)
+        if has_status(defender_statuses, "shield_buff") and not has_status(decayed_defender_statuses, "shield_buff"):
+            target_temp_hp = 0
+        if has_status(attacker_statuses, "shield_buff") and not has_status(decayed_attacker_statuses, "shield_buff"):
+            actor_temp_hp = 0
+        if decayed_defender_statuses != defender_statuses:
+            deltas.append(StateDelta(target, "combat", "status_effects", "set", decayed_defender_statuses, source_module=self.contract.module_id))
+        if decayed_attacker_statuses != attacker_statuses:
+            deltas.append(StateDelta(action.actor_id, "combat", "status_effects", "set", decayed_attacker_statuses, source_module=self.contract.module_id))
+
         if hits:
             deltas.append(StateDelta(target, "health", "current", "set", target_health, source_module=self.contract.module_id))
         if target_temp_hp != runtime.state.get(target, "combat", "temp_hp", 0):
             deltas.append(StateDelta(target, "combat", "temp_hp", "set", target_temp_hp, source_module=self.contract.module_id))
+        if actor_temp_hp != runtime.state.get(action.actor_id, "combat", "temp_hp", 0):
+            deltas.append(StateDelta(action.actor_id, "combat", "temp_hp", "set", actor_temp_hp, source_module=self.contract.module_id))
 
         exchange_msg = self._exchange_message(attacker_actions, hits, total_damage, target_name)
         if defeated:
@@ -286,8 +313,7 @@ class CombatModule(BaseModule):
 
         counter_ar_eff = tier_effective_ar(melee_ar(defender_attrs), defender_tier, attacker_tier)
         attacker_dr = melee_dr(attacker_attrs)
-        defender_actions = action_economy(initiative_value(defender_attrs), initiative_value(attacker_attrs))
-        actor_temp_hp = runtime.state.get(action.actor_id, "combat", "temp_hp", 0)
+        defender_actions = action_economy(initiative_value(defender_attrs) * defender_haste, initiative_value(attacker_attrs) * attacker_haste)
         counter_hits = counter_damage_total = 0
         actor_defeated = False
         for _ in range(defender_actions):
@@ -304,7 +330,9 @@ class CombatModule(BaseModule):
                 break
         if counter_hits:
             deltas.append(StateDelta(action.actor_id, "health", "current", "set", actor_health, source_module=self.contract.module_id))
-        if actor_temp_hp != runtime.state.get(action.actor_id, "combat", "temp_hp", 0):
+            # StateStore.commit() resolves repeated "set" deltas to the same path in
+            # order (last wins), so this correctly supersedes the earlier expiry-driven
+            # temp_hp delta above if counter-damage further reduced the shield this exchange.
             deltas.append(StateDelta(action.actor_id, "combat", "temp_hp", "set", actor_temp_hp, source_module=self.contract.module_id))
         if actor_defeated:
             deltas.append(StateDelta(action.actor_id, "status", "alive", "set", False, source_module=self.contract.module_id))
@@ -335,18 +363,27 @@ class MagicModule(BaseModule):
     """rule_magic_casting_system (combat_resolution_system.json) — MP/FP pools
     are already derived from MAG/DEX at compile time (see compiler.py). Only
     instant-cast spells (symbol_count<=5, cast_time_exchanges=1) are
-    implemented: multi-exchange channeling needs a turn/exchange structure
-    this Runtime doesn't have yet (turn_and_initiative_structure in the
-    source file is unimplemented). One spell wired up as a real, working
-    proof (護盾術/shield, the source file's own simplest illustrative_calc_examples
-    entry) rather than stubbing the whole 38-symbol combo library at once."""
+    implemented: multi-exchange channeling needs interrupt-on-hit logic
+    layered on the Exchange loop that combat.basic now has, not built yet.
+    Two spells wired up as real, working proof rather than stubbing the whole
+    38-symbol combo library at once: 護盾術/shield (the source file's own
+    illustrative_calc_examples entry) and 疾風步/haste (status_catalog's
+    haste_疾風, IV x1.5 for 3 exchanges — demonstrates the status-effect
+    framework interacting with the Exchange/action-economy system, not just
+    temp_hp). symbol_count=3 for 疾風步 is this module's own inference from
+    the combo tag count in status_catalog's combo_home note ("風+自身+持續"),
+    not source-stated — the source only gives illustrative_calc_examples
+    numbers for 護盾術/傳送術/烈焰爆裂, not this one."""
 
-    SPELLS = {"護盾術": {"symbol_count": 5, "effect": "shield"}}
+    SPELLS = {
+        "護盾術": {"symbol_count": 5, "effect": "shield"},
+        "疾風步": {"symbol_count": 3, "effect": "haste"},
+    }
 
     def __init__(self) -> None:
         super().__init__(ModuleContract(
             "magic.core", "0.1.0", "TMS", ["cast"], ["magic.cast"],
-            ["combat.*", "magic.*"], ["combat.temp_hp", "magic.*"], ["entity", "state", "action", "event"],
+            ["combat.*", "magic.*"], ["combat.temp_hp", "combat.status_effects", "magic.*"], ["entity", "state", "action", "event"],
         ))
 
     def evaluate(self, action: ActionIR, runtime: WorldRuntime) -> TransitionResult:
@@ -366,12 +403,18 @@ class MagicModule(BaseModule):
             StateDelta(action.actor_id, "magic", "mp_current", "subtract", mp_cost, source_module=self.contract.module_id),
             StateDelta(action.actor_id, "magic", "fp_current", "subtract", fp_cost, source_module=self.contract.module_id),
         ]
+        statuses = runtime.state.get(action.actor_id, "combat", "status_effects", [])
         if spell["effect"] == "shield":
             mag = runtime.state.get(action.actor_id, "combat", "mag", ATTRIBUTE_FLOOR)
             temp_hp = mag * 2
             deltas.append(StateDelta(action.actor_id, "combat", "temp_hp", "set", temp_hp, source_module=self.contract.module_id))
+            deltas.append(StateDelta(action.actor_id, "combat", "status_effects", "set", refresh_status(statuses, "shield_buff", 3), source_module=self.contract.module_id))
             event = self.event("magic.cast", action, {"spell": spell_name, "effect": "shield", "temp_hp": temp_hp})
-            return TransitionResult(True, deltas, [event], f"你施展了{spell_name}，獲得 {temp_hp} 點護盾。")
+            return TransitionResult(True, deltas, [event], f"你施展了{spell_name}，獲得 {temp_hp} 點護盾，持續至耗盡或 3 次交鋒。")
+        if spell["effect"] == "haste":
+            deltas.append(StateDelta(action.actor_id, "combat", "status_effects", "set", refresh_status(statuses, "haste_疾風", 3), source_module=self.contract.module_id))
+            event = self.event("magic.cast", action, {"spell": spell_name, "effect": "haste"})
+            return TransitionResult(True, deltas, [event], f"你施展了{spell_name}，身法在接下來 3 次交鋒間變得更加迅捷。")
         return TransitionResult(False, message="法術效果尚未實作")
 
 

@@ -3,8 +3,9 @@ from __future__ import annotations
 import unittest
 
 from compilableworld.combat_formulas import (
-    Attributes, action_economy, apply_damage, damage, hit_chance, hp_from_con,
-    initiative_value, melee_ar, melee_dr, tier_effective_ar,
+    Attributes, action_economy, apply_damage, damage, decay_status_effects,
+    has_status, hit_chance, hp_from_con, initiative_value, melee_ar, melee_dr,
+    refresh_status, tier_effective_ar,
 )
 
 
@@ -71,6 +72,24 @@ class CombatFormulaFidelityTests(unittest.TestCase):
     def test_apply_damage_spillover(self) -> None:
         health, temp_hp = apply_damage(current_health=80, current_temp_hp=15, dmg=25)
         self.assertEqual((health, temp_hp), (70, 0))
+
+    def test_refresh_status_replaces_not_stacks(self) -> None:
+        effects = refresh_status([], "shield_buff", 3)
+        effects = refresh_status(effects, "shield_buff", 3)  # re-cast before it expires
+        self.assertEqual(effects, [{"id": "shield_buff", "exchanges_remaining": 3}])
+
+    def test_refresh_status_preserves_other_statuses(self) -> None:
+        effects = refresh_status([], "haste_疾風", 3)
+        effects = refresh_status(effects, "shield_buff", 3)
+        self.assertEqual(len(effects), 2)
+        self.assertTrue(has_status(effects, "haste_疾風"))
+        self.assertTrue(has_status(effects, "shield_buff"))
+
+    def test_decay_status_effects_counts_down_and_expires(self) -> None:
+        effects = [{"id": "haste_疾風", "exchanges_remaining": 1}, {"id": "shield_buff", "exchanges_remaining": 3}]
+        effects = decay_status_effects(effects)
+        self.assertFalse(has_status(effects, "haste_疾風"))  # hit 0, removed
+        self.assertEqual(effects, [{"id": "shield_buff", "exchanges_remaining": 2}])
 
 
 if __name__ == "__main__":

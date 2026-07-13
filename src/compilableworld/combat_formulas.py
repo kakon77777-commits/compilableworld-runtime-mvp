@@ -87,3 +87,36 @@ def apply_damage(current_health: int, current_temp_hp: int, dmg: int) -> tuple[i
         dmg -= absorbed
     new_health = max(0, current_health - dmg) if dmg > 0 else current_health
     return new_health, current_temp_hp
+
+
+# status_effects_framework: duration is counted in "交鋒" (Exchange) units.
+# Scoped simplification, documented not hidden: only combat.basic's Exchange
+# loop (an `attack` action) ticks decay -- casting a spell doesn't itself
+# consume an Exchange for decay purposes, even though the source file's
+# cast_time_exchanges implies it should. Tracking that too would need a
+# shared exchange-counter between MagicModule and CombatModule; deferred.
+
+def refresh_status(effects: list[dict], status_id: str, exchanges: int, magnitude: float | None = None) -> list[dict]:
+    """generic_rules.stacking_rule default: same status re-applied refreshes
+    duration rather than stacking (stacking is opt-in per-combo, not built
+    generically here)."""
+    kept = [e for e in effects if e["id"] != status_id]
+    entry = {"id": status_id, "exchanges_remaining": exchanges}
+    if magnitude is not None:
+        entry["magnitude"] = magnitude
+    return kept + [entry]
+
+
+def decay_status_effects(effects: list[dict]) -> list[dict]:
+    """One Exchange has passed for this entity: every active status loses one
+    exchange of duration; anything that hits zero is removed."""
+    decayed = []
+    for effect in effects:
+        remaining = effect["exchanges_remaining"] - 1
+        if remaining > 0:
+            decayed.append({**effect, "exchanges_remaining": remaining})
+    return decayed
+
+
+def has_status(effects: list[dict], status_id: str) -> bool:
+    return any(e["id"] == status_id for e in effects)
