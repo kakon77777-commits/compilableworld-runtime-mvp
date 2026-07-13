@@ -9,6 +9,7 @@ from .compiler import CompileError, compile_world, validate_world
 from .gateway import TerminalGateway
 from .kernel import RuntimeErrorBase, WorldRuntime
 from .modules import install_builtin_modules
+from .webgateway import WebGateway
 
 
 def _force_utf8_io() -> None:
@@ -36,6 +37,11 @@ def build_parser() -> argparse.ArgumentParser:
     play.add_argument("package")
     play.add_argument("--actor", default=None, help="省略時使用 world.default_player_entity")
     play.add_argument("--event-log", default="runtime-events.jsonl")
+    serve = sub.add_parser("serve", help="以網頁介面執行已編譯世界")
+    serve.add_argument("package")
+    serve.add_argument("--actor", default=None, help="省略時使用 world.default_player_entity")
+    serve.add_argument("--event-log", default="runtime-events.jsonl")
+    serve.add_argument("--port", type=int, default=8765)
     inspect = sub.add_parser("inspect", help="顯示 Runtime Package 摘要")
     inspect.add_argument("package")
     return parser
@@ -64,6 +70,13 @@ def main(argv: list[str] | None = None) -> int:
             if not actor:
                 raise RuntimeErrorBase("世界未指定 default_player_entity，請傳入 --actor")
             TerminalGateway(runtime, actor).run()
+        elif args.command == "serve":
+            runtime = WorldRuntime.from_package(args.package, args.event_log)
+            install_builtin_modules(runtime)
+            actor = args.actor or runtime.package["world"].get("default_player_entity")
+            if not actor:
+                raise RuntimeErrorBase("世界未指定 default_player_entity，請傳入 --actor")
+            WebGateway(runtime, actor, port=args.port).run()
         return 0
     except (CompileError, RuntimeErrorBase, OSError, ValueError) as exc:
         print(f"ERROR: {exc}")

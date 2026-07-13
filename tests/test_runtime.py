@@ -141,6 +141,14 @@ class PeaceCityQuestTests(unittest.TestCase):
         self.assertEqual(self.runtime.state.get(actor, "quest", "quest.find_work"), "completed")
         self.assertEqual(self.runtime.state.get(actor, "wallet", "currency"), 15)
 
+    def test_give_rejected_when_recipient_is_not_a_character(self) -> None:
+        actor = "player.newcomer"
+        self.runtime.submit(ActionIR(actor, "move", args={"direction": "north"}))  # -> slum_alley
+        self.runtime.submit(ActionIR(actor, "take", "item.firewood_bundle"))
+        give = self.runtime.submit(ActionIR(actor, "give", "item.firewood_bundle", args={"recipient": "door.checkpoint_gate"}))
+        self.assertEqual(give.status.value, "failed")
+        self.assertEqual(self.runtime.state.get("item.firewood_bundle", "inventory", "carrier"), actor)
+
     def test_give_rejected_when_recipient_not_in_room(self) -> None:
         actor = "player.newcomer"
         self.runtime.submit(ActionIR(actor, "move", args={"direction": "north"}))  # -> slum_alley

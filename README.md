@@ -1,6 +1,6 @@
 # CompilableWorld Runtime MVP v0.1.0
 
-這是一套非網頁、零第三方執行依賴的 Python 參考實作。它將 JSON／CSV Authoring Layer 編譯為 Runtime Package，再由 MSSP 模組化世界核心透過終端機執行。
+這是一套零第三方執行依賴的 Python 參考實作。它將 JSON／CSV Authoring Layer 編譯為 Runtime Package，再由 MSSP 模組化世界核心透過終端機或網頁介面執行——兩者共用同一套 Kernel／Action IR／Module Contract，只是不同的 UI Adapter（見「架構邊界」）。
 
 ## 快速開始
 
@@ -20,6 +20,16 @@ python3 -m pip install -e .
 cw-runtime compile examples/gray_crown --out build/gray_crown
 cw-runtime play build/gray_crown/world.package.json
 ```
+
+## 網頁介面
+
+零依賴（純 stdlib `http.server`，沒有 Flask/WebSocket，避免額外供應鏈風險）的可視化介面，與終端機共用同一個 Kernel／Intent Parser：
+
+```bash
+PYTHONPATH=src python3 -m compilableworld serve build/mingyun_zhiyu_peace_city/world.package.json --port 8765
+```
+
+開啟 `http://127.0.0.1:8765/`，可看到房間場景、可點擊的出口（含門鎖狀態）、物品拾取／放下／交付按鈕（交付對象下拉選單只列出場景內的角色/生物，不含門或其他非生命實體）、生命值條、貨幣、任務列表即時更新，以及一個保留給任意指令（`attack`／`say`／`unlock` 等）的輸入框。
 
 ## 測試
 
@@ -69,7 +79,7 @@ MSSP TMS Module
         ↓ StateDelta + EventIR
 Atomic Commit / Event Log / Projection
         ↓
-Terminal Gateway
+Terminal Gateway  |  Web Gateway (View Model -> HTML/JS)
 ```
 
 Python 版本用於凍結語言無關契約與快速驗證。後續 Rust 重寫應保持 Runtime Package、Action IR、State Delta、Event IR 與 Module Contract 的語義相容，而非逐行翻譯 Python 類別。
@@ -84,4 +94,5 @@ Python 版本用於凍結語言無關契約與快速驗證。後續 Rust 重寫�
 - Module Contract 的寫入範圍已由 Kernel 強制檢查；讀取範圍與 Action authority 的強制隔離留待 v0.2。
 - JSON Schema 與 CSV Schema 目前由程式內驗證器實作；v0.2 應外部化為正式 Schema 檔。
 - Replay 重放已提交 Delta；跨版本重放仍需 migration registry。
+- Web Gateway 是單一 actor、單一瀏覽器分頁假設下的 request/response API（無 WebSocket、無帳號/session），與已知的單程序/單世界限制一致；`/api/action` 與 `/api/state` 共用同一把 lock 序列化存取，避免併發提交造成的版本衝突，但不是為多人設計的。
 - （已修復，記錄供參考）CLI 曾在非 UTF-8 系統 locale（例如繁體中文 Windows 的 cp950）下對含中文標點的 `say` 輸入拋出編碼錯誤；`cli.py` 現在會在啟動時強制 stdin/stdout 為 UTF-8。

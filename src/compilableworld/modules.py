@@ -107,6 +107,8 @@ class InventoryModule(BaseModule):
             recipient = str(action.args.get("recipient", "")).strip()
             if not recipient or not runtime.registry.contains(recipient):
                 return TransitionResult(False, message="找不到交付對象")
+            if runtime.registry.get(recipient).entity_type not in {"character", "creature"}:
+                return TransitionResult(False, message="該對象無法接收物品")
             if runtime.state.get(item, "inventory", "carrier") != action.actor_id:
                 return TransitionResult(False, message="物品不在你的物品欄")
             if runtime.state.get(recipient, "position", "room") != room:
