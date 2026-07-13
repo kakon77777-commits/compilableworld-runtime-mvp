@@ -3,7 +3,8 @@ from __future__ import annotations
 import unittest
 
 from compilableworld.combat_formulas import (
-    Attributes, damage, hit_chance, hp_from_con, melee_ar, melee_dr, tier_effective_ar,
+    Attributes, action_economy, apply_damage, damage, hit_chance, hp_from_con,
+    initiative_value, melee_ar, melee_dr, tier_effective_ar,
 )
 
 
@@ -46,6 +47,30 @@ class CombatFormulaFidelityTests(unittest.TestCase):
     def test_two_tier_gap_amplifies_further(self) -> None:
         self.assertAlmostEqual(tier_effective_ar(100.0, attacker_tier=3, defender_tier=1), 200.0)
         self.assertAlmostEqual(tier_effective_ar(100.0, attacker_tier=1, defender_tier=3), 100.0 * 0.15 ** 2, places=4)
+
+    def test_initiative_value(self) -> None:
+        self.assertAlmostEqual(initiative_value(self.luftiya), 408 + 0.5 * 408)
+
+    def test_action_economy_matches_source_files_own_example(self) -> None:
+        # "IV比值3.2 -> round(3.2)=3,快的一方每次交鋒可行動3次,對方1次"
+        self.assertEqual(action_economy(320.0, 100.0), 3)
+        self.assertEqual(action_economy(100.0, 320.0), 1)
+
+    def test_action_economy_clamped_to_one_and_four(self) -> None:
+        self.assertEqual(action_economy(1.0, 1000.0), 1)
+        self.assertEqual(action_economy(1000.0, 1.0), 4)
+
+    def test_action_economy_below_1_5_ratio_is_simultaneous(self) -> None:
+        self.assertEqual(action_economy(149.0, 100.0), 1)
+        self.assertEqual(action_economy(100.0, 149.0), 1)
+
+    def test_apply_damage_absorbs_temp_hp_first(self) -> None:
+        health, temp_hp = apply_damage(current_health=80, current_temp_hp=15, dmg=5)
+        self.assertEqual((health, temp_hp), (80, 10))
+
+    def test_apply_damage_spillover(self) -> None:
+        health, temp_hp = apply_damage(current_health=80, current_temp_hp=15, dmg=25)
+        self.assertEqual((health, temp_hp), (70, 0))
 
 
 if __name__ == "__main__":

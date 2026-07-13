@@ -4,7 +4,10 @@ import random
 from dataclasses import dataclass
 from typing import Any
 
-from .combat_formulas import ATTRIBUTE_FLOOR, Attributes, damage, hit_chance, melee_ar, melee_dr, tier_effective_ar
+from .combat_formulas import (
+    ATTRIBUTE_FLOOR, Attributes, action_economy, apply_damage, damage, hit_chance,
+    initiative_value, melee_ar, melee_dr, tier_effective_ar,
+)
 from .kernel import WorldRuntime
 from .models import ActionIR, EventIR, ModuleContract, StateDelta, TransitionResult
 
@@ -230,59 +233,102 @@ class CombatModule(BaseModule):
                 return TransitionResult(True, deltas, events, f"攻擊造成 {dmg} 點傷害，{target_name} 反擊造成 {counter} 點傷害。")
         return TransitionResult(True, deltas, events, f"攻擊造成 {dmg} 點傷害。")
 
-    @staticmethod
-    def _apply_damage(target: str, dmg: int, runtime: WorldRuntime, source_module: str) -> tuple[list[StateDelta], int]:
-        """status_effects_framework.shield_buff: temp_HP 'takes damage before real
-        HP.' Only meaningful on the formula path — temp_hp is a magic-system
-        concept, and only attribute-authored entities have MP/FP to cast with."""
-        deltas: list[StateDelta] = []
-        temp_hp = runtime.state.get(target, "combat", "temp_hp", 0)
-        if temp_hp > 0:
-            absorbed = min(temp_hp, dmg)
-            deltas.append(StateDelta(target, "combat", "temp_hp", "set", temp_hp - absorbed, source_module=source_module))
-            dmg -= absorbed
-        health = runtime.state.get(target, "health", "current")
-        remaining = health
-        if dmg > 0:
-            remaining = max(0, health - dmg)
-            deltas.append(StateDelta(target, "health", "current", "set", remaining, source_module=source_module))
-        return deltas, remaining
-
     def _resolve_formula(self, action: ActionIR, runtime: WorldRuntime, target: str, target_name: str, health: int) -> TransitionResult:
+        """turn_and_initiative_structure: one submitted `attack` = one Exchange.
+        IV = AGI+0.5*DEX decides Actions_per_exchange per side (clamped 1-4);
+        the faster side's hits all resolve before the slower side's, which is
+        a real simplification of the source file's "interleaved" narration —
+        documented, not hidden. Attributes/tier don't change mid-exchange, so
+        AR/DR are computed once; only the hit-roll and damage-roll vary per
+        swing. health/temp_hp are threaded as local values across the loop
+        (nothing is committed mid-evaluate(), so re-reading runtime.state
+        between swings would see stale pre-exchange numbers)."""
         attacker_attrs = self._attributes_of(action.actor_id, runtime)
         defender_attrs = self._attributes_of(target, runtime)
         attacker_tier = runtime.state.get(action.actor_id, "combat", "phase_tier", 0)
         defender_tier = runtime.state.get(target, "combat", "phase_tier", 0)
-        ar_eff = tier_effective_ar(melee_ar(attacker_attrs), attacker_tier, defender_tier)
-        dr = melee_dr(defender_attrs)
-        if random.random() > hit_chance(ar_eff, dr):
-            event = self.event("combat.attack_missed", action, {"target": target}, target)
-            return TransitionResult(True, events=[event], message=f"你的攻擊被 {target_name} 閃開了。")
-        dmg = damage(ar_eff, dr)
-        deltas, remaining = self._apply_damage(target, dmg, runtime, self.contract.module_id)
-        events = [self.event("combat.damage_applied", action, {"target": target, "damage": dmg, "remaining": remaining}, target)]
-        if remaining == 0:
+        attacker_ar_eff = tier_effective_ar(melee_ar(attacker_attrs), attacker_tier, defender_tier)
+        defender_dr = melee_dr(defender_attrs)
+        attacker_actions = action_economy(initiative_value(attacker_attrs), initiative_value(defender_attrs))
+
+        deltas: list[StateDelta] = []
+        events: list[EventIR] = []
+        target_health, target_temp_hp = health, runtime.state.get(target, "combat", "temp_hp", 0)
+        hits = total_damage = 0
+        defeated = False
+        for _ in range(attacker_actions):
+            if random.random() > hit_chance(attacker_ar_eff, defender_dr):
+                events.append(self.event("combat.attack_missed", action, {"target": target}, target))
+                continue
+            dmg = damage(attacker_ar_eff, defender_dr)
+            target_health, target_temp_hp = apply_damage(target_health, target_temp_hp, dmg)
+            hits += 1
+            total_damage += dmg
+            events.append(self.event("combat.damage_applied", action, {"target": target, "damage": dmg, "remaining": target_health}, target))
+            if target_health == 0:
+                defeated = True
+                break
+        if hits:
+            deltas.append(StateDelta(target, "health", "current", "set", target_health, source_module=self.contract.module_id))
+        if target_temp_hp != runtime.state.get(target, "combat", "temp_hp", 0):
+            deltas.append(StateDelta(target, "combat", "temp_hp", "set", target_temp_hp, source_module=self.contract.module_id))
+
+        exchange_msg = self._exchange_message(attacker_actions, hits, total_damage, target_name)
+        if defeated:
             deltas.append(StateDelta(target, "status", "alive", "set", False, source_module=self.contract.module_id))
             events.append(self.event("combat.actor_defeated", action, {"target": target}, target))
-            return TransitionResult(True, deltas, events, f"攻擊造成 {dmg} 點傷害，{target_name} 倒下了。")
-        if "combatant" not in runtime.registry.get(target).components:
-            return TransitionResult(True, deltas, events, f"攻擊造成 {dmg} 點傷害。")
+            return TransitionResult(True, deltas, events, f"{exchange_msg}，{target_name} 倒下了。")
+        if hits == 0 or "combatant" not in runtime.registry.get(target).components:
+            return TransitionResult(True, deltas, events, f"{exchange_msg}。")
         actor_health = runtime.state.get(action.actor_id, "health", "current")
         if actor_health is None or actor_health <= 0:
-            return TransitionResult(True, deltas, events, f"攻擊造成 {dmg} 點傷害。")
+            return TransitionResult(True, deltas, events, f"{exchange_msg}。")
+
         counter_ar_eff = tier_effective_ar(melee_ar(defender_attrs), defender_tier, attacker_tier)
-        counter_dr = melee_dr(attacker_attrs)
-        if random.random() > hit_chance(counter_ar_eff, counter_dr):
-            events.append(self.event("combat.attack_missed", action, {"target": action.actor_id}, action.actor_id))
-            return TransitionResult(True, deltas, events, f"攻擊造成 {dmg} 點傷害，{target_name} 的反擊撲了空。")
-        counter_dmg = damage(counter_ar_eff, counter_dr)
-        counter_deltas, actor_remaining = self._apply_damage(action.actor_id, counter_dmg, runtime, self.contract.module_id)
-        deltas.extend(counter_deltas)
-        events.append(self.event("combat.damage_applied", action, {"target": action.actor_id, "damage": counter_dmg, "remaining": actor_remaining}, action.actor_id))
-        if actor_remaining == 0:
+        attacker_dr = melee_dr(attacker_attrs)
+        defender_actions = action_economy(initiative_value(defender_attrs), initiative_value(attacker_attrs))
+        actor_temp_hp = runtime.state.get(action.actor_id, "combat", "temp_hp", 0)
+        counter_hits = counter_damage_total = 0
+        actor_defeated = False
+        for _ in range(defender_actions):
+            if random.random() > hit_chance(counter_ar_eff, attacker_dr):
+                events.append(self.event("combat.attack_missed", action, {"target": action.actor_id}, action.actor_id))
+                continue
+            counter_dmg = damage(counter_ar_eff, attacker_dr)
+            actor_health, actor_temp_hp = apply_damage(actor_health, actor_temp_hp, counter_dmg)
+            counter_hits += 1
+            counter_damage_total += counter_dmg
+            events.append(self.event("combat.damage_applied", action, {"target": action.actor_id, "damage": counter_dmg, "remaining": actor_health}, action.actor_id))
+            if actor_health == 0:
+                actor_defeated = True
+                break
+        if counter_hits:
+            deltas.append(StateDelta(action.actor_id, "health", "current", "set", actor_health, source_module=self.contract.module_id))
+        if actor_temp_hp != runtime.state.get(action.actor_id, "combat", "temp_hp", 0):
+            deltas.append(StateDelta(action.actor_id, "combat", "temp_hp", "set", actor_temp_hp, source_module=self.contract.module_id))
+        if actor_defeated:
             deltas.append(StateDelta(action.actor_id, "status", "alive", "set", False, source_module=self.contract.module_id))
             events.append(self.event("combat.actor_defeated", action, {"target": action.actor_id}, action.actor_id))
-        return TransitionResult(True, deltas, events, f"攻擊造成 {dmg} 點傷害，{target_name} 反擊造成 {counter_dmg} 點傷害。")
+
+        counter_msg = self._counter_message(defender_actions, counter_hits, counter_damage_total, target_name)
+        tail = "，你倒下了。" if actor_defeated else "。"
+        return TransitionResult(True, deltas, events, f"{exchange_msg}，{counter_msg}{tail}")
+
+    @staticmethod
+    def _exchange_message(actions: int, hits: int, total_damage: int, target_name: str) -> str:
+        if hits == 0:
+            return f"你揮出 {actions} 次攻擊，全部被 {target_name} 閃開了" if actions > 1 else f"你的攻擊被 {target_name} 閃開了"
+        if actions == 1:
+            return f"攻擊造成 {total_damage} 點傷害"
+        return f"你連續攻擊 {actions} 次、命中 {hits} 次，共造成 {total_damage} 點傷害"
+
+    @staticmethod
+    def _counter_message(actions: int, hits: int, total_damage: int, target_name: str) -> str:
+        if hits == 0:
+            return f"{target_name} 的反擊全數落空" if actions > 1 else f"{target_name} 的反擊撲了空"
+        if actions == 1:
+            return f"{target_name} 反擊造成 {total_damage} 點傷害"
+        return f"{target_name} 反擊 {actions} 次、命中 {hits} 次，共造成 {total_damage} 點傷害"
 
 
 class MagicModule(BaseModule):

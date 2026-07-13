@@ -300,23 +300,23 @@ class MagicModuleTests(unittest.TestCase):
         self.assertEqual(result.status.value, "failed")
         self.assertIn("覺醒", result.message)
 
-    def test_temp_hp_absorbs_damage_before_real_health(self) -> None:
+    def test_shield_absorbs_before_real_health_in_a_real_exchange(self) -> None:
+        """Pure-function absorb/spillover math is already regression-tested
+        against the source file's own constants in test_combat_formulas.py;
+        this proves the mechanic is actually wired into a real Kernel.submit()
+        combat exchange, not just correct in isolation. Woerkan's real counter
+        damage (113) exceeds the 20-point shield, so this is the spillover
+        case: exactly 20 comes off temp_hp, the remaining 93 hits real health
+        -- not the full 113, proving the shield did something even though it
+        can't fully save a floor-level newcomer from a tier-1 commander."""
         actor = "player.newcomer"
-        self.runtime.state.seed(actor, "combat", "temp_hp", 15)
-        deltas, remaining = CombatModule._apply_damage(actor, 5, self.runtime, "test")
-        self.assertEqual(len(deltas), 1)
-        self.assertEqual(deltas[0].namespace, "combat")
-        self.assertEqual(deltas[0].value, 10)  # 15 - 5, health untouched
-        self.assertEqual(remaining, self.runtime.state.get(actor, "health", "current"))
-
-    def test_temp_hp_spillover_hits_real_health_once_exhausted(self) -> None:
-        actor = "player.newcomer"
-        self.runtime.state.seed(actor, "combat", "temp_hp", 15)
-        health_before = self.runtime.state.get(actor, "health", "current")
-        deltas, remaining = CombatModule._apply_damage(actor, 25, self.runtime, "test")
-        self.assertEqual(len(deltas), 2)
-        self.assertEqual(deltas[0].value, 0)  # shield fully exhausted
-        self.assertEqual(remaining, health_before - 10)  # 25 - 15 spills through
+        self.runtime.submit(ActionIR(actor, "cast", args={"spell": "護盾術"}))
+        self.assertEqual(self.runtime.state.get(actor, "combat", "temp_hp"), 20)
+        self.runtime.state.seed(actor, "position", "room", "room.north_garrison")
+        with patch("compilableworld.modules.random.random", return_value=0.0):
+            self.runtime.submit(ActionIR(actor, "attack", "npc.woerkan"))
+        self.assertEqual(self.runtime.state.get(actor, "combat", "temp_hp"), 0)
+        self.assertEqual(self.runtime.state.get(actor, "health", "current"), 0)  # 80 - (113 - 20) clamped at 0
 
 
 class FormulaCombatIntegrationTests(unittest.TestCase):
@@ -361,6 +361,41 @@ class FormulaCombatIntegrationTests(unittest.TestCase):
         self.assertEqual(receipt.message, "攻擊造成 83 點傷害，格洛森 反擊造成 7 點傷害。")
         self.assertEqual(runtime.state.get("npc.geluosen", "health", "current"), 5440 - 83)
         self.assertEqual(runtime.state.get("npc.luftiya", "health", "current"), 7248 - 7)
+
+    def test_fast_attacker_gets_multiple_actions_per_exchange(self) -> None:
+        """IV ratio 450/75=6 (clamped to 4) for the attacker; 75/450=0.17 (clamped
+        to 1) for the defender -- a real, non-trivial Exchange, not the
+        actions=1 case every other test happens to land on."""
+        package = {
+            "format": "compilableworld.runtime-package/v0.1",
+            "manifest": {"world_id": "exchange_check", "world_version": "0.1.0", "schema_version": 1, "namespace": "test", "runtime_version": "0.1.0", "modules": ["combat.basic"]},
+            "world": {}, "rooms": [], "exits": [], "quests": [],
+            "entities": [
+                {"entity_id": "npc.swift", "entity_type": "character", "name": "疾風", "components": ["combatant"], "metadata": {}},
+                {"entity_id": "npc.tank", "entity_type": "character", "name": "重甲", "components": ["combatant"], "metadata": {}},
+            ],
+            "initial_state": [
+                {"owner": "npc.swift", "namespace": "position", "key": "room", "value": "room.arena", "version": 0},
+                {"owner": "npc.tank", "namespace": "position", "key": "room", "value": "room.arena", "version": 0},
+                {"owner": "npc.swift", "namespace": "health", "key": "current", "value": 800, "version": 0},
+                {"owner": "npc.swift", "namespace": "health", "key": "max", "value": 800, "version": 0},
+                {"owner": "npc.tank", "namespace": "health", "key": "current", "value": 1600, "version": 0},
+                {"owner": "npc.tank", "namespace": "health", "key": "max", "value": 1600, "version": 0},
+                *self._attribute_states("npc.swift", {"str": 100, "con": 100, "mag": 10, "agi": 300, "dex": 300, "phase_tier": 0}),
+                *self._attribute_states("npc.tank", {"str": 10, "con": 200, "mag": 10, "agi": 50, "dex": 50, "phase_tier": 0}),
+            ],
+            "source_checksums": {},
+        }
+        runtime = WorldRuntime(package)
+        install_builtin_modules(runtime)
+        with patch("compilableworld.modules.random.random", return_value=0.0):
+            receipt = runtime.submit(ActionIR("npc.swift", "attack", "npc.tank"))
+        self.assertEqual(receipt.status.value, "completed")
+        self.assertIn("連續攻擊 4 次", receipt.message)
+        self.assertIn("命中 4 次", receipt.message)
+        self.assertIn("共造成 32 點傷害", receipt.message)  # 4 hits x 8 damage/hit
+        self.assertEqual(runtime.state.get("npc.tank", "health", "current"), 1600 - 32)
+        self.assertEqual(runtime.state.get("npc.swift", "health", "current"), 800 - 1)  # defender: 1 action, 1 dmg
 
 
 if __name__ == "__main__":

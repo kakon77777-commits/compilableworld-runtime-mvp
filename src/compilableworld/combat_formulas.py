@@ -60,3 +60,30 @@ def damage(ar_effective: float, dr: float) -> int:
     raw = round((ar_effective - dr * 0.5) * 0.1)
     scratch_floor = max(1, round(ar_effective * 0.05))
     return max(raw, scratch_floor)
+
+
+def initiative_value(attrs: Attributes) -> float:
+    """IV = AGI + 0.5*DEX (turn_and_initiative_structure.initiative_value_formula)."""
+    return attrs.agi + 0.5 * attrs.dex
+
+
+def action_economy(own_iv: float, opponent_iv: float) -> int:
+    """Actions_per_exchange = clamp(round(own_IV / opponent_IV), 1, 4) — the
+    faster side gets extra actions within one Exchange; the slower side is
+    floored at 1 (always gets to act, never fully locked out). Source file's
+    own worked example: IV ratio 3.2 -> 3 actions."""
+    return max(1, min(4, round(own_iv / opponent_iv)))
+
+
+def apply_damage(current_health: int, current_temp_hp: int, dmg: int) -> tuple[int, int]:
+    """Pure: status_effects_framework.shield_buff's temp_HP absorbs before
+    real health. Returns (new_health, new_temp_hp). No state/runtime
+    coupling deliberately -- a multi-action Exchange needs to thread this
+    across several hits before anything is committed, so it can't read
+    "current" from the Kernel mid-loop (nothing's committed yet)."""
+    if current_temp_hp > 0:
+        absorbed = min(current_temp_hp, dmg)
+        current_temp_hp -= absorbed
+        dmg -= absorbed
+    new_health = max(0, current_health - dmg) if dmg > 0 else current_health
+    return new_health, current_temp_hp
