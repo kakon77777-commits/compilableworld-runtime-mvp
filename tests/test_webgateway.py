@@ -57,7 +57,7 @@ class WebGatewayTests(unittest.TestCase):
     def test_state_endpoint_reflects_current_room(self) -> None:
         view = self._get("/api/state")
         self.assertEqual(view["room"]["id"], "room.registration_office")
-        self.assertEqual(view["health"]["current"], 20)
+        self.assertEqual(view["health"]["current"], 80)  # CON=10 floor attribute -> HP=CON*8
         self.assertEqual(view["wallet"]["currency"], 0)
 
     def test_action_endpoint_moves_and_updates_view(self) -> None:

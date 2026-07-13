@@ -3,3 +3,4 @@ exit.gate_alley,room.registration_office,room.slum_alley,north,true,,true,false,
 exit.alley_yard,room.slum_alley,room.labor_yard,west,true,,true,false,
 exit.alley_sewers,room.slum_alley,room.slum_sewers,down,true,,true,false,
 exit.alley_checkpoint,room.slum_alley,room.checkpoint_north_gate,north,true,door.checkpoint_gate,false,true,item.provisional_id_tag
+exit.checkpoint_garrison,room.checkpoint_north_gate,room.north_garrison,north,true,,,,

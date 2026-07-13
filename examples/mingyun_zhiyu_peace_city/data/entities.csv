@@ -1,7 +1,8 @@
-entity_id,entity_type,name,room,health,components,provenance
-player.newcomer,character,新來者,room.registration_office,20,position|health|inventory|quest,human_authored
-npc.registration_clerk,character,老登記官,room.registration_office,,position,explicit_canon
-npc.foreman_laotie,character,工頭·老鐵,room.labor_yard,,position,explicit_canon
-npc.checkpoint_guard,character,北境關卡守衛,room.checkpoint_north_gate,,position,gameplay_adaptation
-creature.sewer_rat,creature,下水道巨鼠,room.slum_sewers,8,position|health|combatant,explicit_canon
-door.checkpoint_gate,door,北境關卡鐵柵欄,room.slum_alley,,position|door,gameplay_adaptation
+entity_id,entity_type,name,room,health,components,provenance,str,con,mag,agi,dex,phase_tier
+player.newcomer,character,新來者,room.registration_office,,position|health|inventory|quest,human_authored,10,10,10,10,10,0
+npc.registration_clerk,character,老登記官,room.registration_office,,position,explicit_canon,,,,,,
+npc.foreman_laotie,character,工頭·老鐵,room.labor_yard,,position,explicit_canon,,,,,,
+npc.checkpoint_guard,character,北境關卡守衛,room.checkpoint_north_gate,,position,gameplay_adaptation,,,,,,
+creature.sewer_rat,creature,下水道巨鼠,room.slum_sewers,8,position|health|combatant,explicit_canon,,,,,,
+door.checkpoint_gate,door,北境關卡鐵柵欄,room.slum_alley,,position|door,gameplay_adaptation,,,,,,
+npc.woerkan,character,沃爾坎·鐵壁,room.north_garrison,,position|health|combatant,draft_ai_generated,909,909,410,410,410,1

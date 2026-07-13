@@ -64,11 +64,11 @@ def _validate_attributes(row: dict[str, str]) -> None:
     """The five combat attributes (worlds/mingyun_zhiyu/data/drafts/combat_resolution_system.json)
     are all-or-nothing: a half-authored set would silently mix real and
     floor-default values in a way that's easy to author by accident."""
-    present = [attr for attr in ATTRIBUTE_COLUMNS if row.get(attr, "").strip()]
+    present = [attr for attr in ATTRIBUTE_COLUMNS if (row.get(attr) or "").strip()]
     if present and len(present) != len(ATTRIBUTE_COLUMNS):
         missing = [attr for attr in ATTRIBUTE_COLUMNS if attr not in present]
         raise CompileError(f"實體 {row.get('entity_id')} 只填了部分戰鬥屬性，缺少: {', '.join(missing)}")
-    if present and row.get("health", "").strip():
+    if present and (row.get("health") or "").strip():
         raise CompileError(f"實體 {row.get('entity_id')} 同時有 health 與五維屬性 — HP 由 CON×8 推導，不能兩者都填")
 
 
@@ -172,10 +172,10 @@ def compile_world(source_dir: str | Path, output_dir: str | Path) -> Path:
             "metadata": {"provenance": row.get("provenance", "human_authored")},
         })
         initial_state.append(_state(row["entity_id"], "position", "room", row["room"]))
-        if row.get("con", "").strip():
+        if (row.get("con") or "").strip():
             for attr in ATTRIBUTE_COLUMNS:
                 initial_state.append(_state(row["entity_id"], "combat", attr, int(row[attr])))
-            if row.get("phase_tier", "").strip():
+            if (row.get("phase_tier") or "").strip():
                 initial_state.append(_state(row["entity_id"], "combat", "phase_tier", int(row["phase_tier"])))
             health = int(row["con"]) * 8
             initial_state.extend([
@@ -183,7 +183,7 @@ def compile_world(source_dir: str | Path, output_dir: str | Path) -> Path:
                 _state(row["entity_id"], "health", "max", health),
                 _state(row["entity_id"], "status", "alive", True),
             ])
-        elif row.get("health", "").strip():
+        elif (row.get("health") or "").strip():
             health = int(row["health"])
             initial_state.extend([
                 _state(row["entity_id"], "health", "current", health),

@@ -243,6 +243,22 @@ class PeaceCityQuestTests(unittest.TestCase):
         self.assertEqual(action.args["recipient"], "npc.foreman_laotie")
         self.assertEqual(self.runtime.submit(action).status.value, "completed")
 
+    def test_floor_level_newcomer_cannot_effectively_touch_tier1_woerkan(self) -> None:
+        """npc.woerkan carries his real combat_resolution_system.json stats
+        (tier1); player.newcomer sits at the design's own floor-attribute
+        baseline (tier0). The tier gate should make this a near-impossible
+        fight, not a normal one -- this is the formula path actually live
+        in playable content, not just the synthetic FormulaCombatIntegrationTests."""
+        actor = "player.newcomer"
+        self.assertEqual(self.runtime.state.get("npc.woerkan", "health", "current"), 7272)
+        self.assertEqual(self.runtime.state.get(actor, "health", "current"), 80)
+        self.runtime.state.seed(actor, "position", "room", "room.north_garrison")  # skip the traversal, already covered elsewhere
+        with patch("compilableworld.modules.random.random", return_value=0.05):
+            missed = self.runtime.submit(ActionIR(actor, "attack", "npc.woerkan"))
+        self.assertEqual(missed.status.value, "completed")
+        self.assertIn("閃開", missed.message)
+        self.assertEqual(self.runtime.state.get("npc.woerkan", "health", "current"), 7272)
+
 
 class FormulaCombatIntegrationTests(unittest.TestCase):
     """Proves combat_formulas.py's canon math is actually reachable through

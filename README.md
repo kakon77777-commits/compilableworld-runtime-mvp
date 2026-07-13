@@ -40,17 +40,24 @@ PYTHONPATH=src python3 -m unittest discover -s tests -v
 ## 範例世界
 
 - `examples/gray_crown` — 原始參考範例（示範資料）。
-- `examples/mingyun_zhiyu_peace_city` — 真實內容切片，改編自 Neo.K 的《命運之欲》小說世界觀（透過既有的 `worlds/mingyun_zhiyu_peace_city/world-ir.yaml`，見 CompilableWorld-Evennia-Prototype 姊妹 repo；世界觀 canon 資料庫本身在 `worlds/mingyun_zhiyu/data/` 已擴充到 16 城/48 具名角色/公理/魔法系統等規模，本切片仍只用了和平之城賤民區這一小塊，其餘 canon 尚待未來擴充），涵蓋全部 8 個模組：移動、對話、上鎖的門（需攜帶鑰匙道具解鎖）、戰鬥、拾取物品、**交付物品給 NPC 以事件驅動完成任務並發放報酬**、任務列表。實際跑過完整流程驗證過。
+- `examples/mingyun_zhiyu_peace_city` — 真實內容切片，改編自 Neo.K 的《命運之欲》小說世界觀（透過既有的 `worlds/mingyun_zhiyu_peace_city/world-ir.yaml`，見 CompilableWorld-Evennia-Prototype 姊妹 repo；世界觀 canon 資料庫本身在 `worlds/mingyun_zhiyu/data/` 已擴充到 16 城/48 具名角色/公理/魔法系統等規模，本切片仍只用了和平之城賤民區這一小塊，其餘 canon 尚待未來擴充），涵蓋全部 8 個模組：移動、對話、上鎖的門（需攜帶鑰匙道具解鎖）、戰鬥、拾取物品、**交付物品給 NPC 以事件驅動完成任務並發放報酬**、任務列表。實際跑過完整流程驗證過。北境關卡再往北是 `room.north_garrison`（北境軍營），駐守著具名 canon 角色**沃爾坎·鐵壁**（`worlds/mingyun_zhiyu/data/drafts/characters_peace_city_subtop50.csv` 的 No.13，數值取自 `combat_resolution_system.json` 自己的驗算範例，非另行編造）——玩家（新來者，地板值屬性、tier0）與他交手會實際觸發公式判定路徑，親身體驗「突破門檻」機制：命中率被壓到約 0.2%，20 次攻擊全部落空是預期結果，不是 bug。
 
-在 CLI 中依序輸入（以 `examples/mingyun_zhiyu_peace_city` 為例，完成「找份差事」任務）：
+在 CLI 中依序輸入（以 `examples/mingyun_zhiyu_peace_city` 為例，完成「找份差事」任務，並可繼續北上見識沃爾坎）：
 
 ```text
+take 臨時身份牌
 n
 take item.firewood_bundle
 w
 give item.firewood_bundle npc.foreman_laotie
 quests
 status
+e
+unlock 北境關卡鐵柵欄
+open 北境關卡鐵柵欄
+n
+n
+attack 沃爾坎
 ```
 
 或以 `examples/gray_crown` 驗證上鎖門與抵達型任務：
