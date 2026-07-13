@@ -244,5 +244,49 @@ class PeaceCityQuestTests(unittest.TestCase):
         self.assertEqual(self.runtime.submit(action).status.value, "completed")
 
 
+class FormulaCombatIntegrationTests(unittest.TestCase):
+    """Proves combat_formulas.py's canon math is actually reachable through
+    Kernel -> CombatModule -> submit(), not just correct in isolation
+    (see tests/test_combat_formulas.py for the pure-function fidelity tests)."""
+
+    @staticmethod
+    def _attribute_states(owner: str, attrs: dict) -> list[dict]:
+        return [{"owner": owner, "namespace": "combat", "key": k, "value": v, "version": 0} for k, v in attrs.items()]
+
+    def _make_runtime(self) -> WorldRuntime:
+        package = {
+            "format": "compilableworld.runtime-package/v0.1",
+            "manifest": {"world_id": "formula_check", "world_version": "0.1.0", "schema_version": 1, "namespace": "test", "runtime_version": "0.1.0", "modules": ["combat.basic"]},
+            "world": {}, "rooms": [], "exits": [], "quests": [],
+            "entities": [
+                {"entity_id": "npc.luftiya", "entity_type": "character", "name": "露芙緹雅", "components": ["combatant"], "metadata": {}},
+                {"entity_id": "npc.geluosen", "entity_type": "character", "name": "格洛森", "components": ["combatant"], "metadata": {}},
+            ],
+            "initial_state": [
+                {"owner": "npc.luftiya", "namespace": "position", "key": "room", "value": "room.arena", "version": 0},
+                {"owner": "npc.geluosen", "namespace": "position", "key": "room", "value": "room.arena", "version": 0},
+                {"owner": "npc.luftiya", "namespace": "health", "key": "current", "value": 7248, "version": 0},
+                {"owner": "npc.luftiya", "namespace": "health", "key": "max", "value": 7248, "version": 0},
+                {"owner": "npc.geluosen", "namespace": "health", "key": "current", "value": 5440, "version": 0},
+                {"owner": "npc.geluosen", "namespace": "health", "key": "max", "value": 5440, "version": 0},
+                *self._attribute_states("npc.luftiya", {"str": 906, "con": 906, "mag": 408, "agi": 408, "dex": 408, "phase_tier": 2}),
+                *self._attribute_states("npc.geluosen", {"str": 1106, "con": 680, "mag": 436, "agi": 436, "dex": 436, "phase_tier": 1}),
+            ],
+            "source_checksums": {},
+        }
+        runtime = WorldRuntime(package)
+        install_builtin_modules(runtime)
+        return runtime
+
+    def test_formula_path_matches_canon_worked_example(self) -> None:
+        runtime = self._make_runtime()
+        with patch("compilableworld.modules.random.random", return_value=0.0):
+            receipt = runtime.submit(ActionIR("npc.luftiya", "attack", "npc.geluosen"))
+        self.assertEqual(receipt.status.value, "completed")
+        self.assertEqual(receipt.message, "攻擊造成 83 點傷害，格洛森 反擊造成 7 點傷害。")
+        self.assertEqual(runtime.state.get("npc.geluosen", "health", "current"), 5440 - 83)
+        self.assertEqual(runtime.state.get("npc.luftiya", "health", "current"), 7248 - 7)
+
+
 if __name__ == "__main__":
     unittest.main()

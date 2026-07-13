@@ -10,6 +10,7 @@ from typing import Any
 
 
 ID_RE = re.compile(r"^[a-z][a-z0-9_.-]*$")
+ATTRIBUTE_COLUMNS = ("str", "con", "mag", "agi", "dex")
 
 
 class CompileError(ValueError):
@@ -59,6 +60,18 @@ def _required(row: dict[str, str], fields: list[str], source: str) -> None:
         raise CompileError(f"{source} 缺少必填欄位: {', '.join(missing)}")
 
 
+def _validate_attributes(row: dict[str, str]) -> None:
+    """The five combat attributes (worlds/mingyun_zhiyu/data/drafts/combat_resolution_system.json)
+    are all-or-nothing: a half-authored set would silently mix real and
+    floor-default values in a way that's easy to author by accident."""
+    present = [attr for attr in ATTRIBUTE_COLUMNS if row.get(attr, "").strip()]
+    if present and len(present) != len(ATTRIBUTE_COLUMNS):
+        missing = [attr for attr in ATTRIBUTE_COLUMNS if attr not in present]
+        raise CompileError(f"實體 {row.get('entity_id')} 只填了部分戰鬥屬性，缺少: {', '.join(missing)}")
+    if present and row.get("health", "").strip():
+        raise CompileError(f"實體 {row.get('entity_id')} 同時有 health 與五維屬性 — HP 由 CON×8 推導，不能兩者都填")
+
+
 def _unique(rows: list[dict[str, Any]], key: str, source: str) -> set[str]:
     ids: set[str] = set()
     for row in rows:
@@ -104,6 +117,7 @@ def compile_world(source_dir: str | Path, output_dir: str | Path) -> Path:
         _required(row, ["exit_id", "from_room", "to_room", "direction"], "exits.csv")
     for row in entities:
         _required(row, ["entity_id", "entity_type", "name", "room"], "entities.csv")
+        _validate_attributes(row)
     for row in items:
         _required(row, ["item_id", "name", "room", "portable"], "items.csv")
 
@@ -158,7 +172,18 @@ def compile_world(source_dir: str | Path, output_dir: str | Path) -> Path:
             "metadata": {"provenance": row.get("provenance", "human_authored")},
         })
         initial_state.append(_state(row["entity_id"], "position", "room", row["room"]))
-        if row.get("health", "").strip():
+        if row.get("con", "").strip():
+            for attr in ATTRIBUTE_COLUMNS:
+                initial_state.append(_state(row["entity_id"], "combat", attr, int(row[attr])))
+            if row.get("phase_tier", "").strip():
+                initial_state.append(_state(row["entity_id"], "combat", "phase_tier", int(row["phase_tier"])))
+            health = int(row["con"]) * 8
+            initial_state.extend([
+                _state(row["entity_id"], "health", "current", health),
+                _state(row["entity_id"], "health", "max", health),
+                _state(row["entity_id"], "status", "alive", True),
+            ])
+        elif row.get("health", "").strip():
             health = int(row["health"])
             initial_state.extend([
                 _state(row["entity_id"], "health", "current", health),

@@ -4,6 +4,7 @@ import random
 from dataclasses import dataclass
 from typing import Any
 
+from .combat_formulas import ATTRIBUTE_FLOOR, Attributes, damage, hit_chance, melee_ar, melee_dr, tier_effective_ar
 from .kernel import WorldRuntime
 from .models import ActionIR, EventIR, ModuleContract, StateDelta, TransitionResult
 
@@ -141,14 +142,23 @@ class HealthModule(BaseModule):
 
 
 class CombatModule(BaseModule):
-    """Staged hit-chance -> damage-range resolver, replacing v0.1's guaranteed-hit
-    fixed-5-damage attack. Modeled on a real, battle-tested precedent (mhsj's
-    FluffOS combat: AP/DP roll to resolve a miss before damage is computed at
-    all) rather than invented from nothing — see docs research notes in
-    project memory. Deliberately NOT a full stat system (no STR/weapon/armor
-    columns exist in the Authoring Layer yet, per AGENTS.md #7 that would need
-    schema changes first) — just the structural idea: an attack can fail
-    outright, and a surviving "combatant" can fail its retaliation too."""
+    """Two resolvers, chosen per-fight, never mixed mid-fight:
+
+    1. Formula path — used only when BOTH combatants have authored the five
+       combat attributes (str/con/mag/agi/dex) in entities.csv. Uses
+       combat_formulas.py, which reproduces (regression-tested, see
+       tests/test_combat_formulas.py) the exact ratio-based hit/damage/tier-
+       gate math from worlds/mingyun_zhiyu/data/drafts/combat_resolution_system.json
+       — Neo's own approved canon combat design, not an approximation of it.
+    2. Simple path — the v0.2 fallback (85% hit chance, 3-7 flat damage
+       range) for entities with no authored attributes. Deliberately kept
+       rather than defaulting everyone to the attribute floor (10): the real
+       formula's constants (HP=CONx8, damage x0.1 scaling) are calibrated for
+       canon characters with hundreds of attribute points and produce absurdly
+       grindy fights at floor-level (10-20) numbers — a real, verified finding
+       from actually running the math, not a guess. Applying the formula path
+       to starter-zone content needs Neo's input on how that content should be
+       scaled, so it isn't forced here."""
 
     HIT_CHANCE = 0.85
     DAMAGE_RANGE = (3, 7)
@@ -159,7 +169,7 @@ class CombatModule(BaseModule):
         super().__init__(ModuleContract(
             "combat.basic", "0.1.0", "TMS", ["attack"],
             ["combat.damage_applied", "combat.actor_defeated", "combat.attack_missed"],
-            ["position.*", "health.*", "status.*"], ["health.*", "status.*"], ["entity", "state", "action", "event"],
+            ["position.*", "health.*", "status.*", "combat.*"], ["health.*", "status.*"], ["entity", "state", "action", "event"],
         ))
 
     def evaluate(self, action: ActionIR, runtime: WorldRuntime) -> TransitionResult:
@@ -174,23 +184,42 @@ class CombatModule(BaseModule):
         if health is None:
             return TransitionResult(False, message="目標沒有生命元件")
         target_name = runtime.registry.get(target).name
+        if self._has_attributes(action.actor_id, runtime) and self._has_attributes(target, runtime):
+            return self._resolve_formula(action, runtime, target, target_name, health)
+        return self._resolve_simple(action, runtime, target, target_name, health)
+
+    @staticmethod
+    def _has_attributes(entity_id: str, runtime: WorldRuntime) -> bool:
+        return runtime.state.version(entity_id, "combat", "con") >= 0
+
+    @staticmethod
+    def _attributes_of(entity_id: str, runtime: WorldRuntime) -> Attributes:
+        return Attributes(
+            str_=runtime.state.get(entity_id, "combat", "str", ATTRIBUTE_FLOOR),
+            con=runtime.state.get(entity_id, "combat", "con", ATTRIBUTE_FLOOR),
+            mag=runtime.state.get(entity_id, "combat", "mag", ATTRIBUTE_FLOOR),
+            agi=runtime.state.get(entity_id, "combat", "agi", ATTRIBUTE_FLOOR),
+            dex=runtime.state.get(entity_id, "combat", "dex", ATTRIBUTE_FLOOR),
+        )
+
+    def _resolve_simple(self, action: ActionIR, runtime: WorldRuntime, target: str, target_name: str, health: int) -> TransitionResult:
         if random.random() > self.HIT_CHANCE:
             event = self.event("combat.attack_missed", action, {"target": target}, target)
             return TransitionResult(True, events=[event], message=f"你的攻擊被 {target_name} 閃開了。")
-        damage = random.randint(*self.DAMAGE_RANGE)
-        remaining = max(0, health - damage)
+        dmg = random.randint(*self.DAMAGE_RANGE)
+        remaining = max(0, health - dmg)
         deltas = [StateDelta(target, "health", "current", "set", remaining, source_module=self.contract.module_id)]
-        events = [self.event("combat.damage_applied", action, {"target": target, "damage": damage, "remaining": remaining}, target)]
+        events = [self.event("combat.damage_applied", action, {"target": target, "damage": dmg, "remaining": remaining}, target)]
         if remaining == 0:
             deltas.append(StateDelta(target, "status", "alive", "set", False, source_module=self.contract.module_id))
             events.append(self.event("combat.actor_defeated", action, {"target": target}, target))
-            return TransitionResult(True, deltas, events, f"攻擊造成 {damage} 點傷害，{target_name} 倒下了。")
+            return TransitionResult(True, deltas, events, f"攻擊造成 {dmg} 點傷害，{target_name} 倒下了。")
         if "combatant" in runtime.registry.get(target).components:
             actor_health = runtime.state.get(action.actor_id, "health", "current")
             if actor_health is not None and actor_health > 0:
                 if random.random() > self.COUNTER_HIT_CHANCE:
                     events.append(self.event("combat.attack_missed", action, {"target": action.actor_id}, action.actor_id))
-                    return TransitionResult(True, deltas, events, f"攻擊造成 {damage} 點傷害，{target_name} 的反擊撲了空。")
+                    return TransitionResult(True, deltas, events, f"攻擊造成 {dmg} 點傷害，{target_name} 的反擊撲了空。")
                 counter = random.randint(*self.COUNTER_DAMAGE_RANGE)
                 actor_remaining = max(0, actor_health - counter)
                 deltas.append(StateDelta(action.actor_id, "health", "current", "set", actor_remaining, source_module=self.contract.module_id))
@@ -198,8 +227,45 @@ class CombatModule(BaseModule):
                 if actor_remaining == 0:
                     deltas.append(StateDelta(action.actor_id, "status", "alive", "set", False, source_module=self.contract.module_id))
                     events.append(self.event("combat.actor_defeated", action, {"target": action.actor_id}, action.actor_id))
-                return TransitionResult(True, deltas, events, f"攻擊造成 {damage} 點傷害，{target_name} 反擊造成 {counter} 點傷害。")
-        return TransitionResult(True, deltas, events, f"攻擊造成 {damage} 點傷害。")
+                return TransitionResult(True, deltas, events, f"攻擊造成 {dmg} 點傷害，{target_name} 反擊造成 {counter} 點傷害。")
+        return TransitionResult(True, deltas, events, f"攻擊造成 {dmg} 點傷害。")
+
+    def _resolve_formula(self, action: ActionIR, runtime: WorldRuntime, target: str, target_name: str, health: int) -> TransitionResult:
+        attacker_attrs = self._attributes_of(action.actor_id, runtime)
+        defender_attrs = self._attributes_of(target, runtime)
+        attacker_tier = runtime.state.get(action.actor_id, "combat", "phase_tier", 0)
+        defender_tier = runtime.state.get(target, "combat", "phase_tier", 0)
+        ar_eff = tier_effective_ar(melee_ar(attacker_attrs), attacker_tier, defender_tier)
+        dr = melee_dr(defender_attrs)
+        if random.random() > hit_chance(ar_eff, dr):
+            event = self.event("combat.attack_missed", action, {"target": target}, target)
+            return TransitionResult(True, events=[event], message=f"你的攻擊被 {target_name} 閃開了。")
+        dmg = damage(ar_eff, dr)
+        remaining = max(0, health - dmg)
+        deltas = [StateDelta(target, "health", "current", "set", remaining, source_module=self.contract.module_id)]
+        events = [self.event("combat.damage_applied", action, {"target": target, "damage": dmg, "remaining": remaining}, target)]
+        if remaining == 0:
+            deltas.append(StateDelta(target, "status", "alive", "set", False, source_module=self.contract.module_id))
+            events.append(self.event("combat.actor_defeated", action, {"target": target}, target))
+            return TransitionResult(True, deltas, events, f"攻擊造成 {dmg} 點傷害，{target_name} 倒下了。")
+        if "combatant" not in runtime.registry.get(target).components:
+            return TransitionResult(True, deltas, events, f"攻擊造成 {dmg} 點傷害。")
+        actor_health = runtime.state.get(action.actor_id, "health", "current")
+        if actor_health is None or actor_health <= 0:
+            return TransitionResult(True, deltas, events, f"攻擊造成 {dmg} 點傷害。")
+        counter_ar_eff = tier_effective_ar(melee_ar(defender_attrs), defender_tier, attacker_tier)
+        counter_dr = melee_dr(attacker_attrs)
+        if random.random() > hit_chance(counter_ar_eff, counter_dr):
+            events.append(self.event("combat.attack_missed", action, {"target": action.actor_id}, action.actor_id))
+            return TransitionResult(True, deltas, events, f"攻擊造成 {dmg} 點傷害，{target_name} 的反擊撲了空。")
+        counter_dmg = damage(counter_ar_eff, counter_dr)
+        actor_remaining = max(0, actor_health - counter_dmg)
+        deltas.append(StateDelta(action.actor_id, "health", "current", "set", actor_remaining, source_module=self.contract.module_id))
+        events.append(self.event("combat.damage_applied", action, {"target": action.actor_id, "damage": counter_dmg, "remaining": actor_remaining}, action.actor_id))
+        if actor_remaining == 0:
+            deltas.append(StateDelta(action.actor_id, "status", "alive", "set", False, source_module=self.contract.module_id))
+            events.append(self.event("combat.actor_defeated", action, {"target": action.actor_id}, action.actor_id))
+        return TransitionResult(True, deltas, events, f"攻擊造成 {dmg} 點傷害，{target_name} 反擊造成 {counter_dmg} 點傷害。")
 
 
 class DialogueModule(BaseModule):
