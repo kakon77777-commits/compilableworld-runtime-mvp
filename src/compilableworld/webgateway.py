@@ -49,7 +49,7 @@ def build_view_model(runtime: WorldRuntime, actor_id: str) -> dict[str, Any]:
     room_id = runtime.state.get(actor_id, "position", "room")
     room = next((r for r in runtime.package["rooms"] if r["room_id"] == room_id), None)
     visible = [
-        {"id": e.entity_id, "name": e.name, "type": e.entity_type}
+        {"id": e.entity_id, "name": e.name, "type": e.entity_type, "alive": runtime.state.get(e.entity_id, "status", "alive", True)}
         for e in runtime.registry.values()
         if e.entity_id != actor_id and runtime.state.get(e.entity_id, "position", "room") == room_id
     ]
@@ -300,7 +300,7 @@ function render(view) {
   view.visible_entities.forEach(entity => {
     const row = document.createElement('span');
     row.className = 'item-row';
-    row.textContent = entity.name + '（' + entity.id + '）';
+    row.textContent = entity.name + (entity.alive === false ? '（已死亡）' : '') + '（' + entity.id + '）';
     if (entity.type === 'item') {
       const take = document.createElement('button');
       take.textContent = '拿取';

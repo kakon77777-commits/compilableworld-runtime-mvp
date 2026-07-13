@@ -18,6 +18,7 @@ class DeterministicIntentParser:
     """Replaceable reference parser. An AI adapter must return the same ActionIR."""
 
     aliases = {"n": "north", "s": "south", "e": "east", "w": "west", "u": "up", "d": "down"}
+    directions = {"north", "south", "east", "west", "up", "down"}
 
     def parse(self, text: str, actor_id: str, runtime: WorldRuntime) -> ActionIR:
         parts = shlex.split(text.strip())
@@ -26,6 +27,8 @@ class DeterministicIntentParser:
         verb = parts[0].lower()
         if verb in self.aliases:
             return ActionIR(actor_id, "move", args={"direction": self.aliases[verb]})
+        if verb in self.directions:
+            return ActionIR(actor_id, "move", args={"direction": verb})
         if verb in {"go", "move"}:
             return ActionIR(actor_id, "move", args={"direction": parts[1].lower() if len(parts) > 1 else ""})
         if verb == "look":
@@ -33,17 +36,42 @@ class DeterministicIntentParser:
         if verb in {"i", "inv", "inventory"}:
             return ActionIR(actor_id, "inventory")
         if verb in {"take", "get", "drop", "open", "unlock", "attack"}:
-            target = parts[1] if len(parts) > 1 else None
+            target = self._resolve(parts[1] if len(parts) > 1 else None, actor_id, runtime)
             return ActionIR(actor_id, "take" if verb == "get" else verb, target_id=target)
         if verb == "give":
-            item = parts[1] if len(parts) > 1 else None
-            recipient = parts[2] if len(parts) > 2 else None
+            item = self._resolve(parts[1] if len(parts) > 1 else None, actor_id, runtime)
+            recipient = self._resolve(parts[2] if len(parts) > 2 else None, actor_id, runtime)
             return ActionIR(actor_id, "give", target_id=item, args={"recipient": recipient})
         if verb in {"status", "quests"}:
             return ActionIR(actor_id, verb)
         if verb == "say":
             return ActionIR(actor_id, "say", args={"text": " ".join(parts[1:])})
         raise ValueError(f"無法解析指令: {verb}")
+
+    @staticmethod
+    def _resolve(token: str | None, actor_id: str, runtime: WorldRuntime) -> str | None:
+        """A real player only ever sees display names ("老鐵"), never internal
+        IDs ("npc.foreman_laotie") — found by an actual playtest, not assumed.
+        Falls through to the raw token (unresolved) on no-match/ambiguous, so
+        downstream modules give their normal "not found" message rather than
+        silently guessing the wrong target."""
+        if not token or runtime.registry.contains(token):
+            return token
+        room = runtime.state.get(actor_id, "position", "room")
+        candidates = [
+            e for e in runtime.registry.values()
+            if e.entity_id != actor_id and (
+                runtime.state.get(e.entity_id, "position", "room") == room
+                or runtime.state.get(e.entity_id, "inventory", "carrier") == actor_id
+            )
+        ]
+        exact = [e for e in candidates if e.name == token]
+        if len(exact) == 1:
+            return exact[0].entity_id
+        partial = [e for e in candidates if token in e.name]
+        if len(partial) == 1:
+            return partial[0].entity_id
+        return token
 
 
 class TerminalGateway:
@@ -75,7 +103,7 @@ class TerminalGateway:
             if text in {"quit", "exit"}:
                 break
             if text == "help":
-                print("look | n/s/e/w | go DIR | take/drop ID | open/unlock ID | inventory | attack ID | say TEXT | status | quests | tick [N] | events | diag | save FILE | load FILE")
+                print("look | n/s/e/w/north/south/east/west/up/down | go DIR | take/drop/open/unlock/attack 名稱或ID | give 物品 對象 | inventory | say TEXT | status | quests | tick [N] | events | diag | save FILE | load FILE")
                 continue
             if text.startswith("tick"):
                 parts = text.split()
@@ -112,10 +140,12 @@ class TerminalGateway:
     def _render_room(self) -> None:
         room_id = self.runtime.state.get(self.actor_id, "position", "room")
         room = next(r for r in self.runtime.package["rooms"] if r["room_id"] == room_id)
-        visible = [
-            f"{e.name}({e.entity_id})" for e in self.runtime.registry.values()
-            if e.entity_id != self.actor_id and self.runtime.state.get(e.entity_id, "position", "room") == room_id
-        ]
+        visible = []
+        for e in self.runtime.registry.values():
+            if e.entity_id == self.actor_id or self.runtime.state.get(e.entity_id, "position", "room") != room_id:
+                continue
+            dead = "（已死亡）" if not self.runtime.state.get(e.entity_id, "status", "alive", True) else ""
+            visible.append(f"{e.name}{dead}({e.entity_id})")
         print(f"\n== {room['name']} ==\n{room['description']}")
         if visible:
             print("可見：" + "、".join(visible))

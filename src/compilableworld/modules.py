@@ -63,6 +63,8 @@ class DoorModule(BaseModule):
         door = action.target_id
         if not door or not runtime.registry.contains(door):
             return TransitionResult(False, message="找不到門")
+        if runtime.registry.get(door).entity_type != "door":
+            return TransitionResult(False, message="這不是可以開關上鎖的東西")
         actor_room = runtime.state.get(action.actor_id, "position", "room")
         door_room = runtime.state.get(door, "position", "room")
         if actor_room != door_room:
@@ -113,6 +115,8 @@ class InventoryModule(BaseModule):
                 return TransitionResult(False, message="物品不在你的物品欄")
             if runtime.state.get(recipient, "position", "room") != room:
                 return TransitionResult(False, message="交付對象不在此處")
+            if _is_needed_key(item, runtime):
+                return TransitionResult(False, message="這是重要的鑰匙，你猶豫著沒有交出去。")
             deltas = [StateDelta(item, "inventory", "carrier", "set", recipient, source_module=self.contract.module_id)]
             payload = {"item": item, "actor": action.actor_id, "recipient": recipient}
             return TransitionResult(True, deltas, [self.event("inventory.item_given", action, payload)], f"你把 {runtime.registry.get(item).name} 交給了 {runtime.registry.get(recipient).name}。")
@@ -154,9 +158,22 @@ class CombatModule(BaseModule):
         remaining = max(0, health - damage)
         deltas = [StateDelta(target, "health", "current", "set", remaining, source_module=self.contract.module_id)]
         events = [self.event("combat.damage_applied", action, {"target": target, "damage": damage, "remaining": remaining}, target)]
+        target_name = runtime.registry.get(target).name
         if remaining == 0:
             deltas.append(StateDelta(target, "status", "alive", "set", False, source_module=self.contract.module_id))
             events.append(self.event("combat.actor_defeated", action, {"target": target}, target))
+            return TransitionResult(True, deltas, events, f"攻擊造成 {damage} 點傷害，{target_name} 倒下了。")
+        if "combatant" in runtime.registry.get(target).components:
+            actor_health = runtime.state.get(action.actor_id, "health", "current")
+            if actor_health is not None and actor_health > 0:
+                counter = min(2, actor_health)
+                actor_remaining = actor_health - counter
+                deltas.append(StateDelta(action.actor_id, "health", "current", "set", actor_remaining, source_module=self.contract.module_id))
+                events.append(self.event("combat.damage_applied", action, {"target": action.actor_id, "damage": counter, "remaining": actor_remaining}, action.actor_id))
+                if actor_remaining == 0:
+                    deltas.append(StateDelta(action.actor_id, "status", "alive", "set", False, source_module=self.contract.module_id))
+                    events.append(self.event("combat.actor_defeated", action, {"target": action.actor_id}, action.actor_id))
+                return TransitionResult(True, deltas, events, f"攻擊造成 {damage} 點傷害，{target_name} 反擊造成 {counter} 點傷害。")
         return TransitionResult(True, deltas, events, f"攻擊造成 {damage} 點傷害。")
 
 
@@ -244,6 +261,18 @@ def install_builtin_modules(runtime: WorldRuntime) -> None:
         if module_id not in available:
             raise ValueError(f"Runtime Package 要求未知模組: {module_id}")
         runtime.register_module(available[module_id])
+
+
+def _is_needed_key(item_id: str, runtime: WorldRuntime) -> bool:
+    """A real playtest gave away the only key to a still-locked door with no
+    recovery mechanic (no "take back from NPC"), permanently soft-locking
+    that content. Guard at the point of loss rather than trying to add an
+    undo path afterward."""
+    for edge in runtime.package["exits"]:
+        door = edge.get("door_entity", "").strip()
+        if door and edge.get("key_id", "").strip() == item_id and runtime.state.get(door, "door", "locked", False):
+            return True
+    return False
 
 
 def _find_exit(exits: list[dict[str, str]], current: str, direction: str) -> dict[str, str] | None:

@@ -6,6 +6,7 @@ import unittest
 from pathlib import Path
 
 from compilableworld.compiler import CompileError, compile_world, validate_world
+from compilableworld.gateway import DeterministicIntentParser
 from compilableworld.kernel import StateStore, WorldRuntime
 from compilableworld.models import ActionIR, StateDelta
 from compilableworld.modules import install_builtin_modules
@@ -115,6 +116,32 @@ class RuntimeTests(unittest.TestCase):
         self.runtime.submit(ActionIR("player.neo", "move", args={"direction": "north"}))
         self.assertEqual(self.runtime.state.get("player.neo", "quest", "quest.black_tide_omen"), "available")
 
+    def test_bare_direction_word_parses_as_move(self) -> None:
+        action = DeterministicIntentParser().parse("north", "player.neo", self.runtime)
+        self.assertEqual(action.verb, "move")
+        self.assertEqual(action.args["direction"], "north")
+        receipt = self.runtime.submit(action)
+        self.assertEqual(receipt.status.value, "completed")
+
+    def test_unlock_rejects_non_door_target(self) -> None:
+        result = self.runtime.submit(ActionIR("player.neo", "unlock", "npc.guard"))
+        self.assertEqual(result.status.value, "failed")
+        self.assertIn("不是", result.message)
+
+    def test_attack_retaliates_and_kill_message_differs_from_hit_message(self) -> None:
+        hit = self.runtime.submit(ActionIR("player.neo", "attack", "npc.guard"))
+        self.assertEqual(hit.status.value, "completed")
+        self.assertIn("反擊", hit.message)
+        self.assertEqual(self.runtime.state.get("npc.guard", "health", "current"), 15)
+        self.assertEqual(self.runtime.state.get("player.neo", "health", "current"), 28)
+
+        self.runtime.submit(ActionIR("player.neo", "attack", "npc.guard"))
+        self.runtime.submit(ActionIR("player.neo", "attack", "npc.guard"))
+        kill = self.runtime.submit(ActionIR("player.neo", "attack", "npc.guard"))
+        self.assertEqual(self.runtime.state.get("npc.guard", "health", "current"), 0)
+        self.assertIn("倒下了", kill.message)
+        self.assertNotIn("反擊", kill.message)
+
 
 class PeaceCityQuestTests(unittest.TestCase):
     """Real content, not a toy fixture — see examples/mingyun_zhiyu_peace_city."""
@@ -156,6 +183,44 @@ class PeaceCityQuestTests(unittest.TestCase):
         give = self.runtime.submit(ActionIR(actor, "give", "item.firewood_bundle", args={"recipient": "npc.foreman_laotie"}))
         self.assertEqual(give.status.value, "failed")
         self.assertEqual(self.runtime.state.get(actor, "quest", "quest.find_work"), "available")
+
+    def test_give_rejected_for_still_needed_key(self) -> None:
+        """A real playtest gave away the checkpoint's only key and could never get it
+        back. This must fail, not silently succeed."""
+        actor = "player.newcomer"
+        self.runtime.submit(ActionIR(actor, "take", "item.provisional_id_tag"))
+        self.runtime.submit(ActionIR(actor, "move", args={"direction": "north"}))  # -> slum_alley
+        self.runtime.submit(ActionIR(actor, "move", args={"direction": "west"}))  # -> labor_yard
+        give = self.runtime.submit(ActionIR(actor, "give", "item.provisional_id_tag", args={"recipient": "npc.foreman_laotie"}))
+        self.assertEqual(give.status.value, "failed")
+        self.assertEqual(self.runtime.state.get("item.provisional_id_tag", "inventory", "carrier"), actor)
+
+    def test_give_allowed_once_key_has_already_been_used(self) -> None:
+        actor = "player.newcomer"
+        self.runtime.submit(ActionIR(actor, "take", "item.provisional_id_tag"))
+        self.runtime.submit(ActionIR(actor, "move", args={"direction": "north"}))  # -> slum_alley
+        unlock = self.runtime.submit(ActionIR(actor, "unlock", "door.checkpoint_gate"))
+        self.assertEqual(unlock.status.value, "completed")
+        self.runtime.submit(ActionIR(actor, "move", args={"direction": "west"}))  # -> labor_yard
+        give = self.runtime.submit(ActionIR(actor, "give", "item.provisional_id_tag", args={"recipient": "npc.foreman_laotie"}))
+        self.assertEqual(give.status.value, "completed")
+
+    def test_command_target_resolves_display_name_to_id(self) -> None:
+        actor = "player.newcomer"
+        self.runtime.submit(ActionIR(actor, "move", args={"direction": "north"}))  # -> slum_alley
+        action = DeterministicIntentParser().parse("take 柴薪捆", actor, self.runtime)
+        self.assertEqual(action.target_id, "item.firewood_bundle")
+        self.assertEqual(self.runtime.submit(action).status.value, "completed")
+
+    def test_give_resolves_display_names_for_item_and_recipient(self) -> None:
+        actor = "player.newcomer"
+        self.runtime.submit(ActionIR(actor, "move", args={"direction": "north"}))  # -> slum_alley
+        self.runtime.submit(ActionIR(actor, "take", "item.firewood_bundle"))
+        self.runtime.submit(ActionIR(actor, "move", args={"direction": "west"}))  # -> labor_yard
+        action = DeterministicIntentParser().parse("give 柴薪捆 老鐵", actor, self.runtime)
+        self.assertEqual(action.target_id, "item.firewood_bundle")
+        self.assertEqual(action.args["recipient"], "npc.foreman_laotie")
+        self.assertEqual(self.runtime.submit(action).status.value, "completed")
 
 
 if __name__ == "__main__":

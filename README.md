@@ -88,6 +88,7 @@ Python 版本用於凍結語言無關契約與快速驗證。後續 Rust 重寫�
 
 - 目前是單程序、單世界實例；沒有帳號、多人網路與分散式鎖。
 - Scheduler 支援延遲 Action，但 CLI 尚未暴露複合行為編輯器。
+- 房間／NPC 描述文字是靜態的，不會隨世界狀態變化（例如怪物死亡後場景描述不會更新）；已用一個較輕量的手段部分緩解——`visible_entities` 現在會標示實體是否存活（終端機顯示「（已死亡）」，網頁介面同步），但描述本身的條件式文字/對話狀態感知仍是尚未實作的功能，不是這次修的 bug。
 - Quest 模組現在支援兩種事件驅動的完成條件（`deliver:<item>:<target>`、`reach:<room>`）與貨幣報酬，透過 `WorldRuntime.commit_reaction()`（Kernel 新增的事件反應提交路徑，語義與 `_execute()` 相同：只接受 Delta+Event，權限照樣強制檢查）在 EventBus 上被動觸發，不需要玩家額外下指令；未知條件類型一律視為未滿足（fail closed），不會誤判完成。仍未支援的部分：多階段/分支任務、失敗狀態、道具型報酬（只有貨幣，因為 Kernel 目前不支援執行期生成新實體）。
 - 世界、區域與場景的初始階層狀態已編入 State Store；跨層事件轉移規則留待 v0.2。
 - Intent Parser 是確定性參考實作；AI Adapter 必須輸出同一 `ActionIR` 並接受 Kernel 驗證。
@@ -96,3 +97,4 @@ Python 版本用於凍結語言無關契約與快速驗證。後續 Rust 重寫�
 - Replay 重放已提交 Delta；跨版本重放仍需 migration registry。
 - Web Gateway 是單一 actor、單一瀏覽器分頁假設下的 request/response API（無 WebSocket、無帳號/session），與已知的單程序/單世界限制一致；`/api/action` 與 `/api/state` 共用同一把 lock 序列化存取，避免併發提交造成的版本衝突，但不是為多人設計的。
 - （已修復，記錄供參考）CLI 曾在非 UTF-8 系統 locale（例如繁體中文 Windows 的 cp950）下對含中文標點的 `say` 輸入拋出編碼錯誤；`cli.py` 現在會在啟動時強制 stdin/stdout 為 UTF-8。
+- （已修復，源自一次真實的 AI 玩家試玩）指令目標現在可以用場景內可見的顯示名稱（例如「老鐵」）指定，不再強制要求內部 ID（`npc.foreman_laotie`）——`DeterministicIntentParser` 會在目前房間與玩家物品欄中做名稱解析，找不到或有歧義時一律不猜測、原樣傳給下層模組，讓玩家看到正常的「找不到」訊息，不會誤觸錯的目標。同一輪試玩也發現 `give` 沒有保護機制、可以把仍在使用中的鑰匙道具送給不相關 NPC 且無法復原——現在會在該鑰匙鎖著的門還沒開之前擋下交付。另外修正：裸方向詞（`north`）現在可直接使用；`unlock` 對非門實體會給出正確訊息而非誤導的「門沒有上鎖」；戰鬥現在有反擊傷害與獨立的擊殺訊息。
