@@ -46,6 +46,8 @@ class DeterministicIntentParser:
             return ActionIR(actor_id, verb)
         if verb == "say":
             return ActionIR(actor_id, "say", args={"text": " ".join(parts[1:])})
+        if verb == "cast":
+            return ActionIR(actor_id, "cast", args={"spell": parts[1] if len(parts) > 1 else ""})
         raise ValueError(f"無法解析指令: {verb}")
 
     @staticmethod
@@ -103,7 +105,7 @@ class TerminalGateway:
             if text in {"quit", "exit"}:
                 break
             if text == "help":
-                print("look | n/s/e/w/north/south/east/west/up/down | go DIR | take/drop/open/unlock/attack 名稱或ID | give 物品 對象 | inventory | say TEXT | status | quests | tick [N] | events | diag | save FILE | load FILE")
+                print("look | n/s/e/w/north/south/east/west/up/down | go DIR | take/drop/open/unlock/attack 名稱或ID | give 物品 對象 | cast 法術名 | inventory | say TEXT | status | quests | tick [N] | events | diag | save FILE | load FILE")
                 continue
             if text.startswith("tick"):
                 parts = text.split()

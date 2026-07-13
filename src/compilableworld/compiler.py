@@ -173,15 +173,22 @@ def compile_world(source_dir: str | Path, output_dir: str | Path) -> Path:
         })
         initial_state.append(_state(row["entity_id"], "position", "room", row["room"]))
         if (row.get("con") or "").strip():
-            for attr in ATTRIBUTE_COLUMNS:
-                initial_state.append(_state(row["entity_id"], "combat", attr, int(row[attr])))
+            attrs = {attr: int(row[attr]) for attr in ATTRIBUTE_COLUMNS}
+            for attr, value in attrs.items():
+                initial_state.append(_state(row["entity_id"], "combat", attr, value))
             if (row.get("phase_tier") or "").strip():
                 initial_state.append(_state(row["entity_id"], "combat", "phase_tier", int(row["phase_tier"])))
-            health = int(row["con"]) * 8
+            health = attrs["con"] * 8
+            mp_max = attrs["mag"] * 5
+            fp_max = (attrs["mag"] + attrs["dex"]) * 2
             initial_state.extend([
                 _state(row["entity_id"], "health", "current", health),
                 _state(row["entity_id"], "health", "max", health),
                 _state(row["entity_id"], "status", "alive", True),
+                _state(row["entity_id"], "magic", "mp_current", mp_max),
+                _state(row["entity_id"], "magic", "mp_max", mp_max),
+                _state(row["entity_id"], "magic", "fp_current", fp_max),
+                _state(row["entity_id"], "magic", "fp_max", fp_max),
             ])
         elif (row.get("health") or "").strip():
             health = int(row["health"])

@@ -169,7 +169,7 @@ class CombatModule(BaseModule):
         super().__init__(ModuleContract(
             "combat.basic", "0.1.0", "TMS", ["attack"],
             ["combat.damage_applied", "combat.actor_defeated", "combat.attack_missed"],
-            ["position.*", "health.*", "status.*", "combat.*"], ["health.*", "status.*"], ["entity", "state", "action", "event"],
+            ["position.*", "health.*", "status.*", "combat.*"], ["health.*", "status.*", "combat.temp_hp"], ["entity", "state", "action", "event"],
         ))
 
     def evaluate(self, action: ActionIR, runtime: WorldRuntime) -> TransitionResult:
@@ -230,6 +230,24 @@ class CombatModule(BaseModule):
                 return TransitionResult(True, deltas, events, f"攻擊造成 {dmg} 點傷害，{target_name} 反擊造成 {counter} 點傷害。")
         return TransitionResult(True, deltas, events, f"攻擊造成 {dmg} 點傷害。")
 
+    @staticmethod
+    def _apply_damage(target: str, dmg: int, runtime: WorldRuntime, source_module: str) -> tuple[list[StateDelta], int]:
+        """status_effects_framework.shield_buff: temp_HP 'takes damage before real
+        HP.' Only meaningful on the formula path — temp_hp is a magic-system
+        concept, and only attribute-authored entities have MP/FP to cast with."""
+        deltas: list[StateDelta] = []
+        temp_hp = runtime.state.get(target, "combat", "temp_hp", 0)
+        if temp_hp > 0:
+            absorbed = min(temp_hp, dmg)
+            deltas.append(StateDelta(target, "combat", "temp_hp", "set", temp_hp - absorbed, source_module=source_module))
+            dmg -= absorbed
+        health = runtime.state.get(target, "health", "current")
+        remaining = health
+        if dmg > 0:
+            remaining = max(0, health - dmg)
+            deltas.append(StateDelta(target, "health", "current", "set", remaining, source_module=source_module))
+        return deltas, remaining
+
     def _resolve_formula(self, action: ActionIR, runtime: WorldRuntime, target: str, target_name: str, health: int) -> TransitionResult:
         attacker_attrs = self._attributes_of(action.actor_id, runtime)
         defender_attrs = self._attributes_of(target, runtime)
@@ -241,8 +259,7 @@ class CombatModule(BaseModule):
             event = self.event("combat.attack_missed", action, {"target": target}, target)
             return TransitionResult(True, events=[event], message=f"你的攻擊被 {target_name} 閃開了。")
         dmg = damage(ar_eff, dr)
-        remaining = max(0, health - dmg)
-        deltas = [StateDelta(target, "health", "current", "set", remaining, source_module=self.contract.module_id)]
+        deltas, remaining = self._apply_damage(target, dmg, runtime, self.contract.module_id)
         events = [self.event("combat.damage_applied", action, {"target": target, "damage": dmg, "remaining": remaining}, target)]
         if remaining == 0:
             deltas.append(StateDelta(target, "status", "alive", "set", False, source_module=self.contract.module_id))
@@ -259,13 +276,57 @@ class CombatModule(BaseModule):
             events.append(self.event("combat.attack_missed", action, {"target": action.actor_id}, action.actor_id))
             return TransitionResult(True, deltas, events, f"攻擊造成 {dmg} 點傷害，{target_name} 的反擊撲了空。")
         counter_dmg = damage(counter_ar_eff, counter_dr)
-        actor_remaining = max(0, actor_health - counter_dmg)
-        deltas.append(StateDelta(action.actor_id, "health", "current", "set", actor_remaining, source_module=self.contract.module_id))
+        counter_deltas, actor_remaining = self._apply_damage(action.actor_id, counter_dmg, runtime, self.contract.module_id)
+        deltas.extend(counter_deltas)
         events.append(self.event("combat.damage_applied", action, {"target": action.actor_id, "damage": counter_dmg, "remaining": actor_remaining}, action.actor_id))
         if actor_remaining == 0:
             deltas.append(StateDelta(action.actor_id, "status", "alive", "set", False, source_module=self.contract.module_id))
             events.append(self.event("combat.actor_defeated", action, {"target": action.actor_id}, action.actor_id))
         return TransitionResult(True, deltas, events, f"攻擊造成 {dmg} 點傷害，{target_name} 反擊造成 {counter_dmg} 點傷害。")
+
+
+class MagicModule(BaseModule):
+    """rule_magic_casting_system (combat_resolution_system.json) — MP/FP pools
+    are already derived from MAG/DEX at compile time (see compiler.py). Only
+    instant-cast spells (symbol_count<=5, cast_time_exchanges=1) are
+    implemented: multi-exchange channeling needs a turn/exchange structure
+    this Runtime doesn't have yet (turn_and_initiative_structure in the
+    source file is unimplemented). One spell wired up as a real, working
+    proof (護盾術/shield, the source file's own simplest illustrative_calc_examples
+    entry) rather than stubbing the whole 38-symbol combo library at once."""
+
+    SPELLS = {"護盾術": {"symbol_count": 5, "effect": "shield"}}
+
+    def __init__(self) -> None:
+        super().__init__(ModuleContract(
+            "magic.core", "0.1.0", "TMS", ["cast"], ["magic.cast"],
+            ["combat.*", "magic.*"], ["combat.temp_hp", "magic.*"], ["entity", "state", "action", "event"],
+        ))
+
+    def evaluate(self, action: ActionIR, runtime: WorldRuntime) -> TransitionResult:
+        spell_name = str(action.args.get("spell", "")).strip()
+        spell = self.SPELLS.get(spell_name)
+        if spell is None:
+            return TransitionResult(False, message=f"未知的法術: {spell_name}")
+        if runtime.state.version(action.actor_id, "combat", "mag") < 0:
+            return TransitionResult(False, message="你尚未覺醒規則魔法")
+        mp_cost = spell["symbol_count"] * 8
+        fp_cost = spell["symbol_count"] * 5
+        mp = runtime.state.get(action.actor_id, "magic", "mp_current", 0)
+        fp = runtime.state.get(action.actor_id, "magic", "fp_current", 0)
+        if mp < mp_cost or fp < fp_cost:
+            return TransitionResult(False, message=f"魔力或精神力不足（需要 MP{mp_cost}/FP{fp_cost}，剩餘 MP{mp}/FP{fp}）")
+        deltas = [
+            StateDelta(action.actor_id, "magic", "mp_current", "subtract", mp_cost, source_module=self.contract.module_id),
+            StateDelta(action.actor_id, "magic", "fp_current", "subtract", fp_cost, source_module=self.contract.module_id),
+        ]
+        if spell["effect"] == "shield":
+            mag = runtime.state.get(action.actor_id, "combat", "mag", ATTRIBUTE_FLOOR)
+            temp_hp = mag * 2
+            deltas.append(StateDelta(action.actor_id, "combat", "temp_hp", "set", temp_hp, source_module=self.contract.module_id))
+            event = self.event("magic.cast", action, {"spell": spell_name, "effect": "shield", "temp_hp": temp_hp})
+            return TransitionResult(True, deltas, [event], f"你施展了{spell_name}，獲得 {temp_hp} 點護盾。")
+        return TransitionResult(False, message="法術效果尚未實作")
 
 
 class DialogueModule(BaseModule):
@@ -345,7 +406,7 @@ def install_builtin_modules(runtime: WorldRuntime) -> None:
     available = {
         module.contract.module_id: module for module in [
             RoomModule(), MovementModule(), DoorModule(), InventoryModule(),
-            HealthModule(), CombatModule(), DialogueModule(), QuestModule(),
+            HealthModule(), CombatModule(), MagicModule(), DialogueModule(), QuestModule(),
         ]
     }
     for module_id in runtime.package["manifest"]["modules"]:

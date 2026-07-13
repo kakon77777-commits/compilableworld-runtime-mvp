@@ -10,7 +10,7 @@ from compilableworld.compiler import CompileError, compile_world, validate_world
 from compilableworld.gateway import DeterministicIntentParser
 from compilableworld.kernel import StateStore, WorldRuntime
 from compilableworld.models import ActionIR, StateDelta
-from compilableworld.modules import install_builtin_modules
+from compilableworld.modules import CombatModule, install_builtin_modules
 
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -258,6 +258,65 @@ class PeaceCityQuestTests(unittest.TestCase):
         self.assertEqual(missed.status.value, "completed")
         self.assertIn("閃開", missed.message)
         self.assertEqual(self.runtime.state.get("npc.woerkan", "health", "current"), 7272)
+
+
+class MagicModuleTests(unittest.TestCase):
+    """Real content, real numbers: player.newcomer's MAG=10 floor attribute
+    gives MP_max=50/FP_max=40; 護盾術 costs MP40/FP25 -- affordable exactly
+    once, which is itself a real, intended resource-tension check."""
+
+    def setUp(self) -> None:
+        self.temp = tempfile.TemporaryDirectory()
+        package = compile_world(PEACE_CITY, self.temp.name)
+        self.runtime = WorldRuntime.from_package(package)
+        install_builtin_modules(self.runtime)
+
+    def tearDown(self) -> None:
+        self.temp.cleanup()
+
+    def test_cast_shield_grants_temp_hp_and_spends_resources(self) -> None:
+        actor = "player.newcomer"
+        self.assertEqual(self.runtime.state.get(actor, "magic", "mp_current"), 50)
+        self.assertEqual(self.runtime.state.get(actor, "magic", "fp_current"), 40)
+        receipt = self.runtime.submit(ActionIR(actor, "cast", args={"spell": "護盾術"}))
+        self.assertEqual(receipt.status.value, "completed")
+        self.assertEqual(self.runtime.state.get(actor, "combat", "temp_hp"), 20)  # MAG(10) x 2
+        self.assertEqual(self.runtime.state.get(actor, "magic", "mp_current"), 10)
+        self.assertEqual(self.runtime.state.get(actor, "magic", "fp_current"), 15)
+
+    def test_second_cast_fails_on_insufficient_resources(self) -> None:
+        actor = "player.newcomer"
+        self.runtime.submit(ActionIR(actor, "cast", args={"spell": "護盾術"}))
+        second = self.runtime.submit(ActionIR(actor, "cast", args={"spell": "護盾術"}))
+        self.assertEqual(second.status.value, "failed")
+        self.assertIn("不足", second.message)
+
+    def test_unknown_spell_rejected(self) -> None:
+        result = self.runtime.submit(ActionIR("player.newcomer", "cast", args={"spell": "根本不存在的法術"}))
+        self.assertEqual(result.status.value, "failed")
+
+    def test_caster_without_attributes_cannot_cast(self) -> None:
+        result = self.runtime.submit(ActionIR("npc.foreman_laotie", "cast", args={"spell": "護盾術"}))
+        self.assertEqual(result.status.value, "failed")
+        self.assertIn("覺醒", result.message)
+
+    def test_temp_hp_absorbs_damage_before_real_health(self) -> None:
+        actor = "player.newcomer"
+        self.runtime.state.seed(actor, "combat", "temp_hp", 15)
+        deltas, remaining = CombatModule._apply_damage(actor, 5, self.runtime, "test")
+        self.assertEqual(len(deltas), 1)
+        self.assertEqual(deltas[0].namespace, "combat")
+        self.assertEqual(deltas[0].value, 10)  # 15 - 5, health untouched
+        self.assertEqual(remaining, self.runtime.state.get(actor, "health", "current"))
+
+    def test_temp_hp_spillover_hits_real_health_once_exhausted(self) -> None:
+        actor = "player.newcomer"
+        self.runtime.state.seed(actor, "combat", "temp_hp", 15)
+        health_before = self.runtime.state.get(actor, "health", "current")
+        deltas, remaining = CombatModule._apply_damage(actor, 25, self.runtime, "test")
+        self.assertEqual(len(deltas), 2)
+        self.assertEqual(deltas[0].value, 0)  # shield fully exhausted
+        self.assertEqual(remaining, health_before - 10)  # 25 - 15 spills through
 
 
 class FormulaCombatIntegrationTests(unittest.TestCase):
