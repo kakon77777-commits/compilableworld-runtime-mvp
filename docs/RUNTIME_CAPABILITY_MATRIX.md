@@ -1,0 +1,157 @@
+# CompilableWorld Runtime Capability Matrix
+
+- **Document version:** v0.1
+- **Baseline source:** uploaded integrated local snapshot
+- **Runtime package version:** `0.1.1`
+- **Audit date:** 2026-07-15
+- **Verification:** `PYTHONPATH=src python3 -m unittest discover -s tests -v` — **113/113 passed**
+- **Purpose:** authoritative inventory for PIW-MCP integration planning
+
+> Status meanings: **Implemented** = code and tests exist; **Partial** = usable core exists but stated boundary remains; **Planned** = no production implementation found in this baseline.
+
+## 1. Core compilation and runtime
+
+| Capability | Status | Primary implementation | Test evidence | PIW-MCP consequence |
+|---|---|---|---|---|
+| JSON/CSV/Manifest authoring layer | Implemented | `compiler.py`, example manifests | `CompilerTests` | MCP must not bypass compiler contracts |
+| Runtime Package compilation | Implemented | `compile_world()` | compiler and schema tests | MCP loads compiled packages, not raw prose |
+| Versioned external schemas | Implemented | `schemas/`, `schema_registry.py` | `SchemaContractTests` | MCP contracts should follow same versioned pattern |
+| Entity registry | Implemented | `EntityRegistry` | runtime integration tests | Actor/entity IDs are canonical boundaries |
+| State store | Implemented | `StateStore` | atomic permission failure test | Runtime state remains authoritative |
+| Action IR | Implemented | `ActionIR` | all runtime pipelines | `submit_action` should adapt to this contract |
+| State Delta | Implemented | `StateDelta` | module/runtime tests | MCP must never write state directly |
+| Event IR | Implemented | `EventIR` | runtime, dialogue, quest, AMK tests | MCP results should expose filtered event projections |
+| Module Contract | Implemented | `ModuleContract` | permission and module tests | MCP cannot widen module write scopes |
+| Atomic commit | Implemented | `WorldRuntime`, `StateStore` | `test_commit_is_atomic_on_permission_failure` | action result must be derived after commit |
+| Event bus and reactions | Implemented | `EventBus`, `commit_reaction()` | dialogue→quest and quest reward tests | cross-module behavior remains event-driven |
+| Event log | Implemented | `EventLog` | replay and AMK adapter tests | MCP recent-events tool can reuse this source |
+| Snapshot/save | Implemented | runtime snapshot methods | round-trip and legacy migration tests | checkpoint tool may wrap existing snapshot boundary |
+| Replay | Implemented | runtime replay path | movement/inventory/door replay tests | MCP session recovery can rely on replay, with version limits |
+| Snapshot version validation | Implemented | runtime migration/version checks | unknown-version rejection test | MCP must return explicit version mismatch errors |
+| Cross-version migration registry | Partial | legacy snapshot migration exists | legacy migration test | generic event/package migration still needs registry |
+| Scheduler | Implemented | `Scheduler` | delay and snapshot restore tests | delayed actions already belong to runtime authority |
+| Single-process/single-world service | Partial | current runtime model | documented boundary | remote multi-session host remains outside current core |
+
+## 2. World mechanics
+
+| Capability | Status | Notes |
+|---|---|---|
+| Room and movement | Implemented | Direction aliases, reach events, room projection |
+| Doors, lock, unlock, open | Implemented | Needed-key protection and target validation |
+| Inventory take/drop/give | Implemented | Recipient presence/type checks and display-name resolution |
+| Health and death | Implemented | Simple and formula-backed combat paths |
+| Combat formula registry | Implemented | HP, AR, DR, hit chance, damage, initiative, action economy |
+| Exchange/action economy | Implemented | Canon worked example and integration tests |
+| Tier breakthrough gating | Implemented | Real canon NPC integration validates extreme mismatch |
+| Magic resources | Implemented | MP/FP derived from attributes |
+| Spells | Partial | Shield and haste implemented; broader spell library remains |
+| Generic status duration | Implemented | Refresh, decay, expiration, magnitude support |
+| Ranged/mental combat paths | Planned | Formula source exists but wiring is not present |
+| Multi-exchange channeling/interruption | Planned | Explicitly deferred |
+| Quests: simple requirements/rewards | Implemented | Reach and delivery completion |
+| Quests: event transitions | Implemented | Dialogue, movement and inventory events |
+| Quests: branch/failure/priority | Implemented | deterministic priority and ambiguous dispatch rejection |
+| Runtime-generated items/entities | Partial | generated player exists; generic runtime entity spawning remains bounded |
+
+## 3. Narrative, dialogue and player entry
+
+| Capability | Status | Primary implementation | Boundary |
+|---|---|---|---|
+| Deterministic intent parser | Implemented | `gateway.py` | AI adapter must emit the same Action IR |
+| Terminal gateway | Implemented | `TerminalGateway` | shared kernel |
+| Web gateway | Implemented | `WebGateway`, stdlib HTTP server | single browser actor/session assumption |
+| State-aware room narrative | Implemented | `narrative.py`, `narrative.json` | read-only projection; no state writes |
+| Data-driven dialogue | Implemented | `dialogue.py`, `DialogueModule` | emits `dialogue.responded`; does not mutate quests |
+| Dialogue topic fallback and conditions | Implemented | compiler/runtime selection rules | local-state projection only |
+| Player template catalog | Implemented | `player_generation.py` | templates are suggestions, not canon characters |
+| Deterministic seeded generation | Implemented | seed and override logic | no second combat formula path |
+| Player snapshot persistence | Implemented | materialized generated actor | tested round-trip |
+| LLM semantic intent adapter | Planned | no model dependency in runtime | PIW-MCP/agent layer responsibility |
+| AI narrative renderer | Planned | runtime exposes facts/projections | external adapter responsibility |
+| Actor belief/secret projection | Planned | no generalized belief store found | major PIW-MCP/world-model gap |
+
+## 4. Function IR and scenarios
+
+| Capability | Status | Notes |
+|---|---|---|
+| Restricted pure Function IR | Implemented | numeric expression tree only; no arbitrary Python |
+| Allowed operations | Implemented | add, sub, mul, div, min, max, neg, clamp, round |
+| Compile-time validation | Implemented | unsupported operations rejected |
+| Exact numeric inputs | Implemented | validated argument names and numeric types |
+| Bounded LRU memoization | Implemented | default bounded cache, diagnostics available |
+| Studio function catalog/preview | Implemented | read-only projection |
+| Scenario IR Given/When/Then | Implemented | uses normal ActionIR/Kernel/EventIR pipeline |
+| Scenario compile-time validation | Implemented | unknown target and invalid actions rejected |
+| Scenario state/event expectations | Implemented | packaged authoring scenarios |
+| Long-session property scenarios | Planned | suitable next extension for PIW-MCP |
+
+## 5. Studio and EveGlyph integration
+
+| Capability | Status | Notes |
+|---|---|---|
+| Runtime Studio overview | Implemented | FMS/TMS/entity/state/quest graph and trace tail |
+| Read-only Studio HTTP APIs | Implemented | overview, functions, schemas, import |
+| EveGlyph YAML parser | Implemented | nested lists and quoted scalars supported |
+| Studio World IR normalization | Implemented | entities, entity lists, state machines, diagnostics |
+| Deterministic JSON artifact output | Implemented | reproducible World IR artifact |
+| Bounded random import | Implemented | unbounded random rejected |
+| Migration plan | Implemented | explicit missing bindings and diagnostics |
+| Mapping suggestion | Implemented | preserves explicit values; unknowns remain unresolved |
+| Mapping validation | Implemented | fail-closed guard policy |
+| Reviewed overlay compilation | Implemented | base source is not mutated |
+| Full visual editing/write-back | Partial | current APIs are intentionally read-only/controlled |
+
+## 6. Agent Memory Kernel
+
+| Capability | Status | Notes |
+|---|---|---|
+| Raw immutable JSONL ledger | Implemented | integrity and replay support |
+| SQLite metadata/index | Implemented | local persistence and rebuildable retrieval index |
+| Clean memory promotion | Implemented | governed, auditable process |
+| Evidence/authority/attribution | Implemented | explicit contracts |
+| Scope and visibility isolation | Implemented | conflicts retained rather than overwritten |
+| Reviewer separation | Implemented | proposer cannot approve own candidate |
+| Inference vs observation separation | Implemented | inference cannot silently become OBS fact |
+| Secret masking/redaction | Implemented | context access removal tested |
+| Negative memory/raw fallback | Implemented | retrievable with governance boundaries |
+| Lexical retrieval/context packet | Implemented | canonical retrieval unaffected by index rebuild |
+| Runtime EventIR adapter | Implemented | read-only capture path |
+| Adapter failure isolation | Implemented | cannot change committed runtime outcome |
+| Optional CLI binding | Implemented | opt-in AMK storage |
+| Remote replication/cloud sync | Partial | checkpoint/sync contracts exist; remote service not established |
+| Vector retrieval | Planned/optional | not required for canonical memory authority |
+
+## 7. PIW-MCP readiness summary
+
+### Directly reusable
+
+- `ActionIR`, `EventIR`, `StateDelta`, `ActionReceipt`
+- `WorldRuntime`, `EventLog`, snapshot/replay
+- deterministic projections and Web View Model
+- Scenario IR for contract tests
+- Schema registry pattern
+- AMK read-only EventIR capture
+- Function IR and diagnostics
+
+### Must be added outside the world kernel
+
+- MCP transport/server package
+- MCP tool/resource schemas
+- world-session registry
+- actor/session/role binding
+- idempotency request ledger
+- filtered event and projection adapters
+- remote authentication and authorization
+- per-actor observation/belief projection
+- MCP audit envelope
+- multi-world process/service boundary
+
+### Must not be duplicated
+
+- world state database
+- quest state machine
+- combat/magic resolution
+- event log
+- memory-as-world-truth
+- narrative-owned state
+- direct MCP writes to `StateStore`
