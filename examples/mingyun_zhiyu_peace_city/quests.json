@@ -2,10 +2,28 @@
   {
     "quest_id": "quest.find_work",
     "title": "找份差事",
-    "initial_state": "available",
+    "initial_state": "unstarted",
     "canon_status": "explicit_canon",
-    "requirements": ["deliver:item.firewood_bundle:npc.foreman_laotie"],
-    "reward": {"currency": 15},
-    "note": "reward.currency=15 is grounded in worlds/mingyun_zhiyu/data/economy_income.csv's '普通勞工 5-10銅幣/日' row — slightly more than a day's common-labor wage for a one-off delivery, not an invented number. Completion is now event-driven: giving item.firewood_bundle to npc.foreman_laotie (the 'give' action) satisfies the requirement automatically."
+    "transitions": [
+      {
+        "transition_id": "transition.find_work.accept",
+        "from": "unstarted",
+        "on": "dialogue.responded",
+        "event_match": {"dialogue_id": "dialogue.foreman_laotie.work.offer"},
+        "to": "available",
+        "priority": 0
+      },
+      {
+        "transition_id": "transition.find_work.complete",
+        "from": "available",
+        "on": "inventory.item_given",
+        "event_match": {"item": "item.firewood_bundle", "recipient": "npc.foreman_laotie"},
+        "requirements": ["deliver:item.firewood_bundle:npc.foreman_laotie"],
+        "to": "completed",
+        "reward": {"currency": 15},
+        "priority": 0
+      }
+    ],
+    "note": "reward.currency=15 is grounded in worlds/mingyun_zhiyu/data/economy_income.csv's '普通勞工 5-10銅幣/日' row — slightly more than a day's common-labor wage for a one-off delivery, not an invented number. The task is explicit event-driven state progression: dialogue.foreman_laotie.work.offer causes unstarted→available; giving item.firewood_bundle to npc.foreman_laotie causes available→completed and pays the reward."
   }
 ]

@@ -63,6 +63,20 @@ class ActionIR:
     authority: str = "player"
     proposed_at_tick: int = 0
 
+    def to_dict(self) -> dict[str, Any]:
+        payload = asdict(self)
+        payload["status"] = self.status.value
+        return payload
+
+    @classmethod
+    def from_dict(cls, payload: dict[str, Any]) -> "ActionIR":
+        raw = dict(payload)
+        try:
+            raw["status"] = ActionStatus(raw.get("status", ActionStatus.PROPOSED.value))
+            return cls(**raw)
+        except (TypeError, ValueError) as exc:
+            raise ValueError("無法還原 Snapshot 中的 ActionIR") from exc
+
 
 @dataclass(slots=True)
 class EventIR:

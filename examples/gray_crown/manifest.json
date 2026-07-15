@@ -11,7 +11,20 @@
     "exits": "data/exits.csv",
     "entities": "data/entities.csv",
     "items": "data/items.csv",
-    "quests": "quests.json"
+    "quests": "quests.json",
+    "narrative": "narrative.json",
+    "dialogues": "dialogues.json",
+    "player_templates": "player_templates.json",
+    "scenarios": "scenarios.json",
+    "functions": "functions.json"
+  },
+  "source_schemas": {
+    "rooms": "compilableworld.schema/csv/rooms/v0.1",
+    "exits": "compilableworld.schema/csv/exits/v0.1",
+    "entities": "compilableworld.schema/csv/entities/v0.1",
+    "items": "compilableworld.schema/csv/items/v0.1",
+    "functions": "compilableworld.schema/functions/v0.1",
+    "scenarios": "compilableworld.schema/scenarios/v0.1"
   },
   "modules": [
     "room.core",
@@ -25,4 +38,3 @@
   ],
   "build": {"strict": true, "fail_on_warning": false}
 }
-

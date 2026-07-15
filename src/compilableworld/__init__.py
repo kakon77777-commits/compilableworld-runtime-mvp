@@ -1,4 +1,6 @@
-"""CompilableWorld Runtime reference MVP."""
+"""CompilableWorld Runtime reference MVP.
 
-__version__ = "0.1.0"
+The ``compilableworld`` import path remains stable for existing packages.
+"""
 
+__version__ = "0.1.1"

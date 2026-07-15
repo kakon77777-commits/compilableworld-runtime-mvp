@@ -7,6 +7,7 @@ from typing import Protocol
 
 from .kernel import WorldRuntime
 from .models import ActionIR, EventIR
+from .narrative import render_room_description
 
 
 class IntentParser(Protocol):
@@ -38,6 +39,10 @@ class DeterministicIntentParser:
         if verb in {"take", "get", "drop", "open", "unlock", "attack"}:
             target = self._resolve(parts[1] if len(parts) > 1 else None, actor_id, runtime)
             return ActionIR(actor_id, "take" if verb == "get" else verb, target_id=target)
+        if verb in {"talk", "ask"}:
+            target = self._resolve(parts[1] if len(parts) > 1 else None, actor_id, runtime)
+            topic = parts[2].lower() if len(parts) > 2 else "default"
+            return ActionIR(actor_id, "talk", target_id=target, args={"topic": topic})
         if verb == "give":
             item = self._resolve(parts[1] if len(parts) > 1 else None, actor_id, runtime)
             recipient = self._resolve(parts[2] if len(parts) > 2 else None, actor_id, runtime)
@@ -81,7 +86,14 @@ class TerminalGateway:
         self.runtime = runtime
         self.actor_id = actor_id
         self.parser = parser or DeterministicIntentParser()
+        self.runtime.events.subscribe("quest.transitioned", self._on_quest_transitioned)
         self.runtime.events.subscribe("quest.completed", self._on_quest_completed)
+        self.runtime.events.subscribe("quest.failed", self._on_quest_failed)
+
+    def _on_quest_transitioned(self, event) -> None:
+        if event.target != self.actor_id:
+            return
+        print(f">> 任務進度：{event.payload['title']} [{event.payload['from']} → {event.payload['to']}]")
 
     def _on_quest_completed(self, event) -> None:
         if event.target != self.actor_id:
@@ -89,6 +101,11 @@ class TerminalGateway:
         reward = event.payload.get("reward") or {}
         note = f"，獲得 {reward['currency']} 貨幣" if reward.get("currency") else ""
         print(f">> 任務完成：{event.payload['title']}{note}")
+
+    def _on_quest_failed(self, event) -> None:
+        if event.target != self.actor_id:
+            return
+        print(f">> 任務失敗：{event.payload['title']}")
 
     def run(self) -> None:
         print(f"CompilableWorld Runtime {self.runtime.package['manifest']['runtime_version']}")
@@ -105,7 +122,7 @@ class TerminalGateway:
             if text in {"quit", "exit"}:
                 break
             if text == "help":
-                print("look | n/s/e/w/north/south/east/west/up/down | go DIR | take/drop/open/unlock/attack 名稱或ID | give 物品 對象 | cast 法術名 | inventory | say TEXT | status | quests | tick [N] | events | diag | save FILE | load FILE")
+                print("look | n/s/e/w/north/south/east/west/up/down | go DIR | take/drop/open/unlock/attack 名稱或ID | talk/ask 對象 [topic] | give 物品 對象 | cast 法術名 | inventory | say TEXT | status | quests | tick [N] | events | diag | save FILE | load FILE")
                 continue
             if text.startswith("tick"):
                 parts = text.split()
@@ -148,7 +165,6 @@ class TerminalGateway:
                 continue
             dead = "（已死亡）" if not self.runtime.state.get(e.entity_id, "status", "alive", True) else ""
             visible.append(f"{e.name}{dead}({e.entity_id})")
-        print(f"\n== {room['name']} ==\n{room['description']}")
+        print(f"\n== {room['name']} ==\n{render_room_description(self.runtime, self.actor_id, room)}")
         if visible:
             print("可見：" + "、".join(visible))
-

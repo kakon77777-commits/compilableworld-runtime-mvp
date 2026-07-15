@@ -1,0 +1,19 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "compilableworld.schema/csv/items/v0.1",
+  "title": "CompilableWorld items.csv v0.1",
+  "description": "Portable item table. Room references and entity/item ID overlap remain Compiler rules.",
+  "type": "object",
+  "x-csv": {
+    "format": "compilableworld.csv-schema/v0.1",
+    "dialect": { "encoding": "utf-8-sig", "delimiter": ",", "header": true },
+    "primary_key": ["item_id"],
+    "columns": [
+      { "name": "item_id", "datatype": "id", "required": true },
+      { "name": "name", "datatype": "text", "required": true },
+      { "name": "room", "datatype": "id", "required": true },
+      { "name": "portable", "datatype": "boolean", "required": true },
+      { "name": "provenance", "datatype": "id", "required": true }
+    ]
+  }
+}

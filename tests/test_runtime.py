@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import shutil
 import tempfile
 import unittest
 from pathlib import Path
@@ -11,6 +12,7 @@ from compilableworld.gateway import DeterministicIntentParser
 from compilableworld.kernel import StateStore, WorldRuntime
 from compilableworld.models import ActionIR, StateDelta
 from compilableworld.modules import CombatModule, install_builtin_modules
+from compilableworld.player_generation import generate_character
 
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -40,6 +42,61 @@ class CompilerTests(unittest.TestCase):
             (root / "manifest.json").write_text(json.dumps(manifest), encoding="utf-8")
             with self.assertRaises(CompileError):
                 compile_world(root, root / "out")
+
+    def test_narrative_overlay_is_compiled_and_validated(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            package = json.loads(compile_world(EXAMPLE, tmp).read_text(encoding="utf-8"))
+            overlay = package["narrative"]["room_overlays"][0]
+            self.assertEqual(overlay["room_id"], "room.south_gate")
+            self.assertEqual(overlay["when"][0]["owner"], "npc.guard")
+
+        with tempfile.TemporaryDirectory() as tmp:
+            world = Path(tmp) / "world"
+            shutil.copytree(EXAMPLE, world)
+            narrative_path = world / "narrative.json"
+            narrative = json.loads(narrative_path.read_text(encoding="utf-8"))
+            narrative["room_overlays"][0]["room_id"] = "room.not_real"
+            narrative_path.write_text(json.dumps(narrative), encoding="utf-8")
+            with self.assertRaisesRegex(CompileError, "引用不存在房間"):
+                compile_world(world, Path(tmp) / "out")
+
+    def test_dialogue_script_is_compiled_and_speaker_is_validated(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            package = json.loads(compile_world(PEACE_CITY, tmp).read_text(encoding="utf-8"))
+            line = next(x for x in package["dialogues"]["dialogues"] if x["dialogue_id"] == "dialogue.foreman_laotie.work.available")
+            self.assertEqual(line["speaker_id"], "npc.foreman_laotie")
+            self.assertEqual(line["when"][0]["owner"], "$actor")
+
+        with tempfile.TemporaryDirectory() as tmp:
+            world = Path(tmp) / "world"
+            shutil.copytree(PEACE_CITY, world)
+            dialogues_path = world / "dialogues.json"
+            dialogues = json.loads(dialogues_path.read_text(encoding="utf-8"))
+            dialogues["dialogues"][0]["speaker_id"] = "npc.not_real"
+            dialogues_path.write_text(json.dumps(dialogues), encoding="utf-8")
+            with self.assertRaisesRegex(CompileError, "引用不存在說話者"):
+                compile_world(world, Path(tmp) / "out")
+
+    def test_quest_transitions_are_compiled_and_reject_ambiguous_dispatch(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            package = json.loads(compile_world(PEACE_CITY, tmp).read_text(encoding="utf-8"))
+            quest = next(q for q in package["quests"] if q["quest_id"] == "quest.find_work")
+            self.assertEqual(quest["initial_state"], "unstarted")
+            self.assertEqual(quest["transitions"][0]["on"], "dialogue.responded")
+            self.assertEqual(quest["transitions"][1]["reward"]["currency"], 15)
+
+        with tempfile.TemporaryDirectory() as tmp:
+            world = Path(tmp) / "world"
+            shutil.copytree(PEACE_CITY, world)
+            quests_path = world / "quests.json"
+            quests = json.loads(quests_path.read_text(encoding="utf-8"))
+            duplicate = dict(quests[0]["transitions"][0])
+            duplicate["transition_id"] = "transition.find_work.ambiguous"
+            duplicate["to"] = "failed"
+            quests[0]["transitions"].append(duplicate)
+            quests_path.write_text(json.dumps(quests), encoding="utf-8")
+            with self.assertRaisesRegex(CompileError, "from/on/priority 不可重複"):
+                compile_world(world, Path(tmp) / "out")
 
 
 class StateTests(unittest.TestCase):
@@ -85,9 +142,93 @@ class RuntimeTests(unittest.TestCase):
         self.runtime.submit(ActionIR("player.neo", "move", args={"direction": "north"}))
         snapshot = Path(self.temp.name) / "save.json"
         self.runtime.save_snapshot(snapshot)
+        saved = json.loads(snapshot.read_text(encoding="utf-8"))
+        self.assertEqual(saved["format"], "compilableworld.snapshot/v0.2")
+        self.assertEqual(saved["snapshot_version"], 2)
         self.runtime.submit(ActionIR("player.neo", "move", args={"direction": "south"}))
         self.runtime.load_snapshot(snapshot)
         self.assertEqual(self.runtime.state.get("player.neo", "position", "room"), "room.market")
+
+    def test_snapshot_reconciles_dynamic_entities_and_rejects_invalid_atomically(self) -> None:
+        actor = self.runtime.create_player(generate_character(seed=1, name="First"))
+        snapshot = Path(self.temp.name) / "generated-save.json"
+        self.runtime.save_snapshot(snapshot)
+
+        ghost = self.runtime.create_player(
+            generate_character(seed=2, name="Ghost"),
+            replace_default=False,
+        )
+        self.assertIn(ghost, self.runtime.dynamic_entities)
+        self.runtime.load_snapshot(snapshot)
+        self.assertTrue(self.runtime.registry.contains(actor))
+        self.assertFalse(self.runtime.registry.contains(ghost))
+        self.assertEqual(self.runtime.dynamic_entities, {actor})
+        self.assertEqual(set(self.runtime.player_profiles), {actor})
+        self.assertEqual(self.runtime.active_player_id, actor)
+
+        invalid = Path(self.temp.name) / "invalid-scheduler-save.json"
+        payload = json.loads(snapshot.read_text(encoding="utf-8"))
+        payload["scheduler"] = {"tick": "bad", "counter": 0, "queue": []}
+        invalid.write_text(json.dumps(payload), encoding="utf-8")
+        self.runtime.state.seed("sentinel", "test", "value", 1)
+        before_state = self.runtime.state.export()
+        before_entities = {entity.entity_id for entity in self.runtime.registry.values()}
+        before_dynamic = set(self.runtime.dynamic_entities)
+        before_profiles = {key: dict(value) for key, value in self.runtime.player_profiles.items()}
+        before_active = self.runtime.active_player_id
+        before_scheduler = self.runtime.scheduler.export()
+
+        with self.assertRaisesRegex(RuntimeError, "scheduler"):
+            self.runtime.load_snapshot(invalid)
+
+        self.assertEqual(self.runtime.state.export(), before_state)
+        self.assertEqual(
+            {entity.entity_id for entity in self.runtime.registry.values()},
+            before_entities,
+        )
+        self.assertEqual(self.runtime.dynamic_entities, before_dynamic)
+        self.assertEqual(self.runtime.player_profiles, before_profiles)
+        self.assertEqual(self.runtime.active_player_id, before_active)
+        self.assertEqual(self.runtime.scheduler.export(), before_scheduler)
+
+    def test_snapshot_restores_scheduled_action(self) -> None:
+        package = Path(self.temp.name) / "world.package.json"
+        self.runtime.submit(ActionIR("player.neo", "move", args={"direction": "north"}), delay=2)
+        snapshot = Path(self.temp.name) / "scheduled-save.json"
+        self.runtime.save_snapshot(snapshot)
+
+        restored = WorldRuntime.from_package(package)
+        install_builtin_modules(restored)
+        restored.load_snapshot(snapshot)
+        self.assertEqual(restored.scheduler.queued, 1)
+        self.assertEqual(restored.advance(1), [])
+        receipts = restored.advance(1)
+        self.assertEqual(receipts[0].status.value, "completed")
+        self.assertEqual(restored.state.get("player.neo", "position", "room"), "room.market")
+
+    def test_legacy_snapshot_migrates_without_scheduled_queue(self) -> None:
+        snapshot = Path(self.temp.name) / "legacy-save.json"
+        self.runtime.save_snapshot(snapshot)
+        payload = json.loads(snapshot.read_text(encoding="utf-8"))
+        payload["format"] = "compilableworld.snapshot/v0.1"
+        payload.pop("snapshot_version", None)
+        payload.pop("scheduler", None)
+        snapshot.write_text(json.dumps(payload), encoding="utf-8")
+
+        self.runtime.submit(ActionIR("player.neo", "move", args={"direction": "north"}))
+        self.runtime.load_snapshot(snapshot)
+        self.assertEqual(self.runtime.scheduler.tick, 0)
+        self.assertEqual(self.runtime.scheduler.queued, 0)
+        self.assertEqual(self.runtime.state.get("player.neo", "position", "room"), "room.south_gate")
+
+    def test_snapshot_rejects_unknown_version(self) -> None:
+        snapshot = Path(self.temp.name) / "future-save.json"
+        self.runtime.save_snapshot(snapshot)
+        payload = json.loads(snapshot.read_text(encoding="utf-8"))
+        payload["snapshot_version"] = 99
+        snapshot.write_text(json.dumps(payload), encoding="utf-8")
+        with self.assertRaisesRegex(RuntimeError, "不支援的 Snapshot 版本"):
+            self.runtime.load_snapshot(snapshot)
 
     def test_scheduler_delays_execution(self) -> None:
         action = ActionIR("player.neo", "move", args={"direction": "north"})
@@ -116,6 +257,14 @@ class RuntimeTests(unittest.TestCase):
     def test_reach_quest_does_not_complete_before_arrival(self) -> None:
         self.runtime.submit(ActionIR("player.neo", "move", args={"direction": "north"}))
         self.assertEqual(self.runtime.state.get("player.neo", "quest", "quest.black_tide_omen"), "available")
+
+    def test_look_projects_state_aware_room_overlay(self) -> None:
+        self.runtime.state.seed("npc.guard", "status", "alive", False)
+        receipt = self.runtime.submit(ActionIR("player.neo", "look"))
+        self.assertEqual(receipt.status.value, "completed")
+        self.assertIn("南門只剩風", receipt.message)
+        observed = [event for event in self.runtime.event_log.events if event.event_type == "room.observed"][-1]
+        self.assertEqual(observed.payload["description"], receipt.message)
 
     def test_bare_direction_word_parses_as_move(self) -> None:
         action = DeterministicIntentParser().parse("north", "player.neo", self.runtime)
@@ -178,8 +327,13 @@ class PeaceCityQuestTests(unittest.TestCase):
 
     def test_delivering_firewood_completes_quest_and_pays_reward(self) -> None:
         actor = "player.newcomer"
-        self.assertEqual(self.runtime.state.get(actor, "quest", "quest.find_work"), "available")
+        self.assertEqual(self.runtime.state.get(actor, "quest", "quest.find_work"), "unstarted")
         self.runtime.submit(ActionIR(actor, "move", args={"direction": "north"}))  # -> slum_alley
+        self.runtime.submit(ActionIR(actor, "move", args={"direction": "west"}))  # -> labor_yard
+        accept = self.runtime.submit(ActionIR(actor, "talk", "npc.foreman_laotie", args={"topic": "work"}))
+        self.assertEqual(accept.status.value, "completed")
+        self.assertEqual(self.runtime.state.get(actor, "quest", "quest.find_work"), "available")
+        self.runtime.submit(ActionIR(actor, "move", args={"direction": "east"}))  # -> slum_alley
         take = self.runtime.submit(ActionIR(actor, "take", "item.firewood_bundle"))
         self.assertEqual(take.status.value, "completed")
         self.runtime.submit(ActionIR(actor, "move", args={"direction": "west"}))  # -> labor_yard
@@ -203,7 +357,7 @@ class PeaceCityQuestTests(unittest.TestCase):
         self.runtime.submit(ActionIR(actor, "take", "item.firewood_bundle"))
         give = self.runtime.submit(ActionIR(actor, "give", "item.firewood_bundle", args={"recipient": "npc.foreman_laotie"}))
         self.assertEqual(give.status.value, "failed")
-        self.assertEqual(self.runtime.state.get(actor, "quest", "quest.find_work"), "available")
+        self.assertEqual(self.runtime.state.get(actor, "quest", "quest.find_work"), "unstarted")
 
     def test_give_rejected_for_still_needed_key(self) -> None:
         """A real playtest gave away the checkpoint's only key and could never get it
@@ -232,6 +386,81 @@ class PeaceCityQuestTests(unittest.TestCase):
         action = DeterministicIntentParser().parse("take 柴薪捆", actor, self.runtime)
         self.assertEqual(action.target_id, "item.firewood_bundle")
         self.assertEqual(self.runtime.submit(action).status.value, "completed")
+
+    def test_dialogue_offer_transitions_quest_via_event_reaction(self) -> None:
+        actor = "player.newcomer"
+        self.runtime.submit(ActionIR(actor, "move", args={"direction": "north"}))
+        self.runtime.submit(ActionIR(actor, "move", args={"direction": "west"}))
+        action = DeterministicIntentParser().parse("talk 老鐵 work", actor, self.runtime)
+        self.assertEqual(action.verb, "talk")
+        self.assertEqual(action.target_id, "npc.foreman_laotie")
+        before = self.runtime.submit(action)
+        self.assertEqual(before.status.value, "completed")
+        self.assertIn("一捆柴薪", before.message)
+        self.assertEqual(self.runtime.state.get(actor, "quest", "quest.find_work"), "available")
+        self.assertEqual(self.runtime.state.get(actor, "wallet", "currency"), 0)
+        response = [e for e in self.runtime.event_log.events if e.event_type == "dialogue.responded"][-1]
+        self.assertEqual(response.payload["dialogue_id"], "dialogue.foreman_laotie.work.offer")
+        transition = [e for e in self.runtime.event_log.events if e.event_type == "quest.transitioned"][-1]
+        self.assertEqual(transition.source, "quest.core")
+        self.assertEqual(transition.payload["transition_id"], "transition.find_work.accept")
+        self.assertEqual(transition.causation_id, response.event_id)
+
+        repeated = self.runtime.submit(ActionIR(actor, "talk", "npc.foreman_laotie", args={"topic": "work"}))
+        self.assertIn("柴薪還在巷子裡", repeated.message)
+        self.assertEqual(self.runtime.state.get(actor, "quest", "quest.find_work"), "available")
+
+        self.runtime.submit(ActionIR(actor, "move", args={"direction": "east"}))
+        self.runtime.submit(ActionIR(actor, "take", "item.firewood_bundle"))
+        self.runtime.submit(ActionIR(actor, "move", args={"direction": "west"}))
+        self.runtime.submit(ActionIR(actor, "give", "item.firewood_bundle", args={"recipient": "npc.foreman_laotie"}))
+        after = self.runtime.submit(ActionIR(actor, "talk", "npc.foreman_laotie", args={"topic": "work"}))
+        self.assertEqual(after.status.value, "completed")
+        self.assertIn("工錢", after.message)
+        response = [e for e in self.runtime.event_log.events if e.event_type == "dialogue.responded"][-1]
+        self.assertEqual(response.payload["dialogue_id"], "dialogue.foreman_laotie.work.completed")
+
+    def test_dialogue_without_matching_transition_does_not_change_quest(self) -> None:
+        actor = "player.newcomer"
+        reply = self.runtime.submit(ActionIR(actor, "talk", "npc.registration_clerk", args={"topic": "default"}))
+        self.assertEqual(reply.status.value, "completed")
+        self.assertEqual(self.runtime.state.get(actor, "quest", "quest.find_work"), "unstarted")
+        self.assertFalse([e for e in self.runtime.event_log.events if e.event_type == "quest.transitioned"])
+
+    def test_higher_priority_branch_can_fail_a_quest_deterministically(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            world = Path(tmp) / "world"
+            shutil.copytree(PEACE_CITY, world)
+            quests_path = world / "quests.json"
+            quests = json.loads(quests_path.read_text(encoding="utf-8"))
+            quests[0]["transitions"].append({
+                "transition_id": "transition.find_work.decline",
+                "from": "unstarted",
+                "on": "dialogue.responded",
+                "event_match": {"dialogue_id": "dialogue.foreman_laotie.work.offer"},
+                "to": "failed",
+                "priority": 10,
+            })
+            quests_path.write_text(json.dumps(quests), encoding="utf-8")
+            package = compile_world(world, Path(tmp) / "out")
+            runtime = WorldRuntime.from_package(package)
+            install_builtin_modules(runtime)
+            actor = "player.newcomer"
+            runtime.submit(ActionIR(actor, "move", args={"direction": "north"}))
+            runtime.submit(ActionIR(actor, "move", args={"direction": "west"}))
+            runtime.submit(ActionIR(actor, "talk", "npc.foreman_laotie", args={"topic": "work"}))
+            self.assertEqual(runtime.state.get(actor, "quest", "quest.find_work"), "failed")
+            failed = [e for e in runtime.event_log.events if e.event_type == "quest.failed"][-1]
+            self.assertEqual(failed.payload["transition_id"], "transition.find_work.decline")
+
+    def test_talk_falls_back_to_default_topic_and_requires_presence(self) -> None:
+        actor = "player.newcomer"
+        missing = self.runtime.submit(ActionIR(actor, "talk", "npc.foreman_laotie", args={"topic": "work"}))
+        self.assertEqual(missing.status.value, "failed")
+        self.assertIn("不在目前場景", missing.message)
+        fallback = self.runtime.submit(ActionIR(actor, "talk", "npc.registration_clerk", args={"topic": "unknown"}))
+        self.assertEqual(fallback.status.value, "completed")
+        self.assertIn("名字先記在冊上", fallback.message)
 
     def test_give_resolves_display_names_for_item_and_recipient(self) -> None:
         actor = "player.newcomer"

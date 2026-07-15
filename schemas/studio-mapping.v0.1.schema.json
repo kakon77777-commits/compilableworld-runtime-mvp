@@ -1,0 +1,50 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "compilableworld.schema/studio-mapping/v0.1",
+  "title": "CompilableWorld Studio mapping v0.1",
+  "description": "Human-reviewed bindings from Studio World IR to Runtime-facing room, table, EventIR, and guard decisions.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["format", "world_ir_format", "entities", "state_machines"],
+  "properties": {
+    "format": { "const": "compilableworld.studio-mapping/v0.1" },
+    "world_ir_format": { "const": "compilableworld.studio-world-ir/v0.1" },
+    "entities": {
+      "type": "object",
+      "additionalProperties": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["room"],
+        "properties": {
+          "room": { "type": ["string", "null"], "minLength": 1 },
+          "target_table": { "enum": ["entities", "items"] }
+        }
+      }
+    },
+    "state_machines": {
+      "type": "object",
+      "additionalProperties": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["event_mappings"],
+        "properties": {
+          "target": { "enum": ["quest", null] },
+          "guard_policy": { "enum": ["none", "state_conditions", "runtime_module", "external_review", "drop_with_approval"] },
+          "event_mappings": {
+            "type": "object",
+            "additionalProperties": {
+              "type": "object",
+              "additionalProperties": false,
+              "required": ["event_type"],
+              "properties": {
+                "event_type": { "enum": ["inventory.item_given", "movement.actor_moved", "dialogue.responded", null] },
+                "event_match": { "type": "object" }
+              }
+            }
+          }
+        }
+      }
+    },
+    "notes": { "type": "string" }
+  }
+}

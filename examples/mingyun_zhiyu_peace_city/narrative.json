@@ -1,0 +1,30 @@
+{
+  "room_overlays": [
+    {
+      "room_id": "room.labor_yard",
+      "when": [
+        {
+          "owner": "$actor",
+          "namespace": "quest",
+          "key": "quest.find_work",
+          "equals": "completed"
+        }
+      ],
+      "text": "老鐵收下柴薪，將工錢放到你掌心；這座城暫時承認了你的存在。",
+      "mode": "append"
+    },
+    {
+      "room_id": "room.north_garrison",
+      "when": [
+        {
+          "owner": "npc.woerkan",
+          "namespace": "status",
+          "key": "alive",
+          "equals": false
+        }
+      ],
+      "text": "沃爾坎·鐵壁的盔甲靜靜躺在雪泥裡，北境關卡第一次失去了它的錨點。",
+      "mode": "append"
+    }
+  ]
+}
