@@ -18,3 +18,7 @@
 14. 有 `transitions` 的任務只能由 `quest.core` 根據已宣告的 EventIR 原子轉移；同一 `from/on/priority` 的分支必須在編譯期拒絕，不能靠來源順序靜默決定世界真相。
 
 建議任務分工：Compiler Agent、Kernel Agent、Module Agent、Test Agent、Reviewer Agent。提出修改與批准修改不可由同一 Agent 同時完成。
+15. MCP Adapter 不得持有 `StateStore.commit()` 或 `seed()` 的直接寫入路徑；只讀工具必須以測試證明呼叫前後 state/event/tick/action registry 不變。
+16. MCP Session 是外部連線中繼資料，不是 Runtime State；開啟、關閉或遺失 Session 不得產生世界事件。
+17. MCP 事件輸出必須先套用 `EventIR.visibility` 與 actor/role 過濾；未知 visibility 採 fail-closed，除非明確是 admin。
+18. 官方 MCP SDK 是可選傳輸依賴，核心 Runtime 與 transport-neutral service 必須在未安裝 SDK 時仍可 import、測試與執行。

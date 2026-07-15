@@ -9,9 +9,13 @@ description = "A dependency-free reference MVP for the MSSP modular CompilableWo
 requires-python = ">=3.11"
 dependencies = []
 
+[project.optional-dependencies]
+mcp = ["mcp>=1.27,<2"]
+
 [project.scripts]
 cw-runtime = "compilableworld.cli:main"
 amk-local = "agent_memory_kernel.cli:main"
+cw-mcp-readonly = "compilableworld_mcp.server:main"
 
 [tool.setuptools.packages.find]
 where = ["src"]
