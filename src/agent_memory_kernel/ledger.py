@@ -124,4 +124,3 @@ class JsonlLedger:
 def replayable_events(ledger: JsonlLedger) -> Iterable[RawEvent]:
     for _, event, _ in ledger.iter_records():
         yield event
-

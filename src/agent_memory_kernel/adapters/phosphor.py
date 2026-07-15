@@ -18,4 +18,3 @@ class PhosphorTraceAdapter:
 
     def capture(self, trace: dict[str, Any]) -> RawEvent:
         return self.amk.capture_phosphor_trace(self.scope, trace, self.source_id)
-

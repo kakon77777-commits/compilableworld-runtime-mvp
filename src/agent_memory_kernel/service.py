@@ -373,4 +373,3 @@ class AgentMemoryKernel:
             "ledger": self.ledger.verify(),
             "repaired_records": self.repaired_records,
         }
-

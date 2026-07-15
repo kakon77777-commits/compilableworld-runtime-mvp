@@ -1,9 +1,9 @@
 # CompilableWorld Studio：基於 MSSP × RDR 的可視化世界狀態編譯與驗證工作台
 
-**文件版本：** v0.1  
-**文件性質：** 架構轉向規格書／產品設計文件／MVP 實作計畫  
-**核心方法論：** MSSP × RDR  
-**目標系統：** CompilableWorld Runtime、MUD 世界、模擬世界、Agent 可操作世界  
+**文件版本：** v0.1<br>
+**文件性質：** 架構轉向規格書／產品設計文件／MVP 實作計畫<br>
+**核心方法論：** MSSP × RDR<br>
+**目標系統：** CompilableWorld Runtime、MUD 世界、模擬世界、Agent 可操作世界<br>
 **主要定位：** 世界定義、狀態編輯、規則編譯、靜態驗證、動態模擬與因果觀測的統一工作台
 
 ---

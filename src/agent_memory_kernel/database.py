@@ -537,4 +537,3 @@ class AMKDatabase:
             "clean_revision": self.clean_revision,
             "index_version": self.index_version,
         }
-

@@ -224,4 +224,3 @@ class ContextCompiler:
                     "reason": "multiple_current_claims",
                 })
         return conflicts
-

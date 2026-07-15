@@ -4,4 +4,3 @@ from .compilableworld import CompilableWorldMemoryAdapter
 from .phosphor import PhosphorTraceAdapter
 
 __all__ = ["CompilableWorldMemoryAdapter", "PhosphorTraceAdapter"]
-

@@ -166,4 +166,3 @@ class MemoryGovernor:
         if not requested_approval:
             return ReviewDecision.REJECTED
         return ReviewDecision.APPROVED if report.passes else ReviewDecision.NEEDS_EVIDENCE
-

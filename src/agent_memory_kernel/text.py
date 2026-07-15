@@ -19,4 +19,3 @@ def token_coverage(query_tokens: set[str], content: str) -> float:
     if not query_tokens:
         return 1.0
     return len(query_tokens & tokens(content)) / len(query_tokens)
-

@@ -104,4 +104,3 @@ class SyncCoordinator:
             "immutable_snapshot": "immutable_snapshot" in states,
             "acknowledgements": acknowledgements,
         }
-
