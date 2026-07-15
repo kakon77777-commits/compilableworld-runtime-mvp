@@ -260,3 +260,25 @@ PYTHONPATH=src python3 -m compilableworld play build/gray_crown/world.package.js
 - AMK v0.1 已提供本機 Raw/Clean、治理與 CompilableWorld EventIR 唯讀擷取；它目前沒有向量／圖／時間索引、真正網路同步、加密副本、背景自我改寫或直接程式碼／權重寫入。它不是 Runtime State，也不會自動把遊戲事件升格為 Clean truth。
 - （已修復，記錄供參考）CLI 曾在非 UTF-8 系統 locale（例如繁體中文 Windows 的 cp950）下對含中文標點的 `say` 輸入拋出編碼錯誤；`cli.py` 現在會在啟動時強制 stdin/stdout 為 UTF-8。
 - （已修復，源自一次真實的 AI 玩家試玩）指令目標現在可以用場景內可見的顯示名稱（例如「老鐵」）指定，不再強制要求內部 ID（`npc.foreman_laotie`）——`DeterministicIntentParser` 會在目前房間與玩家物品欄中做名稱解析，找不到或有歧義時一律不猜測、原樣傳給下層模組，讓玩家看到正常的「找不到」訊息，不會誤觸錯的目標。同一輪試玩也發現 `give` 沒有保護機制、可以把仍在使用中的鑰匙道具送給不相關 NPC 且無法復原——現在會在該鑰匙鎖著的門還沒開之前擋下交付。另外修正：裸方向詞（`north`）現在可直接使用；`unlock` 對非門實體會給出正確訊息而非誤導的「門沒有上鎖」；戰鬥現在有反擊傷害與獨立的擊殺訊息。
+
+## Read-only MCP 世界介面（M0）
+
+`compilableworld_mcp` 提供一層不修改 `StateStore` 的世界存取服務，直接重用既有 Runtime Package、WorldRuntime、Web View Model 與 EventLog。核心服務維持零第三方依賴；只有真正啟動 MCP 傳輸時才需要安裝官方 Python SDK v1.x：
+
+```bash
+python -m pip install -e ".[mcp]"
+```
+
+啟動 stdio MCP Server：
+
+```bash
+cw-mcp-readonly build/gray_crown/world.package.json
+```
+
+或啟動可供 MCP Inspector 連線的 Streamable HTTP：
+
+```bash
+cw-mcp-readonly build/gray_crown/world.package.json --transport streamable-http
+```
+
+M0 只暴露 `list_worlds`、`open_world_session`、`get_world_status`、`get_current_scene`、`get_recent_events`、`close_world_session`。所有結果均標示 `read_only: true` 與 `world_state_changed: false`；尚未提供 `submit_action`、遠端驗證、多人一致性或 Drive 回寫。完整邊界見 [`docs/MCP_READONLY_M0.md`](docs/MCP_READONLY_M0.md)。

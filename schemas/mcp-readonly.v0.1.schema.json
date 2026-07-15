@@ -1,0 +1,21 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "compilableworld.schema/mcp-readonly/v0.1",
+  "title": "CompilableWorld Read-only MCP Result Contracts",
+  "type": "object",
+  "required": ["format", "world_state_changed"],
+  "properties": {
+    "format": {
+      "type": "string",
+      "pattern": "^compilableworld\\.mcp-"
+    },
+    "read_only": {"const": true},
+    "world_state_changed": {"const": false},
+    "session_id": {"type": "string", "pattern": "^session_"},
+    "status": {"type": "string"},
+    "error_code": {"type": "string"},
+    "message": {"type": "string"},
+    "retryable": {"type": "boolean"}
+  },
+  "additionalProperties": true
+}
