@@ -276,7 +276,11 @@ class WorldRuntime:
         replace_actor_id: str | None = None,
         replace_default: bool = True,
     ) -> str:
-        """Materialize a generated profile into the Runtime state model."""
+        """Materialize a generated profile into the Runtime state model.
+
+        Replacing an actor transfers carried items to the newly generated actor
+        instead of leaving them with an entity that no longer exists.
+        """
         existing_ids = set(self.registry._entities)
         if replace_actor_id:
             existing_ids.discard(replace_actor_id)
@@ -292,6 +296,12 @@ class WorldRuntime:
             default_id = self.package.get("world", {}).get("default_player_entity")
             if default_id:
                 replacement_ids.add(default_id)
+        carried_items = [
+            (entity.entity_id, self.state.version(entity.entity_id, "inventory", "carrier"))
+            for entity in self.registry.values()
+            if entity.entity_id not in replacement_ids
+            and self.state.get(entity.entity_id, "inventory", "carrier") in replacement_ids
+        ]
         if self.registry.contains(candidate) and candidate not in replacement_ids:
             raise RuntimeErrorBase(f"player actor id already exists: {candidate}")
         for old_id in replacement_ids:
@@ -334,6 +344,8 @@ class WorldRuntime:
         self.state.seed(candidate, "wallet", "currency", 0)
         for quest in self.package.get("quests", []):
             self.state.seed(candidate, "quest", quest["quest_id"], quest["initial_state"])
+        for item_id, version in carried_items:
+            self.state.seed(item_id, "inventory", "carrier", candidate, version)
         return candidate
 
     def register_module(self, module: RuntimeModule) -> None:
@@ -467,20 +479,85 @@ class WorldRuntime:
             raise RuntimeErrorBase("Snapshot 屬於不相容的世界版本")
         if not isinstance(payload.get("state"), dict):
             raise RuntimeErrorBase("Snapshot 缺少有效 state")
-        for raw in payload.get("dynamic_entities", []):
-            if not self.registry.contains(raw["entity_id"]):
-                self.registry.add(Entity(**raw))
-                self.dynamic_entities.add(raw["entity_id"])
-        self.player_profiles.update(payload.get("player_profiles", {}))
-        self.active_player_id = payload.get("active_player_id")
-        self.state.import_state(payload["state"])
+        # Parse and validate every replacement structure before touching live
+        # Runtime objects. A malformed scheduler or entity must not leave a
+        # hybrid world behind after load_snapshot raises.
+        dynamic_payload = payload.get("dynamic_entities", [])
+        if not isinstance(dynamic_payload, list):
+            raise RuntimeErrorBase("Snapshot dynamic_entities must be a list")
+        static_entity_ids = {raw["entity_id"] for raw in self.package["entities"]}
+        snapshot_entities: dict[str, Entity] = {}
+        try:
+            for raw in dynamic_payload:
+                if not isinstance(raw, dict):
+                    raise TypeError("dynamic entity must be an object")
+                entity = Entity(**raw)
+                if not entity.entity_id or entity.entity_id in static_entity_ids:
+                    raise ValueError(f"invalid dynamic entity id: {entity.entity_id}")
+                if entity.entity_id in snapshot_entities:
+                    raise ValueError(f"duplicate dynamic entity id: {entity.entity_id}")
+                if not isinstance(entity.components, list) or not isinstance(entity.metadata, dict):
+                    raise TypeError(f"invalid dynamic entity shape: {entity.entity_id}")
+                snapshot_entities[entity.entity_id] = entity
+        except (KeyError, TypeError, ValueError) as exc:
+            raise RuntimeErrorBase("Snapshot dynamic_entities is invalid") from exc
+
+        profiles_payload = payload.get("player_profiles", {})
+        if not isinstance(profiles_payload, dict) or any(
+            not isinstance(player_id, str) or not isinstance(profile, dict)
+            for player_id, profile in profiles_payload.items()
+        ):
+            raise RuntimeErrorBase("Snapshot player_profiles is invalid")
+        if set(profiles_payload) - set(snapshot_entities):
+            raise RuntimeErrorBase("Snapshot player_profiles references missing entities")
+        next_profiles = {player_id: dict(profile) for player_id, profile in profiles_payload.items()}
+
+        active_player_id = payload.get("active_player_id")
+        if active_player_id is not None and (
+            not isinstance(active_player_id, str) or active_player_id not in snapshot_entities
+        ):
+            raise RuntimeErrorBase("Snapshot active_player_id references a missing entity")
+
+        next_state = StateStore()
+        try:
+            next_state.import_state(payload["state"])
+        except (AttributeError, KeyError, TypeError, ValueError) as exc:
+            raise RuntimeErrorBase("Snapshot state is invalid") from exc
+
         scheduler_payload = payload.get("scheduler")
         if snapshot_version == 1 or scheduler_payload is None:
             # v0.1 snapshots predate scheduler persistence; migrate them as an
             # empty queue while retaining their saved tick.
             scheduler_payload = {"tick": payload.get("tick", 0), "counter": 0, "queue": []}
-        queued_actions = self.scheduler.import_state(scheduler_payload)
-        self.actions = {action.action_id: action for action in queued_actions}
+        next_scheduler = Scheduler()
+        queued_actions = next_scheduler.import_state(scheduler_payload)
+        next_actions = {action.action_id: action for action in queued_actions}
+
+        preserved_entities = {
+            entity_id: entity
+            for entity_id, entity in self.registry._entities.items()
+            if entity_id not in self.dynamic_entities
+        }
+        conflicts = set(snapshot_entities).intersection(preserved_entities)
+        if conflicts:
+            raise RuntimeErrorBase(
+                "Snapshot dynamic_entities conflict with existing entities: "
+                + ", ".join(sorted(conflicts))
+            )
+        next_entities = {**preserved_entities, **snapshot_entities}
+
+        # Commit the validated replacement as one state transition while
+        # retaining object identity for StateStore/Scheduler references held by
+        # modules and adapters.
+        self.registry._entities = next_entities
+        self.dynamic_entities = set(snapshot_entities)
+        self.player_profiles = next_profiles
+        self.active_player_id = active_player_id
+        self.state._cells = next_state._cells
+        self.scheduler.tick = next_scheduler.tick
+        self.scheduler._counter = next_scheduler._counter
+        self.scheduler._queue = next_scheduler._queue
+        self.actions = next_actions
 
     def replay(self, events: Iterable[EventIR]) -> None:
         for event in events:

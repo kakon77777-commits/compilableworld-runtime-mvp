@@ -12,6 +12,7 @@ from compilableworld.gateway import DeterministicIntentParser
 from compilableworld.kernel import StateStore, WorldRuntime
 from compilableworld.models import ActionIR, StateDelta
 from compilableworld.modules import CombatModule, install_builtin_modules
+from compilableworld.player_generation import generate_character
 
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -147,6 +148,48 @@ class RuntimeTests(unittest.TestCase):
         self.runtime.submit(ActionIR("player.neo", "move", args={"direction": "south"}))
         self.runtime.load_snapshot(snapshot)
         self.assertEqual(self.runtime.state.get("player.neo", "position", "room"), "room.market")
+
+    def test_snapshot_reconciles_dynamic_entities_and_rejects_invalid_atomically(self) -> None:
+        actor = self.runtime.create_player(generate_character(seed=1, name="First"))
+        snapshot = Path(self.temp.name) / "generated-save.json"
+        self.runtime.save_snapshot(snapshot)
+
+        ghost = self.runtime.create_player(
+            generate_character(seed=2, name="Ghost"),
+            replace_default=False,
+        )
+        self.assertIn(ghost, self.runtime.dynamic_entities)
+        self.runtime.load_snapshot(snapshot)
+        self.assertTrue(self.runtime.registry.contains(actor))
+        self.assertFalse(self.runtime.registry.contains(ghost))
+        self.assertEqual(self.runtime.dynamic_entities, {actor})
+        self.assertEqual(set(self.runtime.player_profiles), {actor})
+        self.assertEqual(self.runtime.active_player_id, actor)
+
+        invalid = Path(self.temp.name) / "invalid-scheduler-save.json"
+        payload = json.loads(snapshot.read_text(encoding="utf-8"))
+        payload["scheduler"] = {"tick": "bad", "counter": 0, "queue": []}
+        invalid.write_text(json.dumps(payload), encoding="utf-8")
+        self.runtime.state.seed("sentinel", "test", "value", 1)
+        before_state = self.runtime.state.export()
+        before_entities = {entity.entity_id for entity in self.runtime.registry.values()}
+        before_dynamic = set(self.runtime.dynamic_entities)
+        before_profiles = {key: dict(value) for key, value in self.runtime.player_profiles.items()}
+        before_active = self.runtime.active_player_id
+        before_scheduler = self.runtime.scheduler.export()
+
+        with self.assertRaisesRegex(RuntimeError, "scheduler"):
+            self.runtime.load_snapshot(invalid)
+
+        self.assertEqual(self.runtime.state.export(), before_state)
+        self.assertEqual(
+            {entity.entity_id for entity in self.runtime.registry.values()},
+            before_entities,
+        )
+        self.assertEqual(self.runtime.dynamic_entities, before_dynamic)
+        self.assertEqual(self.runtime.player_profiles, before_profiles)
+        self.assertEqual(self.runtime.active_player_id, before_active)
+        self.assertEqual(self.runtime.scheduler.export(), before_scheduler)
 
     def test_snapshot_restores_scheduled_action(self) -> None:
         package = Path(self.temp.name) / "world.package.json"

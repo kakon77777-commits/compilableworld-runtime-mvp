@@ -7,6 +7,8 @@ from pathlib import Path
 
 from compilableworld.compiler import compile_world
 from compilableworld.kernel import WorldRuntime
+from compilableworld.models import ActionIR
+from compilableworld.modules import install_builtin_modules
 from compilableworld.player_generation import generate_character, template_catalog
 
 
@@ -79,6 +81,28 @@ class PlayerGenerationTests(unittest.TestCase):
             self.assertEqual(restored.active_player_id, actor)
             self.assertEqual(restored.state.get(actor, "position", "room"), "room.registration_office")
             self.assertEqual(restored.player_profiles[actor]["seed"], 11)
+
+    def test_replacing_generated_player_transfers_carried_inventory(self) -> None:
+        with tempfile.TemporaryDirectory() as temp:
+            package_path = compile_world(ROOT / "examples" / "gray_crown", temp)
+            runtime = WorldRuntime.from_package(package_path)
+            install_builtin_modules(runtime)
+            old_actor = runtime.create_player(generate_character(seed=21, name="Old"))
+            taken = runtime.submit(ActionIR(old_actor, "take", "item.old_key"))
+            self.assertEqual(taken.status.value, "completed")
+
+            new_actor = runtime.create_player(
+                generate_character(seed=22, name="New"),
+                replace_actor_id=old_actor,
+                replace_default=False,
+            )
+
+            self.assertFalse(runtime.registry.contains(old_actor))
+            self.assertTrue(runtime.registry.contains(new_actor))
+            self.assertEqual(
+                runtime.state.get("item.old_key", "inventory", "carrier"),
+                new_actor,
+            )
 
     def test_compiled_package_exposes_templates(self) -> None:
         with tempfile.TemporaryDirectory() as temp:
