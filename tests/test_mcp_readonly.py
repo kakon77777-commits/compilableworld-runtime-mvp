@@ -7,6 +7,7 @@ from pathlib import Path
 
 from compilableworld.compiler import compile_world
 from compilableworld.models import EventIR
+from compilableworld.player_generation import generate_character
 from compilableworld_mcp import MCPWorldError, ReadOnlyWorldService
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -91,6 +92,24 @@ class ReadOnlyMCPTests(unittest.TestCase):
         self.assertEqual(
             [event["event_type"] for event in reviewer_page["events"]],
             ["world.public", "world.private", "world.other", "world.audit", "world.public2"],
+        )
+
+    def test_projection_results_are_detached_from_runtime_state(self) -> None:
+        self.runtime.event_log.append(
+            EventIR("world.public", "test", {"nested": {"value": 1}}, visibility="public")
+        )
+        event_session = self._session_id(actor_id=self.default_actor)
+        page = self.service.get_recent_events(event_session)
+        page["events"][0]["payload"]["nested"]["value"] = 999
+        self.assertEqual(self.runtime.event_log.events[0].payload["nested"]["value"], 1)
+
+        generated_actor = self.runtime.create_player(generate_character(seed=77, name="Detached"))
+        scene_session = self._session_id(actor_id=generated_actor)
+        scene = self.service.get_current_scene(scene_session)
+        scene["view"]["character"]["generation"]["attributes"]["str"] = 999
+        self.assertNotEqual(
+            self.runtime.registry.get(generated_actor).metadata["generation"]["attributes"]["str"],
+            999,
         )
 
     def test_invalid_event_pagination_is_a_stable_argument_error(self) -> None:

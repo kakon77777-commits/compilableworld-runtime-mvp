@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from copy import deepcopy
 from typing import Any
 
 from compilableworld.kernel import WorldRuntime
@@ -66,7 +67,10 @@ def scene_projection(runtime: WorldRuntime, session: WorldSession) -> dict[str, 
         "world_state_changed": False,
         "session_id": session.session_id,
         "event_cursor": len(runtime.event_log.events),
-        "view": build_view_model(runtime, session.actor_id),
+        # Keep the transport-neutral service read-only even for in-process
+        # callers. build_view_model includes nested actor metadata that can be
+        # shared with the Runtime registry.
+        "view": deepcopy(build_view_model(runtime, session.actor_id)),
     }
 
 
@@ -82,7 +86,9 @@ def event_projection(event: EventIR) -> dict[str, Any]:
         "version": event.version,
         "causation_id": event.causation_id,
         "correlation_id": event.correlation_id,
-        "payload": event.payload,
+        # Event payloads may contain nested mutable dictionaries/lists. Never
+        # expose the EventLog's live payload through a read projection.
+        "payload": deepcopy(event.payload),
     }
 
 
