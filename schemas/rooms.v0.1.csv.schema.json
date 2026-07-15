@@ -1,0 +1,18 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "compilableworld.schema/csv/rooms/v0.1",
+  "title": "CompilableWorld rooms.csv v0.1",
+  "description": "Fixed-column room table. Cross-file exit targets and world spawn reachability remain Compiler rules.",
+  "type": "object",
+  "x-csv": {
+    "format": "compilableworld.csv-schema/v0.1",
+    "dialect": { "encoding": "utf-8-sig", "delimiter": ",", "header": true },
+    "primary_key": ["room_id"],
+    "columns": [
+      { "name": "room_id", "datatype": "id", "required": true },
+      { "name": "name", "datatype": "text", "required": true },
+      { "name": "description", "datatype": "text", "required": true },
+      { "name": "region", "datatype": "id", "required": true }
+    ]
+  }
+}

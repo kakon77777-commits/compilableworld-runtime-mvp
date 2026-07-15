@@ -1,0 +1,98 @@
+{
+  "functions": [
+    {
+      "function_id": "math.clamp",
+      "version": "1.0.0",
+      "purity": "pure",
+      "inputs": {"value": "number", "minimum": "number", "maximum": "number"},
+      "output": "number",
+      "expression": {
+        "op": "min",
+        "args": [
+          {"ref": "maximum"},
+          {"op": "max", "args": [{"ref": "minimum"}, {"ref": "value"}]}
+        ]
+      }
+    },
+    {
+      "function_id": "combat.hp_from_con",
+      "version": "1.0.0",
+      "purity": "pure",
+      "inputs": {"con": "number"},
+      "output": "number",
+      "expression": {"op": "mul", "args": [{"ref": "con"}, 8]}
+    },
+    {
+      "function_id": "player.attribute_from_weight",
+      "version": "1.0.0",
+      "purity": "pure",
+      "inputs": {"base": "number", "cumulative_power": "number", "weight": "number"},
+      "output": "number",
+      "expression": {"op": "add", "args": [{"ref": "base"}, {"op": "mul", "args": [{"ref": "cumulative_power"}, {"ref": "weight"}]}]}
+    },
+    {
+      "function_id": "player.mp_from_mag",
+      "version": "1.0.0",
+      "purity": "pure",
+      "inputs": {"mag": "number"},
+      "output": "number",
+      "expression": {"op": "mul", "args": [{"ref": "mag"}, 5]}
+    },
+    {
+      "function_id": "player.fp_from_mag_dex",
+      "version": "1.0.0",
+      "purity": "pure",
+      "inputs": {"mag": "number", "dex": "number"},
+      "output": "number",
+      "expression": {"op": "mul", "args": [{"op": "add", "args": [{"ref": "mag"}, {"ref": "dex"}]}, 2]}
+    },
+    {
+      "function_id": "combat.melee_ar",
+      "version": "1.0.0",
+      "purity": "pure",
+      "inputs": {"str": "number", "dex": "number"},
+      "output": "number",
+      "expression": {"op": "add", "args": [{"op": "mul", "args": [{"ref": "str"}, 0.7]}, {"op": "mul", "args": [{"ref": "dex"}, 0.3]}]}
+    },
+    {
+      "function_id": "combat.melee_dr",
+      "version": "1.0.0",
+      "purity": "pure",
+      "inputs": {"con": "number", "agi": "number"},
+      "output": "number",
+      "expression": {"op": "add", "args": [{"op": "mul", "args": [{"ref": "con"}, 0.7]}, {"op": "mul", "args": [{"ref": "agi"}, 0.3]}]}
+    },
+    {
+      "function_id": "combat.initiative_value",
+      "version": "1.0.0",
+      "purity": "pure",
+      "inputs": {"agi": "number", "dex": "number"},
+      "output": "number",
+      "expression": {"op": "add", "args": [{"ref": "agi"}, {"op": "mul", "args": [{"ref": "dex"}, 0.5]}]}
+    },
+    {
+      "function_id": "combat.hit_chance",
+      "version": "1.0.0",
+      "purity": "pure",
+      "inputs": {"ar_effective": "number", "dr": "number"},
+      "output": "number",
+      "expression": {"op": "div", "args": [{"ref": "ar_effective"}, {"op": "add", "args": [{"ref": "ar_effective"}, {"ref": "dr"}]}]}
+    },
+    {
+      "function_id": "combat.action_economy",
+      "version": "1.0.0",
+      "purity": "pure",
+      "inputs": {"own_iv": "number", "opponent_iv": "number"},
+      "output": "number",
+      "expression": {"op": "clamp", "args": [{"op": "round", "args": [{"op": "div", "args": [{"ref": "own_iv"}, {"ref": "opponent_iv"}]}]}, 1, 4]}
+    },
+    {
+      "function_id": "combat.damage",
+      "version": "1.0.0",
+      "purity": "pure",
+      "inputs": {"ar_effective": "number", "dr": "number"},
+      "output": "number",
+      "expression": {"op": "max", "args": [{"op": "round", "args": [{"op": "mul", "args": [{"op": "sub", "args": [{"ref": "ar_effective"}, {"op": "mul", "args": [{"ref": "dr"}, 0.5]}]}, 0.1]}]}, {"op": "max", "args": [1, {"op": "round", "args": [{"op": "mul", "args": [{"ref": "ar_effective"}, 0.05]}]}]}]}
+    }
+  ]
+}

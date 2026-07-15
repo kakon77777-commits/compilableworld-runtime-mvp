@@ -1,0 +1,17 @@
+{
+  "room_overlays": [
+    {
+      "room_id": "room.south_gate",
+      "when": [
+        {
+          "owner": "npc.guard",
+          "namespace": "status",
+          "key": "alive",
+          "equals": false
+        }
+      ],
+      "text": "沉默守衛倒在石牆旁，南門只剩風穿過舊旗的聲音。",
+      "mode": "append"
+    }
+  ]
+}

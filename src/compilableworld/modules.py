@@ -9,8 +9,10 @@ from .combat_formulas import (
     decay_status_effects, has_status, hit_chance, initiative_value, melee_ar,
     melee_dr, refresh_status, tier_effective_ar,
 )
+from .dialogue import select_dialogue
 from .kernel import WorldRuntime
 from .models import ActionIR, EventIR, ModuleContract, StateDelta, TransitionResult
+from .narrative import render_room_description
 
 
 @dataclass
@@ -29,7 +31,7 @@ class BaseModule:
 
 class RoomModule(BaseModule):
     def __init__(self) -> None:
-        super().__init__(ModuleContract("room.core", "0.1.0", "TMS", ["look"], ["room.observed"], ["position.*"], [], ["entity", "state", "event"]))
+        super().__init__(ModuleContract("room.core", "0.1.0", "TMS", ["look"], ["room.observed"], ["position.*", "inventory.*", "door.*", "health.*", "status.*", "quest.*", "wallet.*", "fsm.*", "combat.*", "magic.*"], [], ["entity", "state", "event"]))
 
     def evaluate(self, action: ActionIR, runtime: WorldRuntime) -> TransitionResult:
         room_id = runtime.state.get(action.actor_id, "position", "room")
@@ -37,7 +39,8 @@ class RoomModule(BaseModule):
         if not room:
             return TransitionResult(False, message="目前位置不存在")
         visible = [e.entity_id for e in runtime.registry.values() if runtime.state.get(e.entity_id, "position", "room") == room_id and e.entity_id != action.actor_id]
-        return TransitionResult(True, events=[self.event("room.observed", action, {"room_id": room_id, "visible": visible})], message=room["description"])
+        description = render_room_description(runtime, action.actor_id, room)
+        return TransitionResult(True, events=[self.event("room.observed", action, {"room_id": room_id, "visible": visible, "description": description})], message=description)
 
 
 class MovementModule(BaseModule):
@@ -259,9 +262,13 @@ class CombatModule(BaseModule):
         defender_statuses = runtime.state.get(target, "combat", "status_effects", [])
         attacker_haste = 1.5 if has_status(attacker_statuses, "haste_疾風") else 1.0
         defender_haste = 1.5 if has_status(defender_statuses, "haste_疾風") else 1.0
-        attacker_ar_eff = tier_effective_ar(melee_ar(attacker_attrs), attacker_tier, defender_tier)
-        defender_dr = melee_dr(defender_attrs)
-        attacker_actions = action_economy(initiative_value(attacker_attrs) * attacker_haste, initiative_value(defender_attrs) * defender_haste)
+        attacker_ar_eff = tier_effective_ar(melee_ar(attacker_attrs, registry=runtime.functions), attacker_tier, defender_tier)
+        defender_dr = melee_dr(defender_attrs, registry=runtime.functions)
+        attacker_actions = action_economy(
+            initiative_value(attacker_attrs, registry=runtime.functions) * attacker_haste,
+            initiative_value(defender_attrs, registry=runtime.functions) * defender_haste,
+            registry=runtime.functions,
+        )
 
         deltas: list[StateDelta] = []
         events: list[EventIR] = []
@@ -269,10 +276,10 @@ class CombatModule(BaseModule):
         hits = total_damage = 0
         defeated = False
         for _ in range(attacker_actions):
-            if random.random() > hit_chance(attacker_ar_eff, defender_dr):
+            if random.random() > hit_chance(attacker_ar_eff, defender_dr, registry=runtime.functions):
                 events.append(self.event("combat.attack_missed", action, {"target": target}, target))
                 continue
-            dmg = damage(attacker_ar_eff, defender_dr)
+            dmg = damage(attacker_ar_eff, defender_dr, registry=runtime.functions)
             target_health, target_temp_hp = apply_damage(target_health, target_temp_hp, dmg)
             hits += 1
             total_damage += dmg
@@ -311,16 +318,20 @@ class CombatModule(BaseModule):
         if actor_health is None or actor_health <= 0:
             return TransitionResult(True, deltas, events, f"{exchange_msg}。")
 
-        counter_ar_eff = tier_effective_ar(melee_ar(defender_attrs), defender_tier, attacker_tier)
-        attacker_dr = melee_dr(attacker_attrs)
-        defender_actions = action_economy(initiative_value(defender_attrs) * defender_haste, initiative_value(attacker_attrs) * attacker_haste)
+        counter_ar_eff = tier_effective_ar(melee_ar(defender_attrs, registry=runtime.functions), defender_tier, attacker_tier)
+        attacker_dr = melee_dr(attacker_attrs, registry=runtime.functions)
+        defender_actions = action_economy(
+            initiative_value(defender_attrs, registry=runtime.functions) * defender_haste,
+            initiative_value(attacker_attrs, registry=runtime.functions) * attacker_haste,
+            registry=runtime.functions,
+        )
         counter_hits = counter_damage_total = 0
         actor_defeated = False
         for _ in range(defender_actions):
-            if random.random() > hit_chance(counter_ar_eff, attacker_dr):
+            if random.random() > hit_chance(counter_ar_eff, attacker_dr, registry=runtime.functions):
                 events.append(self.event("combat.attack_missed", action, {"target": action.actor_id}, action.actor_id))
                 continue
-            counter_dmg = damage(counter_ar_eff, attacker_dr)
+            counter_dmg = damage(counter_ar_eff, attacker_dr, registry=runtime.functions)
             actor_health, actor_temp_hp = apply_damage(actor_health, actor_temp_hp, counter_dmg)
             counter_hits += 1
             counter_damage_total += counter_dmg
@@ -420,25 +431,64 @@ class MagicModule(BaseModule):
 
 class DialogueModule(BaseModule):
     def __init__(self) -> None:
-        super().__init__(ModuleContract("dialogue.core", "0.1.0", "TMS", ["say"], ["dialogue.spoken"], ["position.*"], [], ["entity", "event"]))
+        super().__init__(ModuleContract(
+            "dialogue.core", "0.1.0", "TMS", ["say", "talk"],
+            ["dialogue.spoken", "dialogue.responded"],
+            ["position.*", "inventory.*", "door.*", "health.*", "status.*", "quest.*", "wallet.*", "fsm.*", "combat.*", "magic.*"],
+            [], ["entity", "state", "event"],
+        ))
 
     def evaluate(self, action: ActionIR, runtime: WorldRuntime) -> TransitionResult:
-        text = str(action.args.get("text", "")).strip()
-        if not text:
-            return TransitionResult(False, message="不能說空白內容")
-        return TransitionResult(True, events=[self.event("dialogue.spoken", action, {"text": text})], message=f"你說：{text}")
+        if action.verb == "say":
+            text = str(action.args.get("text", "")).strip()
+            if not text:
+                return TransitionResult(False, message="不能說空白內容")
+            return TransitionResult(True, events=[self.event("dialogue.spoken", action, {"text": text})], message=f"你說：{text}")
+
+        speaker_id = action.target_id
+        if not speaker_id or not runtime.registry.contains(speaker_id):
+            return TransitionResult(False, message="找不到可以交談的對象")
+        speaker = runtime.registry.get(speaker_id)
+        if speaker.entity_type not in {"character", "creature"} or speaker_id == action.actor_id:
+            return TransitionResult(False, message="這個對象無法交談")
+        actor_room = runtime.state.get(action.actor_id, "position", "room")
+        if runtime.state.get(speaker_id, "position", "room") != actor_room:
+            return TransitionResult(False, message="對方不在目前場景")
+        if not runtime.state.get(speaker_id, "status", "alive", True):
+            return TransitionResult(False, message="對方已無法回應")
+
+        topic = str(action.args.get("topic", "default")).strip().lower() or "default"
+        line = select_dialogue(runtime, action.actor_id, speaker_id, topic)
+        if line is None:
+            return TransitionResult(False, message="這個話題暫時得不到回應")
+        response = f"{speaker.name}：{line['text']}"
+        event = self.event("dialogue.responded", action, {
+            "speaker_id": speaker_id,
+            "speaker_name": speaker.name,
+            "topic": topic,
+            "resolved_topic": line["topic"],
+            "dialogue_id": line["dialogue_id"],
+            "text": line["text"],
+        })
+        return TransitionResult(True, events=[event], message=response)
 
 
 class QuestModule(BaseModule):
-    """Requirement grammar (already present, previously unused, in quests.json):
-    `deliver:<item_id>:<target_id>` and `reach:<room_id>`. Completion is
-    event-reactive (paper 05 §8.2's "Quest System" subscriber pattern), not
-    polled on the `quests` action — re-checked whenever inventory.item_given
-    or movement.actor_moved fires for the actor. Unknown requirement kinds
-    fail closed (never silently satisfied)."""
+    """Event-reactive quest state transitions.
+
+    Legacy quests still complete from ``available`` when their root
+    requirements become true. New authored quests carry explicit transitions
+    in the Runtime Package: ``from`` + EventIR ``on`` + optional payload
+    match/requirements → ``to``. QuestModule is the only module that writes
+    ``quest.*`` or rewards, so dialogue remains an event-only projection.
+    """
 
     def __init__(self) -> None:
-        super().__init__(ModuleContract("quest.core", "0.1.0", "TMS", ["quests"], ["quest.observed", "quest.completed"], ["quest.*", "inventory.*", "position.*"], ["quest.*", "wallet.*"], ["entity", "state", "event"]))
+        super().__init__(ModuleContract(
+            "quest.core", "0.1.0", "TMS", ["quests"],
+            ["quest.observed", "quest.transitioned", "quest.completed", "quest.failed"],
+            ["quest.*", "inventory.*", "position.*"], ["quest.*", "wallet.*"], ["entity", "state", "event"],
+        ))
         self._runtime: WorldRuntime | None = None
 
     def evaluate(self, action: ActionIR, runtime: WorldRuntime) -> TransitionResult:
@@ -450,8 +500,15 @@ class QuestModule(BaseModule):
 
     def on_register(self, runtime: WorldRuntime) -> None:
         self._runtime = runtime
-        runtime.events.subscribe("inventory.item_given", self._on_progress_event)
-        runtime.events.subscribe("movement.actor_moved", self._on_progress_event)
+        trigger_events: set[str] = set()
+        for quest in runtime.package.get("quests", []):
+            transitions = quest.get("transitions")
+            if transitions:
+                trigger_events.update(transition["on"] for transition in transitions)
+            else:
+                trigger_events.update({"inventory.item_given", "movement.actor_moved"})
+        for event_type in sorted(trigger_events):
+            runtime.events.subscribe(event_type, self._on_progress_event)
 
     def _on_progress_event(self, event: EventIR) -> None:
         runtime = self._runtime
@@ -460,25 +517,84 @@ class QuestModule(BaseModule):
         if not actor_id or not runtime.registry.contains(actor_id):
             return
         for quest in runtime.package.get("quests", []):
-            quest_id = quest["quest_id"]
-            current = runtime.state.get(actor_id, "quest", quest_id, quest.get("initial_state", "available"))
-            if current != "available" or not self._requirements_met(actor_id, quest, runtime):
-                continue
-            deltas = [StateDelta(actor_id, "quest", quest_id, "set", "completed", source_module=self.contract.module_id)]
-            reward = quest.get("reward") or {}
-            currency = int(reward.get("currency", 0))
-            if currency:
-                deltas.append(StateDelta(actor_id, "wallet", "currency", "add", currency, source_module=self.contract.module_id))
-            completed = EventIR(
-                "quest.completed", self.contract.module_id, {"quest_id": quest_id, "title": quest["title"], "reward": reward},
+            if quest.get("transitions"):
+                self._apply_authored_transition(actor_id, quest, event, runtime)
+            else:
+                self._apply_legacy_completion(actor_id, quest, event, runtime)
+
+    def _apply_authored_transition(
+        self, actor_id: str, quest: dict[str, Any], event: EventIR, runtime: WorldRuntime,
+    ) -> None:
+        quest_id = quest["quest_id"]
+        current = runtime.state.get(actor_id, "quest", quest_id, quest.get("initial_state", "available"))
+        matches = [
+            transition for transition in quest["transitions"]
+            if transition["from"] == current
+            and transition["on"] == event.event_type
+            and self._event_matches(event, transition["event_match"])
+            and self._requirements_met(actor_id, transition["requirements"], runtime)
+        ]
+        if not matches:
+            return
+        transition = max(matches, key=lambda candidate: candidate["priority"])
+        target_state = transition["to"]
+        deltas = [StateDelta(actor_id, "quest", quest_id, "set", target_state, source_module=self.contract.module_id)]
+        reward = transition.get("reward") or {}
+        currency = int(reward.get("currency", 0))
+        if target_state == "completed" and currency:
+            deltas.append(StateDelta(actor_id, "wallet", "currency", "add", currency, source_module=self.contract.module_id))
+
+        transition_payload = {
+            "quest_id": quest_id,
+            "title": quest["title"],
+            "transition_id": transition["transition_id"],
+            "from": current,
+            "to": target_state,
+            "trigger": event.event_type,
+        }
+        events = [EventIR(
+            "quest.transitioned", self.contract.module_id, transition_payload,
+            target=actor_id, causation_id=event.event_id, correlation_id=event.correlation_id,
+        )]
+        if target_state == "completed":
+            events.append(EventIR(
+                "quest.completed", self.contract.module_id,
+                {**transition_payload, "reward": reward},
                 target=actor_id, causation_id=event.event_id, correlation_id=event.correlation_id,
-            )
-            runtime.commit_reaction(self, deltas, [completed])
+            ))
+        elif target_state == "failed":
+            events.append(EventIR(
+                "quest.failed", self.contract.module_id, transition_payload,
+                target=actor_id, causation_id=event.event_id, correlation_id=event.correlation_id,
+            ))
+        runtime.commit_reaction(self, deltas, events)
+
+    def _apply_legacy_completion(
+        self, actor_id: str, quest: dict[str, Any], event: EventIR, runtime: WorldRuntime,
+    ) -> None:
+        quest_id = quest["quest_id"]
+        current = runtime.state.get(actor_id, "quest", quest_id, quest.get("initial_state", "available"))
+        if current != "available" or not self._requirements_met(actor_id, quest.get("requirements", []), runtime):
+            return
+        deltas = [StateDelta(actor_id, "quest", quest_id, "set", "completed", source_module=self.contract.module_id)]
+        reward = quest.get("reward") or {}
+        currency = int(reward.get("currency", 0))
+        if currency:
+            deltas.append(StateDelta(actor_id, "wallet", "currency", "add", currency, source_module=self.contract.module_id))
+        completed = EventIR(
+            "quest.completed", self.contract.module_id, {"quest_id": quest_id, "title": quest["title"], "reward": reward},
+            target=actor_id, causation_id=event.event_id, correlation_id=event.correlation_id,
+        )
+        runtime.commit_reaction(self, deltas, [completed])
 
     @staticmethod
-    def _requirements_met(actor_id: str, quest: dict[str, Any], runtime: WorldRuntime) -> bool:
-        for requirement in quest.get("requirements", []):
-            parts = str(requirement).split(":")
+    def _event_matches(event: EventIR, event_match: dict[str, Any]) -> bool:
+        return all(event.payload.get(key) == value for key, value in event_match.items())
+
+    @staticmethod
+    def _requirements_met(actor_id: str, requirements: list[str], runtime: WorldRuntime) -> bool:
+        for requirement in requirements:
+            parts = requirement.split(":")
             if parts[0] == "deliver" and len(parts) == 3:
                 _, item_id, target_id = parts
                 if runtime.state.get(item_id, "inventory", "carrier") != target_id:

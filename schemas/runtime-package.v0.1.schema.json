@@ -1,0 +1,108 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "compilableworld.schema/runtime-package/v0.1",
+  "title": "CompilableWorld Runtime Package v0.1",
+  "description": "Deterministic Compiler output consumed by WorldRuntime and read-only Studio projections.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "format", "manifest", "world", "rooms", "exits", "entities", "quests",
+    "narrative", "dialogues", "scenarios", "functions", "player_templates",
+    "initial_state", "schema_contracts", "source_checksums"
+  ],
+  "properties": {
+    "format": { "const": "compilableworld.runtime-package/v0.1" },
+    "manifest": { "$ref": "#/$defs/manifest" },
+    "world": { "type": "object" },
+    "rooms": { "type": "array", "items": { "type": "object" } },
+    "exits": { "type": "array", "items": { "type": "object" } },
+    "entities": { "type": "array", "items": { "$ref": "#/$defs/entity" } },
+    "quests": { "type": "array", "items": { "type": "object" } },
+    "narrative": { "type": "object" },
+    "dialogues": { "type": "object" },
+    "scenarios": { "type": "object" },
+    "functions": { "type": "object" },
+    "player_templates": { "type": "array", "items": { "type": "object" } },
+    "initial_state": { "type": "array", "items": { "$ref": "#/$defs/stateCell" } },
+    "studio": { "type": "object" },
+    "schema_contracts": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["functions", "scenarios", "runtime_package", "rooms", "exits", "entities", "items", "studio_world_ir", "studio_mapping"],
+      "properties": {
+        "functions": { "const": "compilableworld.schema/functions/v0.1" },
+        "scenarios": { "const": "compilableworld.schema/scenarios/v0.1" },
+        "runtime_package": { "const": "compilableworld.schema/runtime-package/v0.1" },
+        "rooms": { "const": "compilableworld.schema/csv/rooms/v0.1" },
+        "exits": { "const": "compilableworld.schema/csv/exits/v0.1" },
+        "entities": { "const": "compilableworld.schema/csv/entities/v0.1" },
+        "items": { "const": "compilableworld.schema/csv/items/v0.1" },
+        "studio_world_ir": { "const": "compilableworld.schema/studio-world-ir/v0.1" },
+        "studio_mapping": { "const": "compilableworld.schema/studio-mapping/v0.1" }
+      }
+    },
+    "source_checksums": {
+      "type": "object",
+      "additionalProperties": { "type": "string", "pattern": "^[a-f0-9]{64}$" }
+    }
+  },
+  "$defs": {
+    "id": {
+      "type": "string",
+      "pattern": "^[a-z][a-z0-9_.-]*$"
+    },
+    "manifest": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["world_id", "world_version", "schema_version", "namespace", "runtime_version", "modules"],
+      "properties": {
+        "world_id": { "$ref": "#/$defs/id" },
+        "world_version": { "type": "string", "minLength": 1 },
+        "schema_version": { "type": "string", "minLength": 1 },
+        "namespace": { "type": "string", "minLength": 1 },
+        "runtime_version": { "type": "string", "minLength": 1 },
+        "source_schemas": {
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "rooms": { "const": "compilableworld.schema/csv/rooms/v0.1" },
+            "exits": { "const": "compilableworld.schema/csv/exits/v0.1" },
+            "entities": { "const": "compilableworld.schema/csv/entities/v0.1" },
+            "items": { "const": "compilableworld.schema/csv/items/v0.1" },
+            "functions": { "const": "compilableworld.schema/functions/v0.1" },
+            "scenarios": { "const": "compilableworld.schema/scenarios/v0.1" }
+          }
+        },
+        "modules": {
+          "type": "array",
+          "minItems": 1,
+          "items": { "$ref": "#/$defs/id" }
+        }
+      }
+    },
+    "entity": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["entity_id", "entity_type", "name", "components", "metadata"],
+      "properties": {
+        "entity_id": { "$ref": "#/$defs/id" },
+        "entity_type": { "type": "string", "minLength": 1 },
+        "name": { "type": "string", "minLength": 1 },
+        "components": { "type": "array", "items": { "$ref": "#/$defs/id" } },
+        "metadata": { "type": "object" }
+      }
+    },
+    "stateCell": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["owner", "namespace", "key", "value", "version"],
+      "properties": {
+        "owner": { "$ref": "#/$defs/id" },
+        "namespace": { "$ref": "#/$defs/id" },
+        "key": { "$ref": "#/$defs/id" },
+        "value": {},
+        "version": { "type": "integer", "minimum": 0 }
+      }
+    }
+  }
+}

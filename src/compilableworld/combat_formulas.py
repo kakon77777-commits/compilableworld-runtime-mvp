@@ -1,6 +1,9 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+from typing import Any
+
+from .functions import FunctionRegistry
 
 ATTRIBUTE_FLOOR = 10
 """'凡人地板值' — every unawakened person has this in all five attributes,
@@ -16,19 +19,40 @@ class Attributes:
     dex: int
 
 
-def hp_from_con(con: int) -> int:
+def _registry_value(
+    registry: FunctionRegistry | None,
+    function_id: str,
+    values: dict[str, int | float],
+    fallback: Any,
+) -> int | float:
+    if registry is not None and registry.has(function_id):
+        return registry.evaluate(function_id, values)
+    return fallback()
+
+
+def hp_from_con(con: int, *, registry: FunctionRegistry | None = None) -> int:
     """HP = CON x 8 (combat_resolution_system.json.hit_and_damage_resolution.hp_formula)."""
-    return con * 8
+    return int(_registry_value(registry, "combat.hp_from_con", {"con": con}, lambda: con * 8))
 
 
-def melee_ar(attacker: Attributes) -> float:
+def melee_ar(attacker: Attributes, *, registry: FunctionRegistry | None = None) -> float:
     """Attack Rating for melee_physical: STR x 0.7 + DEX x 0.3."""
-    return attacker.str_ * 0.7 + attacker.dex * 0.3
+    return float(_registry_value(
+        registry,
+        "combat.melee_ar",
+        {"str": attacker.str_, "dex": attacker.dex},
+        lambda: attacker.str_ * 0.7 + attacker.dex * 0.3,
+    ))
 
 
-def melee_dr(defender: Attributes) -> float:
+def melee_dr(defender: Attributes, *, registry: FunctionRegistry | None = None) -> float:
     """Defense Rating for melee_physical: CON x 0.7 + AGI x 0.3."""
-    return defender.con * 0.7 + defender.agi * 0.3
+    return float(_registry_value(
+        registry,
+        "combat.melee_dr",
+        {"con": defender.con, "agi": defender.agi},
+        lambda: defender.con * 0.7 + defender.agi * 0.3,
+    ))
 
 
 def tier_effective_ar(ar: float, attacker_tier: int, defender_tier: int) -> float:
@@ -47,32 +71,49 @@ def tier_effective_ar(ar: float, attacker_tier: int, defender_tier: int) -> floa
     return ar
 
 
-def hit_chance(ar_effective: float, dr: float) -> float:
+def hit_chance(ar_effective: float, dr: float, *, registry: FunctionRegistry | None = None) -> float:
     """P(hit) = AR_effective / (AR_effective + DR) — a pure ratio, always in
     (0, 1), never a hard 0% or 100% (deliberate: always leaves a narrative
     sliver for the against-the-odds outcome)."""
-    return ar_effective / (ar_effective + dr)
+    return float(_registry_value(
+        registry,
+        "combat.hit_chance",
+        {"ar_effective": ar_effective, "dr": dr},
+        lambda: ar_effective / (ar_effective + dr),
+    ))
 
 
-def damage(ar_effective: float, dr: float) -> int:
+def damage(ar_effective: float, dr: float, *, registry: FunctionRegistry | None = None) -> int:
     """round((AR_effective - DR*0.5) * 0.1), floored at max(1, round(AR_effective*0.05))
     so a landed hit is never a 0-damage absurdity."""
+    if registry is not None and registry.has("combat.damage"):
+        return int(registry.evaluate("combat.damage", {"ar_effective": ar_effective, "dr": dr}))
     raw = round((ar_effective - dr * 0.5) * 0.1)
     scratch_floor = max(1, round(ar_effective * 0.05))
     return max(raw, scratch_floor)
 
 
-def initiative_value(attrs: Attributes) -> float:
+def initiative_value(attrs: Attributes, *, registry: FunctionRegistry | None = None) -> float:
     """IV = AGI + 0.5*DEX (turn_and_initiative_structure.initiative_value_formula)."""
-    return attrs.agi + 0.5 * attrs.dex
+    return float(_registry_value(
+        registry,
+        "combat.initiative_value",
+        {"agi": attrs.agi, "dex": attrs.dex},
+        lambda: attrs.agi + 0.5 * attrs.dex,
+    ))
 
 
-def action_economy(own_iv: float, opponent_iv: float) -> int:
+def action_economy(own_iv: float, opponent_iv: float, *, registry: FunctionRegistry | None = None) -> int:
     """Actions_per_exchange = clamp(round(own_IV / opponent_IV), 1, 4) — the
     faster side gets extra actions within one Exchange; the slower side is
     floored at 1 (always gets to act, never fully locked out). Source file's
     own worked example: IV ratio 3.2 -> 3 actions."""
-    return max(1, min(4, round(own_iv / opponent_iv)))
+    return int(_registry_value(
+        registry,
+        "combat.action_economy",
+        {"own_iv": own_iv, "opponent_iv": opponent_iv},
+        lambda: max(1, min(4, round(own_iv / opponent_iv))),
+    ))
 
 
 def apply_damage(current_health: int, current_temp_hp: int, dmg: int) -> tuple[int, int]:

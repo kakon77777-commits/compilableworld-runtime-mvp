@@ -1,0 +1,120 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "compilableworld.schema/studio-world-ir/v0.1",
+  "title": "CompilableWorld Studio World IR v0.1",
+  "description": "Normalized, diagnostic-preserving JSON boundary for EveGlyph entity and state-machine YAML documents.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["format", "source_format", "compile_ready", "compile_blockers", "documents", "entities", "state_machines", "migration_plan", "diagnostics", "summary"],
+  "properties": {
+    "format": { "const": "compilableworld.studio-world-ir/v0.1" },
+    "source_format": { "const": "eveglyph-world-yaml/v0.1" },
+    "compile_ready": { "const": false },
+    "compile_blockers": { "type": "array", "items": { "type": "string" } },
+    "documents": { "type": "array", "items": { "$ref": "#/$defs/document" } },
+    "entities": { "type": "array", "items": { "$ref": "#/$defs/entity" } },
+    "state_machines": { "type": "array", "items": { "$ref": "#/$defs/stateMachine" } },
+    "migration_plan": { "$ref": "#/$defs/migrationPlan" },
+    "diagnostics": { "$ref": "#/$defs/diagnostics" },
+    "summary": { "$ref": "#/$defs/summary" }
+  },
+  "$defs": {
+    "document": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["source_path", "kind", "document_id", "content"],
+      "properties": {
+        "source_path": { "type": "string", "minLength": 1 },
+        "kind": { "type": "string", "minLength": 1 },
+        "document_id": { "type": "string", "minLength": 1 },
+        "content": {}
+      }
+    },
+    "entity": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["entity_id", "entity_type", "name", "metadata", "source_document"],
+      "properties": {
+        "entity_id": { "type": "string", "minLength": 1 },
+        "entity_type": { "type": ["string", "null"] },
+        "name": { "type": "string" },
+        "metadata": { "type": "object" },
+        "source_document": { "type": "string", "minLength": 1 }
+      }
+    },
+    "transition": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["transition_id", "from", "to", "on", "guards", "metadata"],
+      "properties": {
+        "transition_id": { "type": "string", "minLength": 1 },
+        "from": { "type": ["string", "null"] },
+        "to": { "type": ["string", "null"] },
+        "on": { "type": ["string", "null"] },
+        "guards": { "type": "array", "items": { "type": "string" } },
+        "metadata": { "type": "object" }
+      }
+    },
+    "stateMachine": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["state_machine_id", "initial_state", "states", "reachable_states", "transitions", "source_document"],
+      "properties": {
+        "state_machine_id": { "type": "string", "minLength": 1 },
+        "initial_state": { "type": ["string", "null"] },
+        "states": { "type": "array", "items": { "type": "string" } },
+        "reachable_states": { "type": "array", "items": { "type": "string" } },
+        "transitions": { "type": "array", "items": { "$ref": "#/$defs/transition" } },
+        "variables": { "type": "array", "items": { "type": "object" } },
+        "events": { "type": "array", "items": { "type": "object" } },
+        "instructions": { "type": "array", "items": { "type": "object" } },
+        "responses": { "type": "array", "items": { "type": "object" } },
+        "source_document": { "type": "string", "minLength": 1 }
+      }
+    },
+    "issue": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["severity", "code", "message", "path"],
+      "properties": {
+        "severity": { "enum": ["error", "warning"] },
+        "code": { "type": "string", "minLength": 1 },
+        "message": { "type": "string", "minLength": 1 },
+        "path": { "type": "string", "minLength": 1 }
+      }
+    },
+    "diagnostics": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["errors", "warnings", "issues"],
+      "properties": {
+        "errors": { "type": "integer", "minimum": 0 },
+        "warnings": { "type": "integer", "minimum": 0 },
+        "issues": { "type": "array", "items": { "$ref": "#/$defs/issue" } }
+      }
+    },
+    "summary": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["documents", "entities", "state_machines"],
+      "properties": {
+        "documents": { "type": "integer", "minimum": 0 },
+        "entities": { "type": "integer", "minimum": 0 },
+        "state_machines": { "type": "integer", "minimum": 0 }
+      }
+    },
+    "migrationPlan": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["format", "status", "entity_bindings", "state_machine_bindings", "mapping_template", "required_decisions"],
+      "properties": {
+        "format": { "const": "compilableworld.studio-migration-plan/v0.1" },
+        "status": { "enum": ["blocked", "reviewable"] },
+        "entity_bindings": { "type": "array", "items": { "type": "object" } },
+        "state_machine_bindings": { "type": "array", "items": { "type": "object" } },
+        "mapping_template": { "type": "object" },
+        "required_decisions": { "type": "array", "items": { "type": "object" } }
+      }
+    }
+  }
+}

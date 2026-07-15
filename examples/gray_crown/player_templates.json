@@ -1,0 +1,58 @@
+[
+  {
+    "template_id": "balanced",
+    "name": "均衡探索者",
+    "description": "五維平均，適合第一次進入世界或想自行塑形的玩家。",
+    "archetype": "generic_balanced",
+    "weights": {"str": 0.2, "con": 0.2, "mag": 0.2, "agi": 0.2, "dex": 0.2},
+    "talent": {"name": "回聲辨路", "rarity": "普通級", "domain": "感知"},
+    "origin": "ai_template",
+    "canon_status": "suggestion"
+  },
+  {
+    "template_id": "vanguard",
+    "name": "前線守望者",
+    "description": "STR／CON 雙主屬性，擅長近身承傷與正面突破。",
+    "archetype": "dual_primary",
+    "weights": {"str": 0.3, "con": 0.3, "mag": 0.1333, "agi": 0.1333, "dex": 0.1334},
+    "talent": {"name": "石脈護身", "rarity": "普通級", "domain": "生命"},
+    "origin": "ai_template",
+    "canon_status": "suggestion"
+  },
+  {
+    "template_id": "spellblade",
+    "name": "符刃行者",
+    "description": "MAG／DEX 雙重投資，讓規則魔法與精準攻擊互相支援。",
+    "archetype": "single_primary",
+    "primary": "mag",
+    "secondary": "dex",
+    "weights": {"str": 0.14, "con": 0.14, "mag": 0.36, "agi": 0.22, "dex": 0.14},
+    "talent": {"name": "星火刻痕", "rarity": "優秀級", "domain": "符文"},
+    "origin": "ai_template",
+    "canon_status": "suggestion"
+  },
+  {
+    "template_id": "scout",
+    "name": "風痕斥候",
+    "description": "AGI／DEX 偏重，適合探索、先攻、遠程與情報型玩法。",
+    "archetype": "single_primary",
+    "primary": "agi",
+    "secondary": "dex",
+    "weights": {"str": 0.14, "con": 0.14, "mag": 0.14, "agi": 0.36, "dex": 0.22},
+    "talent": {"name": "風痕步", "rarity": "普通級", "domain": "運動"},
+    "origin": "ai_template",
+    "canon_status": "suggestion"
+  },
+  {
+    "template_id": "ritualist",
+    "name": "界線觀測者",
+    "description": "MAG／CON 偏重，偏向儀式、控制與穩定施法。",
+    "archetype": "single_primary",
+    "primary": "mag",
+    "secondary": "con",
+    "weights": {"str": 0.14, "con": 0.22, "mag": 0.36, "agi": 0.14, "dex": 0.14},
+    "talent": {"name": "靜界留痕", "rarity": "優秀級", "domain": "界域"},
+    "origin": "ai_template",
+    "canon_status": "suggestion"
+  }
+]

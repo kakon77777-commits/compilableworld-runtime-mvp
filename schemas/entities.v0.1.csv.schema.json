@@ -1,0 +1,31 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "compilableworld.schema/csv/entities/v0.1",
+  "title": "CompilableWorld entities.csv v0.1",
+  "description": "Entity table with optional combat attributes. Attribute completeness and health exclusivity remain Compiler semantic rules.",
+  "type": "object",
+  "x-csv": {
+    "format": "compilableworld.csv-schema/v0.1",
+    "dialect": { "encoding": "utf-8-sig", "delimiter": ",", "header": true },
+    "primary_key": ["entity_id"],
+    "columns": [
+      { "name": "entity_id", "datatype": "id", "required": true },
+      { "name": "entity_type", "datatype": "id", "required": true },
+      { "name": "name", "datatype": "text", "required": true },
+      { "name": "room", "datatype": "id", "required": true },
+      { "name": "health", "datatype": "integer", "required": true },
+      { "name": "components", "datatype": "pipe-list", "required": true },
+      { "name": "provenance", "datatype": "id", "required": true },
+      { "name": "str", "datatype": "integer", "required": false },
+      { "name": "con", "datatype": "integer", "required": false },
+      { "name": "mag", "datatype": "integer", "required": false },
+      { "name": "agi", "datatype": "integer", "required": false },
+      { "name": "dex", "datatype": "integer", "required": false },
+      { "name": "phase_tier", "datatype": "integer", "required": false }
+    ],
+    "semantic_rules": [
+      { "kind": "all_or_none", "columns": ["str", "con", "mag", "agi", "dex"] },
+      { "kind": "mutually_exclusive_values", "columns": ["health", "con"] }
+    ]
+  }
+}

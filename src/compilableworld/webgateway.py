@@ -8,8 +8,14 @@ from typing import Any
 from .gateway import DeterministicIntentParser
 from .kernel import WorldRuntime
 from .models import EventIR
+from .narrative import render_room_description
+from .player_generation import generate_character
+from .studio import function_catalog, function_preview, runtime_overview, schema_catalog
+from .studio_mapping import StudioMappingError, suggest_studio_mapping, validate_studio_mapping
+from .studio_world_ir import import_eveglyph_text
 
 OPPOSITES = {"north": "south", "south": "north", "east": "west", "west": "east", "up": "down", "down": "up"}
+MAX_STUDIO_IMPORT_BYTES = 512 * 1024
 
 
 def _truth(value: str) -> bool:
@@ -65,13 +71,28 @@ def build_view_model(runtime: WorldRuntime, actor_id: str) -> dict[str, Any]:
         }
         for quest in runtime.package.get("quests", [])
     ]
+    actor = runtime.registry.get(actor_id)
+    generation = actor.metadata.get("generation")
+    attributes = {
+        key: runtime.state.get(actor_id, "combat", key)
+        for key in ("str", "con", "mag", "agi", "dex")
+        if runtime.state.get(actor_id, "combat", key) is not None
+    }
     return {
         "world_id": runtime.package["manifest"]["world_id"],
         "world_version": runtime.package["manifest"]["world_version"],
         "tick": runtime.scheduler.tick,
         "actor": actor_id,
+        "character": {
+            "id": actor_id,
+            "name": actor.name,
+            "generated": generation is not None,
+            "generation": generation,
+            "attributes": attributes,
+            "phase_tier": runtime.state.get(actor_id, "combat", "phase_tier"),
+        },
         "room": None if room is None else {
-            "id": room["room_id"], "name": room["name"], "description": room["description"],
+            "id": room["room_id"], "name": room["name"], "description": render_room_description(runtime, actor_id, room),
             "exits": _available_exits(runtime, room_id),
         },
         "visible_entities": visible,
@@ -97,8 +118,23 @@ class _Handler(BaseHTTPRequestHandler):
         self.send_response(status)
         self.send_header("Content-Type", "application/json; charset=utf-8")
         self.send_header("Content-Length", str(len(body)))
+        self._cors_headers()
         self.end_headers()
         self.wfile.write(body)
+
+    def _cors_headers(self) -> None:
+        origin = self.headers.get("Origin", "")
+        if origin.startswith("http://localhost:") or origin.startswith("http://127.0.0.1:"):
+            self.send_header("Access-Control-Allow-Origin", origin)
+            self.send_header("Access-Control-Allow-Methods", "GET, POST, OPTIONS")
+            self.send_header("Access-Control-Allow-Headers", "Content-Type")
+            self.send_header("Vary", "Origin")
+
+    def do_OPTIONS(self) -> None:  # noqa: N802 - stdlib method name
+        self.send_response(204)
+        self._cors_headers()
+        self.send_header("Content-Length", "0")
+        self.end_headers()
 
     def do_GET(self) -> None:  # noqa: N802 - stdlib method name
         if self.path in ("/", "/index.html"):
@@ -114,18 +150,111 @@ class _Handler(BaseHTTPRequestHandler):
                 view = build_view_model(self.server.runtime, self.server.actor_id)  # type: ignore[attr-defined]
             self._json(200, view)
             return
+        if self.path == "/api/character/templates":
+            self._json(200, {"templates": self.server.runtime.player_templates()})  # type: ignore[attr-defined]
+            return
+        if self.path == "/api/studio/functions":
+            with self.server.lock:  # type: ignore[attr-defined]
+                catalog = function_catalog(self.server.runtime.package)  # type: ignore[attr-defined]
+            self._json(200, catalog)
+            return
+        if self.path == "/api/studio/schemas":
+            self._json(200, schema_catalog())
+            return
+        if self.path == "/api/studio/overview":
+            with self.server.lock:  # type: ignore[attr-defined]
+                overview = runtime_overview(self.server.runtime)  # type: ignore[attr-defined]
+            self._json(200, overview)
+            return
         self._json(404, {"error": "not_found"})
 
     def do_POST(self) -> None:  # noqa: N802 - stdlib method name
-        if self.path != "/api/action":
+        if self.path not in {
+            "/api/action", "/api/character/create", "/api/studio/function-preview",
+            "/api/studio/import", "/api/studio/validate-mapping",
+        }:
             self._json(404, {"error": "not_found"})
             return
         length = int(self.headers.get("Content-Length", "0") or "0")
+        if length > MAX_STUDIO_IMPORT_BYTES:
+            self._json(413, {"error": "request_too_large", "limit_bytes": MAX_STUDIO_IMPORT_BYTES})
+            return
         try:
             payload = json.loads(self.rfile.read(length) or b"{}")
+            if not isinstance(payload, dict):
+                raise ValueError("request body must be an object")
             text = str(payload.get("text", "")).strip()
-        except json.JSONDecodeError:
+        except (json.JSONDecodeError, ValueError, TypeError):
             self._json(400, {"error": "invalid_json"})
+            return
+        if self.path == "/api/studio/import":
+            source_text = payload.get("source_text")
+            source_path = payload.get("source_path", "eveglyph-studio-draft.yaml")
+            if not isinstance(source_text, str) or not source_text.strip():
+                self._json(400, {"error": "invalid_studio_source", "message": "source_text must be a non-empty string"})
+                return
+            if not isinstance(source_path, str) or not source_path.strip() or len(source_path) > 256:
+                self._json(400, {"error": "invalid_studio_source", "message": "source_path must be a short label"})
+                return
+            world_ir = import_eveglyph_text(source_text, source_path.strip())
+            self._json(200, {
+                "format": "compilableworld.studio-import-result/v0.1",
+                "read_only": True,
+                "world_ir": world_ir,
+                "mapping_suggestion": suggest_studio_mapping(world_ir),
+            })
+            return
+        if self.path == "/api/studio/validate-mapping":
+            world_ir = payload.get("world_ir")
+            mapping = payload.get("mapping")
+            if not isinstance(world_ir, dict) or not isinstance(mapping, dict):
+                self._json(400, {"error": "invalid_mapping_request", "message": "world_ir and mapping must be objects"})
+                return
+            try:
+                report = validate_studio_mapping(world_ir, mapping)
+            except (StudioMappingError, TypeError, KeyError, AttributeError) as exc:
+                self._json(400, {"error": "invalid_mapping_request", "message": str(exc)})
+                return
+            self._json(200, {"format": "compilableworld.studio-mapping-validation-result/v0.1", "read_only": True, "report": report})
+            return
+        if self.path == "/api/studio/function-preview":
+            with self.server.lock:  # type: ignore[attr-defined]
+                try:
+                    preview = function_preview(
+                        self.server.runtime,  # type: ignore[attr-defined]
+                        payload.get("function_id"),
+                        payload.get("inputs", {}),
+                    )
+                except (TypeError, ValueError, KeyError) as exc:
+                    self._json(400, {"error": "invalid_function_preview", "message": str(exc)})
+                    return
+            self._json(200, preview)
+            return
+        if self.path == "/api/character/create":
+            with self.server.lock:  # type: ignore[attr-defined]
+                runtime: WorldRuntime = self.server.runtime  # type: ignore[attr-defined]
+                try:
+                    raw_seed = payload.get("seed")
+                    seed = None if raw_seed in (None, "") else int(raw_seed)
+                    profile = generate_character(
+                        template_id=str(payload.get("template_id", "balanced")),
+                        name=payload.get("name"),
+                        seed=seed,
+                        randomize=bool(payload.get("random", False)),
+                        attribute_overrides=payload.get("attributes"),
+                        package=runtime.package,
+                    )
+                    actor_id = runtime.create_player(
+                        profile,
+                        replace_actor_id=self.server.actor_id,  # type: ignore[attr-defined]
+                        replace_default=True,
+                    )
+                    self.server.actor_id = actor_id  # type: ignore[attr-defined]
+                    view = build_view_model(runtime, actor_id)
+                except (TypeError, ValueError, KeyError) as exc:
+                    self._json(400, {"error": "invalid_character", "message": str(exc)})
+                    return
+            self._json(201, {"character": profile.to_dict(), "view": view})
             return
         if not text:
             self._json(400, {"error": "empty_command"})
@@ -176,7 +305,7 @@ INDEX_HTML = r"""<!doctype html>
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<title>CompilableWorld</title>
+<title>CompilableWorld Runtime</title>
 <style>
   :root { color-scheme: dark; }
   * { box-sizing: border-box; }
@@ -216,6 +345,10 @@ INDEX_HTML = r"""<!doctype html>
   .quest-available { color: #8891a7; }
   .quest-completed { color: #6fae6f; }
   select { background: #262b38; color: #dfe3ea; border: 1px solid #3a4053; border-radius: 6px; padding: 0.25rem; }
+  .character-builder { display: grid; gap: 0.4rem; }
+  .character-builder input { width: 100%; background: #10121a; color: #dfe3ea; border: 1px solid #3a4053; border-radius: 6px; padding: 0.35rem; }
+  .character-builder button { width: 100%; }
+  #character-summary { color: #8891a7; font-size: 0.8rem; line-height: 1.5; }
   #log {
     height: 30vh; overflow-y: auto; padding: 0.75rem 1.25rem; background: #10121780;
     border-top: 1px solid #2c303c; font-family: "Cascadia Code", monospace; font-size: 0.85rem;
@@ -232,7 +365,7 @@ INDEX_HTML = r"""<!doctype html>
 </head>
 <body>
   <header>
-    <h1 id="world-title">CompilableWorld</h1>
+    <h1 id="world-title">CompilableWorld Runtime</h1>
     <span id="tick">tick 0</span>
   </header>
   <main>
@@ -243,6 +376,15 @@ INDEX_HTML = r"""<!doctype html>
       <div id="entities" class="entity-row"></div>
     </section>
     <aside id="sidebar">
+      <h3>角色生成</h3>
+      <div class="character-builder">
+        <div id="character-summary">載入中…</div>
+        <select id="template-select"></select>
+        <input id="character-name-input" placeholder="角色名稱（可留白）">
+        <input id="character-seed-input" type="number" placeholder="Seed（可留白）">
+        <button id="create-template-button" class="accent">套用模板</button>
+        <button id="random-character-button">隨機生成</button>
+      </div>
       <h3>生命值</h3>
       <div class="bar-track"><div id="health-bar" class="bar-fill" style="width:0%"></div></div>
       <div id="health-text" style="font-size:0.8rem;color:#8891a7;margin-top:0.25rem;"></div>
@@ -256,7 +398,7 @@ INDEX_HTML = r"""<!doctype html>
   </main>
   <section id="log"></section>
   <form id="cmd-form">
-    <input id="cmd-input" autocomplete="off" placeholder="輸入指令，如 look / attack npc.xxx / say 你好">
+    <input id="cmd-input" autocomplete="off" placeholder="輸入指令，如 look / talk 老鐵 work / attack npc.xxx">
     <button type="submit">送出</button>
   </form>
 <script>
@@ -270,16 +412,26 @@ function appendLog(text, cls) {
 }
 
 function describeEvent(ev) {
-  if (ev.type === 'quest.completed') {
+  if (ev.type === 'quest.transitioned') {
+    appendLog(`>> 任務進度：${ev.payload.title} [${ev.payload.from} → ${ev.payload.to}]`, 'log-quest');
+  } else if (ev.type === 'quest.completed') {
     const reward = ev.payload.reward || {};
     const note = reward.currency ? `，獲得 ${reward.currency} 貨幣` : '';
     appendLog(`>> 任務完成：${ev.payload.title}${note}`, 'log-quest');
+  } else if (ev.type === 'quest.failed') {
+    appendLog(`>> 任務失敗：${ev.payload.title}`, 'log-error');
   }
 }
 
 function render(view) {
   document.getElementById('world-title').textContent = view.world_id + ' v' + view.world_version;
   document.getElementById('tick').textContent = 'tick ' + view.tick;
+  const character = view.character || {};
+  const generation = character.generation || {};
+  const attrs = character.attributes || {};
+  document.getElementById('character-summary').textContent =
+    `${character.name || character.id || ''} · ${generation.template_id || 'legacy'} · ` +
+    `STR ${attrs.str ?? '—'} / CON ${attrs.con ?? '—'} / MAG ${attrs.mag ?? '—'} / AGI ${attrs.agi ?? '—'} / DEX ${attrs.dex ?? '—'}`;
 
   const room = view.room;
   document.getElementById('room-name').textContent = room ? room.name : '（未知位置）';
@@ -306,6 +458,12 @@ function render(view) {
       take.textContent = '拿取';
       take.onclick = () => sendCommand('take ' + entity.id);
       row.appendChild(take);
+    }
+    if ((entity.type === 'character' || entity.type === 'creature') && entity.alive !== false) {
+      const talk = document.createElement('button');
+      talk.textContent = '交談';
+      talk.onclick = () => sendCommand('talk ' + entity.id);
+      row.appendChild(talk);
     }
     entitiesEl.appendChild(row);
   });
@@ -368,6 +526,41 @@ async function sendCommand(text) {
   if (data.view) render(data.view);
 }
 
+async function loadCharacterTemplates() {
+  const res = await fetch('/api/character/templates');
+  const data = await res.json();
+  const select = document.getElementById('template-select');
+  (data.templates || []).forEach(template => {
+    const option = document.createElement('option');
+    option.value = template.template_id;
+    option.textContent = template.name + ' — ' + template.description;
+    select.appendChild(option);
+  });
+}
+
+async function createCharacter(random) {
+  const seedText = document.getElementById('character-seed-input').value.trim();
+  const payload = {
+    template_id: document.getElementById('template-select').value || 'balanced',
+    name: document.getElementById('character-name-input').value.trim(),
+    random,
+  };
+  if (seedText) payload.seed = Number(seedText);
+  const res = await fetch('/api/character/create', {
+    method: 'POST', headers: {'Content-Type': 'application/json'}, body: JSON.stringify(payload),
+  });
+  const data = await res.json();
+  if (!res.ok) {
+    appendLog(data.message || '角色生成失敗', 'log-error');
+    return;
+  }
+  appendLog('已建立新的玩家角色：' + data.character.name);
+  render(data.view);
+}
+
+document.getElementById('create-template-button').onclick = () => createCharacter(false);
+document.getElementById('random-character-button').onclick = () => createCharacter(true);
+
 document.getElementById('cmd-form').addEventListener('submit', ev => {
   ev.preventDefault();
   const input = document.getElementById('cmd-input');
@@ -378,6 +571,7 @@ document.getElementById('cmd-form').addEventListener('submit', ev => {
 });
 
 fetch('/api/state').then(r => r.json()).then(view => { render(view); appendLog('世界已載入。'); });
+loadCharacterTemplates().catch(() => appendLog('角色模板載入失敗', 'log-error'));
 </script>
 </body>
 </html>

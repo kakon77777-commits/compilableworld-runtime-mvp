@@ -1,12 +1,20 @@
 from __future__ import annotations
 
 import unittest
+import tempfile
+from pathlib import Path
 
 from compilableworld.combat_formulas import (
     Attributes, action_economy, apply_damage, damage, decay_status_effects,
     has_status, hit_chance, hp_from_con, initiative_value, melee_ar, melee_dr,
     refresh_status, tier_effective_ar,
 )
+from compilableworld.compiler import compile_world
+from compilableworld.kernel import WorldRuntime
+
+
+ROOT = Path(__file__).resolve().parents[1]
+PEACE_CITY = ROOT / "examples" / "mingyun_zhiyu_peace_city"
 
 
 class CombatFormulaFidelityTests(unittest.TestCase):
@@ -41,6 +49,19 @@ class CombatFormulaFidelityTests(unittest.TestCase):
     def test_hp_formula(self) -> None:
         self.assertEqual(hp_from_con(906), 7248)
         self.assertEqual(hp_from_con(680), 5440)
+
+    def test_registry_backed_scalar_formulas_match_legacy_math(self) -> None:
+        with tempfile.TemporaryDirectory() as temp:
+            runtime = WorldRuntime.from_package(compile_world(PEACE_CITY, temp))
+            registry = runtime.functions
+
+        self.assertEqual(hp_from_con(906, registry=registry), hp_from_con(906))
+        self.assertAlmostEqual(melee_ar(self.luftiya, registry=registry), melee_ar(self.luftiya))
+        self.assertAlmostEqual(melee_dr(self.geluosen, registry=registry), melee_dr(self.geluosen))
+        self.assertAlmostEqual(hit_chance(1134.9, 606.8, registry=registry), hit_chance(1134.9, 606.8))
+        self.assertEqual(damage(1134.9, 606.8, registry=registry), damage(1134.9, 606.8))
+        self.assertAlmostEqual(initiative_value(self.luftiya, registry=registry), initiative_value(self.luftiya))
+        self.assertEqual(action_economy(320.0, 100.0, registry=registry), action_economy(320.0, 100.0))
 
     def test_equal_tier_has_no_gate_adjustment(self) -> None:
         self.assertEqual(tier_effective_ar(500.0, attacker_tier=1, defender_tier=1), 500.0)

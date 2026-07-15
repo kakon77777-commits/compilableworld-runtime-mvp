@@ -4,14 +4,14 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "compilableworld-runtime"
-version = "0.1.0"
-description = "A non-web reference MVP for the MSSP modular CompilableWorld runtime"
+version = "0.1.1"
+description = "A dependency-free reference MVP for the MSSP modular CompilableWorld runtime with optional governed AMK capture"
 requires-python = ">=3.11"
 dependencies = []
 
 [project.scripts]
 cw-runtime = "compilableworld.cli:main"
+amk-local = "agent_memory_kernel.cli:main"
 
 [tool.setuptools.packages.find]
 where = ["src"]
-

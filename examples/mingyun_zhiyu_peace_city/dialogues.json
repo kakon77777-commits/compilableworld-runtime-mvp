@@ -1,0 +1,81 @@
+{
+  "dialogues": [
+    {
+      "dialogue_id": "dialogue.registration_clerk.default",
+      "speaker_id": "npc.registration_clerk",
+      "topic": "default",
+      "when": [],
+      "text": "名字先記在冊上。想在這座城活下去，就別把身份牌弄丟。"
+    },
+    {
+      "dialogue_id": "dialogue.registration_clerk.city",
+      "speaker_id": "npc.registration_clerk",
+      "topic": "city",
+      "when": [],
+      "text": "北邊的關卡通往軍營，西邊巷子常有人找零工；先找能讓你站穩腳跟的事。"
+    },
+    {
+      "dialogue_id": "dialogue.foreman_laotie.work.offer",
+      "speaker_id": "npc.foreman_laotie",
+      "topic": "work",
+      "when": [
+        {
+          "owner": "$actor",
+          "namespace": "quest",
+          "key": "quest.find_work",
+          "equals": "unstarted"
+        }
+      ],
+      "text": "巷子裡有一捆柴薪，替我送來，便算你今天做了第一件正經事。"
+    },
+    {
+      "dialogue_id": "dialogue.foreman_laotie.work.available",
+      "speaker_id": "npc.foreman_laotie",
+      "topic": "work",
+      "when": [
+        {
+          "owner": "$actor",
+          "namespace": "quest",
+          "key": "quest.find_work",
+          "equals": "available"
+        }
+      ],
+      "text": "柴薪還在巷子裡；帶來之後，我就給你結今天的工錢。"
+    },
+    {
+      "dialogue_id": "dialogue.foreman_laotie.work.completed",
+      "speaker_id": "npc.foreman_laotie",
+      "topic": "work",
+      "when": [
+        {
+          "owner": "$actor",
+          "namespace": "quest",
+          "key": "quest.find_work",
+          "equals": "completed"
+        }
+      ],
+      "text": "柴薪和工錢都已交割。城裡的路，往後得靠你自己走。"
+    },
+    {
+      "dialogue_id": "dialogue.foreman_laotie.default",
+      "speaker_id": "npc.foreman_laotie",
+      "topic": "default",
+      "when": [],
+      "text": "別站著發愣；有手有腳的人，在這裡總能找到一件該做的事。"
+    },
+    {
+      "dialogue_id": "dialogue.checkpoint_guard.default",
+      "speaker_id": "npc.checkpoint_guard",
+      "topic": "default",
+      "when": [],
+      "text": "關卡以北不是新來者該去的地方。若要通行，先證明你有資格。"
+    },
+    {
+      "dialogue_id": "dialogue.woerkan.default",
+      "speaker_id": "npc.woerkan",
+      "topic": "default",
+      "when": [],
+      "text": "沃爾坎·鐵壁只是看著你，彷彿北境的風雪也在等你先開口。"
+    }
+  ]
+}

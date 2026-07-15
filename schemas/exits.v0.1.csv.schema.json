@@ -1,0 +1,23 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "compilableworld.schema/csv/exits/v0.1",
+  "title": "CompilableWorld exits.csv v0.1",
+  "description": "Fixed-column directed edge table. Room references and door references remain Compiler rules.",
+  "type": "object",
+  "x-csv": {
+    "format": "compilableworld.csv-schema/v0.1",
+    "dialect": { "encoding": "utf-8-sig", "delimiter": ",", "header": true },
+    "primary_key": ["exit_id"],
+    "columns": [
+      { "name": "exit_id", "datatype": "id", "required": true },
+      { "name": "from_room", "datatype": "id", "required": true },
+      { "name": "to_room", "datatype": "id", "required": true },
+      { "name": "direction", "datatype": "id", "required": true },
+      { "name": "bidirectional", "datatype": "boolean", "required": false },
+      { "name": "door_entity", "datatype": "id", "required": false },
+      { "name": "open", "datatype": "boolean", "required": false },
+      { "name": "locked", "datatype": "boolean", "required": false },
+      { "name": "key_id", "datatype": "id", "required": false }
+    ]
+  }
+}

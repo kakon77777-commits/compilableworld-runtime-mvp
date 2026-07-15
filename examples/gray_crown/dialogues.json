@@ -1,0 +1,18 @@
+{
+  "dialogues": [
+    {
+      "dialogue_id": "dialogue.guard.default",
+      "speaker_id": "npc.guard",
+      "topic": "default",
+      "when": [],
+      "text": "沉默守衛以目光示意市集的方向，沒有多說一個字。"
+    },
+    {
+      "dialogue_id": "dialogue.guard.vault",
+      "speaker_id": "npc.guard",
+      "topic": "vault",
+      "when": [],
+      "text": "舊庫門的鑰匙仍在市集附近。若真要下去，先想好回來的路。"
+    }
+  ]
+}

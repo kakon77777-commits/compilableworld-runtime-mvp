@@ -1,0 +1,27 @@
+{
+  "scenarios": [
+    {
+      "scenario_id": "gray_crown.open_vault",
+      "title": "拿到舊鑰匙並開啟地窖",
+      "actor_id": "player.neo",
+      "given": [],
+      "when": [
+        {"verb": "take", "target_id": "item.old_key"},
+        {"verb": "move", "args": {"direction": "north"}},
+        {"verb": "unlock", "target_id": "door.old_vault"},
+        {"verb": "open", "target_id": "door.old_vault"},
+        {"verb": "move", "args": {"direction": "down"}}
+      ],
+      "expect": {
+        "state": [
+          {"owner": "$actor", "namespace": "position", "key": "room", "equals": "room.vault"},
+          {"owner": "$actor", "namespace": "quest", "key": "quest.black_tide_omen", "equals": "completed"},
+          {"owner": "$actor", "namespace": "wallet", "key": "currency", "equals": 20}
+        ],
+        "events": ["door.unlocked", "quest.completed"],
+        "status": "completed"
+      },
+      "tags": ["smoke", "quest", "door"]
+    }
+  ]
+}
