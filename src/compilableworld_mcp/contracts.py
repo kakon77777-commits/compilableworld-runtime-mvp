@@ -7,6 +7,8 @@ from uuid import uuid4
 
 MCP_READONLY_CONTRACT = "compilableworld.mcp-readonly/v0.1"
 SESSION_CONTRACT = "compilableworld.mcp-session/v0.1"
+SESSION_REHYDRATION_CONTRACT = "compilableworld.mcp-session-rehydration/v0.1"
+RUNTIME_REHYDRATION_CONTRACT = "compilableworld.mcp-runtime-rehydration/v0.1"
 WORLD_STATUS_CONTRACT = "compilableworld.mcp-world-status/v0.1"
 SCENE_CONTRACT = "compilableworld.mcp-scene/v0.1"
 EVENT_PAGE_CONTRACT = "compilableworld.mcp-event-page/v0.1"
@@ -50,6 +52,7 @@ class WorldSession:
     actor_id: str
     role: str
     client_id: str
+    user_id: str = "local-user"
     model_id: str | None = None
     opened_at: str = field(default_factory=utc_now)
     contract_version: str = MCP_READONLY_CONTRACT

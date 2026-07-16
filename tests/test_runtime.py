@@ -9,7 +9,7 @@ from unittest.mock import patch
 
 from compilableworld.compiler import CompileError, compile_world, validate_world
 from compilableworld.gateway import DeterministicIntentParser
-from compilableworld.kernel import StateStore, WorldRuntime
+from compilableworld.kernel import KernelTransactionError, StateStore, WorldRuntime
 from compilableworld.models import ActionIR, StateDelta
 from compilableworld.modules import CombatModule, install_builtin_modules
 from compilableworld.player_generation import generate_character
@@ -120,6 +120,21 @@ class RuntimeTests(unittest.TestCase):
 
     def tearDown(self) -> None:
         self.temp.cleanup()
+
+    def test_action_state_rolls_back_when_event_log_commit_fails(self) -> None:
+        before_state = self.runtime.state.export()
+        action = ActionIR("player.neo", "move", args={"direction": "north"})
+        with patch.object(
+            self.runtime.event_log,
+            "append_batch",
+            side_effect=KernelTransactionError("simulated durable log failure"),
+        ):
+            with self.assertRaises(KernelTransactionError):
+                self.runtime.submit(action)
+
+        self.assertEqual(self.runtime.state.export(), before_state)
+        self.assertEqual(self.runtime.event_log.events, [])
+        self.assertEqual(action.status.value, "failed")
 
     def test_movement_inventory_door_and_replay(self) -> None:
         take = self.runtime.submit(ActionIR("player.neo", "take", "item.old_key"))

@@ -1,17 +1,30 @@
 # CompilableWorld Active Work Package Registry
 
 - **Registry version:** v0.1
-- **Updated:** 2026-07-15
+- **Updated:** 2026-07-16
 
 ## Baseline status
 
 | Item | Value |
 |---|---|
 | Local integrated runtime | `0.1.1` |
-| Verified tests | `113/113` |
+| Verified tests | `227/227` |
 | GitHub `master` observed head | `9ab8df0` |
 | Remote synchronization status | **Not verified complete** — observed remote head predates integrated local files |
 | Intended next release baseline | `v0.2.0-alpha.1` or equivalent |
+
+## Current integrated local state
+
+The local Runtime/MCP integration now includes authenticated read/action
+facades, session and ACL boundaries, SQLite lifecycle/ownership recovery,
+action journal and outbox handoff, audit envelopes with tamper-evident local
+anchors, optional quorum-gated leader acquisition, and restart-verifiable
+Runtime state/event projections.
+
+The production deployment contract still explicitly requires an external
+consensus authority, independently published audit anchors, and a single
+authoritative Kernel/EventLog/journal/outbox transaction coordinator. See
+`docs/MCP_M12_DISTRIBUTED_DEPLOYMENT_BOUNDARY.md`.
 
 ## Active work packages
 

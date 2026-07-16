@@ -3,6 +3,8 @@ from __future__ import annotations
 import fnmatch
 import heapq
 import json
+import os
+from copy import deepcopy
 from collections import Counter, defaultdict
 from dataclasses import asdict
 from pathlib import Path
@@ -17,6 +19,12 @@ from .player_generation import GeneratedPlayer, actor_id_for_player, template_re
 
 
 class RuntimeErrorBase(RuntimeError):
+    pass
+
+
+class KernelTransactionError(RuntimeErrorBase):
+    """Durable Kernel state/event commit failed and was rolled back locally."""
+
     pass
 
 
@@ -156,12 +164,61 @@ class EventLog:
         self.events: list[EventIR] = []
         if self.path:
             self.path.parent.mkdir(parents=True, exist_ok=True)
+            self._load_existing()
+
+    def _load_existing(self) -> None:
+        if self.path is None or not self.path.exists():
+            return
+        seen_ids: set[str] = set()
+        try:
+            lines = self.path.read_text(encoding="utf-8").splitlines()
+        except OSError as exc:
+            raise RuntimeErrorBase(f"EventLog cannot be read: {self.path}") from exc
+        for line_number, line in enumerate(lines, start=1):
+            if not line.strip():
+                continue
+            try:
+                payload = json.loads(line)
+                if not isinstance(payload, dict):
+                    raise ValueError("event record must be an object")
+                event = EventIR(**payload)
+            except (TypeError, ValueError, json.JSONDecodeError) as exc:
+                raise RuntimeErrorBase(
+                    f"EventLog record is invalid at line {line_number}: {self.path}"
+                ) from exc
+            if not isinstance(event.payload, dict) or not event.event_id:
+                raise RuntimeErrorBase(f"EventLog record is invalid at line {line_number}: {self.path}")
+            if event.event_id in seen_ids:
+                raise RuntimeErrorBase(f"EventLog contains duplicate event_id at line {line_number}: {self.path}")
+            seen_ids.add(event.event_id)
+            self.events.append(event)
 
     def append(self, event: EventIR) -> None:
-        self.events.append(event)
-        if self.path:
+        self.append_batch([event])
+
+    def append_batch(self, events: Iterable[EventIR]) -> None:
+        batch = list(events)
+        if not batch:
+            return
+        encoded = "".join(json.dumps(event.to_dict(), ensure_ascii=False) + "\n" for event in batch)
+        if self.path is None:
+            self.events.extend(batch)
+            return
+
+        start_offset = self.path.stat().st_size if self.path.exists() else 0
+        try:
             with self.path.open("a", encoding="utf-8") as handle:
-                handle.write(json.dumps(event.to_dict(), ensure_ascii=False) + "\n")
+                handle.write(encoded)
+                handle.flush()
+                os.fsync(handle.fileno())
+        except OSError as exc:
+            try:
+                with self.path.open("r+b") as handle:
+                    handle.truncate(start_offset)
+            except OSError:
+                pass
+            raise KernelTransactionError("EventLog batch append failed") from exc
+        self.events.extend(batch)
 
 
 class RuntimeModule(Protocol):
@@ -363,14 +420,25 @@ class WorldRuntime:
         """Event-subscriber commit path: same Delta+Event contract as `_execute`,
         for modules reacting to another module's event instead of a submitted
         Action (paper 07 §4.6 — modules cooperate via events, never direct calls)."""
-        applied = self.state.commit(deltas, module.contract.write)
+        state_before = deepcopy(self.state.export())
+        try:
+            applied = self.state.commit(deltas, module.contract.write)
+        except RuntimeErrorBase:
+            self.state.import_state(state_before)
+            raise
         commit_event = EventIR(
             event_type="state.committed", source=module.contract.module_id,
             timestamp_tick=self.scheduler.tick, visibility="audit", payload={"applied": applied},
         )
-        for event in (commit_event, *events):
+        emitted = [commit_event, *events]
+        for event in emitted:
             event.timestamp_tick = self.scheduler.tick
-            self.event_log.append(event)
+        try:
+            self.event_log.append_batch(emitted)
+        except KernelTransactionError:
+            self.state.import_state(state_before)
+            raise
+        for event in emitted:
             self.events.publish(event)
             self.metrics[f"event:{event.event_type}"] += 1
         return applied
@@ -393,6 +461,7 @@ class WorldRuntime:
         return self._execute(action)
 
     def _execute(self, action: ActionIR) -> ActionReceipt:
+        state_before = deepcopy(self.state.export())
         try:
             module = self.module_for(action.verb)
             action.status = ActionStatus.VALIDATED
@@ -412,17 +481,24 @@ class WorldRuntime:
                 event.causation_id = event.causation_id or action.action_id
                 event.correlation_id = event.correlation_id or action.correlation_id
                 event.timestamp_tick = self.scheduler.tick
-                self.event_log.append(event)
-                self.events.publish(event)
-                self.metrics[f"event:{event.event_type}"] += 1
-            action.status = ActionStatus.COMPLETED
-            self.metrics["actions_completed"] += 1
-            return ActionReceipt(
-                action.action_id, action.status, result.message,
-                [event.event_id for event in emitted], [item["path"] for item in applied],
-            )
+            self.event_log.append_batch(emitted)
+        except KernelTransactionError:
+            self.state.import_state(state_before)
+            action.status = ActionStatus.FAILED
+            self.metrics["actions_failed"] += 1
+            raise
         except RuntimeErrorBase as exc:
+            self.state.import_state(state_before)
             return self._fail(action, str(exc))
+        action.status = ActionStatus.COMPLETED
+        self.metrics["actions_completed"] += 1
+        for event in emitted:
+            self.events.publish(event)
+            self.metrics[f"event:{event.event_type}"] += 1
+        return ActionReceipt(
+            action.action_id, action.status, result.message,
+            [event.event_id for event in emitted], [item["path"] for item in applied],
+        )
 
     def _fail(self, action: ActionIR, message: str) -> ActionReceipt:
         action.status = ActionStatus.FAILED

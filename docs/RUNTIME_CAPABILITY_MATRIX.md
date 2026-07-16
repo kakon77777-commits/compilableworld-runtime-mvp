@@ -3,8 +3,8 @@
 - **Document version:** v0.1
 - **Baseline source:** uploaded integrated local snapshot
 - **Runtime package version:** `0.1.1`
-- **Audit date:** 2026-07-15
-- **Verification:** `PYTHONPATH=src python3 -m unittest discover -s tests -v` — **113/113 passed**
+- **Audit date:** 2026-07-16
+- **Verification:** `PYTHONPATH=src python -m unittest discover -s tests` — **227/227 passed**
 - **Purpose:** authoritative inventory for PIW-MCP integration planning
 
 > Status meanings: **Implemented** = code and tests exist; **Partial** = usable core exists but stated boundary remains; **Planned** = no production implementation found in this baseline.
@@ -28,7 +28,7 @@
 | Snapshot/save | Implemented | runtime snapshot methods | round-trip and legacy migration tests | checkpoint tool may wrap existing snapshot boundary |
 | Replay | Implemented | runtime replay path | movement/inventory/door replay tests | MCP session recovery can rely on replay, with version limits |
 | Snapshot version validation | Implemented | runtime migration/version checks | unknown-version rejection test | MCP must return explicit version mismatch errors |
-| Cross-version migration registry | Partial | legacy snapshot migration exists | legacy migration test | generic event/package migration still needs registry |
+| Cross-version migration registry | Partial | `compilableworld_mcp.migration_registry`, plus explicit legacy snapshot migration | coordination and legacy migration tests | generic registry exists; Kernel snapshot loader is still a separate adapter |
 | Scheduler | Implemented | `Scheduler` | delay and snapshot restore tests | delayed actions already belong to runtime authority |
 | Single-process/single-world service | Partial | current runtime model | documented boundary | remote multi-session host remains outside current core |
 
@@ -135,15 +135,17 @@
 
 ### Must be added outside the world kernel
 
-- MCP transport/server package
-- MCP tool/resource schemas
-- world-session registry
-- actor/session/role binding
-- idempotency request ledger
+- MCP transport/server package (Partial: read-only, secure, opt-in action FastMCP facades, ASGI/stdio ingress, Streamable HTTP builder, TLS-aware Uvicorn runner, and binding-aware CLI startup exist; external process supervision and optional SDK deployment remain host-specific)
+- MCP tool/resource schemas (Partial: read-only, request-context, authenticated request, and secure gateway contracts exist; per-tool JSON schemas remain pending)
+- world-session registry (Partial: in-process service plus process-local/SQLite lifecycle store, explicit session rehydration, and local runtime-binding startup registry exist; distributed service discovery remains host-specific)
+- actor/session/role binding (Partial: session scope and first user/world/role/actor ACL slice exist)
+- idempotency request ledger (Partial: Session-scoped reservation/replay and SQLite action commit journal recovery exist; distributed ledger semantics remain pending)
+- rate limiting, action reservation, and outbox (Partial: local/SQLite-shared Session ledger, sliding-window limiter, claim/ack outbox, replayable deduplicated EventLog bridge, local Kernel state/event-log commit rollback, shared-SQLite journal/outbox atomic handoff, action commit journal recovery, and optional restart-verifiable Runtime state/event projection exist; distributed limits and end-to-end Kernel/outbox ACID commit remain pending)
 - filtered event and projection adapters
-- remote authentication and authorization
+- remote authentication and authorization (Partial: HMAC/OIDC Principal paths, JTI revoke, ACL, lifecycle rotation, ASGI/FastMCP adapters exist; TLS termination, external claim policy, and distributed deployment remain pending)
+- runtime ownership lease (Partial: process-local/SQLite exclusive lease, monotonic fencing tokens, explicit same-owner recovery, heartbeat lifecycle, optional service startup/renewal binding, authenticated centralized coordination API, single-store fenced leader lease, and optional fail-closed quorum vote gate exist; full quorum consensus remains pending)
 - per-actor observation/belief projection
-- MCP audit envelope
+- MCP audit envelope (Partial: safe request/Principal/session/world/runtime/action/replay response envelopes, process-local/SQLite append/query sink, gateway persistence markers, local SHA-256 tamper detection, and restart-verifiable checkpoints exist; independently published distributed anchors and cross-host query remain pending)
 - multi-world process/service boundary
 
 ### Must not be duplicated
