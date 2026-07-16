@@ -8,7 +8,7 @@
 | Item | Value |
 |---|---|
 | Local integrated runtime | `0.1.1` |
-| Verified tests | `227/227` |
+| Verified tests | `228/228` |
 | GitHub `master` observed head | `9ab8df0` |
 | Remote synchronization status | **Not verified complete** — observed remote head predates integrated local files |
 | Intended next release baseline | `v0.2.0-alpha.1` or equivalent |

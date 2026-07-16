@@ -1,7 +1,7 @@
 # Persistent Interactive World MCP Gap Analysis
 
 - **Document version:** v0.1
-- **Runtime baseline:** CompilableWorld `0.1.1`, 113 tests passing
+- **Runtime baseline:** CompilableWorld `0.1.1`, current local suite `228/228` passing
 - **Objective:** define the minimum work required to expose the existing world runtime safely through MCP
 
 ## 1. Executive conclusion
@@ -20,6 +20,20 @@ MCP transport
 ```
 
 The shortest valid implementation is a thin adapter around existing Runtime APIs.
+
+## Current implementation status
+
+The original P0 read-only and P1 action-loop packages are now implemented as
+the local M0–M12 integration: authenticated sessions, ACL, idempotency,
+rate-limits, audit, action journal, outbox, ownership, rehydration,
+coordination, quorum gating, and Runtime durability projection are covered by
+the current regression suite. The 100-turn local long-session gate is also now
+executable in `tests/test_long_session.py`.
+
+P2 observation/belief projection, M4 AMK ContextPacket binding, complete Studio
+write-back, and M6 production-grade distributed hosting remain partial. The
+external consensus, independent audit anchoring, and end-to-end ACID boundary
+are deployment contracts rather than claims of the local MVP.
 
 ## 2. Readiness matrix
 
@@ -69,7 +83,7 @@ src/compilableworld_mcp/
 - recent events preserve committed order
 - unknown world/session/actor fails closed
 - output is JSON-serializable and versioned
-- existing 113 tests remain green
+- historical 113-test baseline remains green; current local suite is 228/228
 - new read-only contract tests prove pre/post state hash equality
 
 ## 4. P1 work package: action loop

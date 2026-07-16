@@ -4,7 +4,7 @@
 - **Baseline source:** uploaded integrated local snapshot
 - **Runtime package version:** `0.1.1`
 - **Audit date:** 2026-07-16
-- **Verification:** `PYTHONPATH=src python -m unittest discover -s tests` — **227/227 passed**
+- **Verification:** `PYTHONPATH=src python -m unittest discover -s tests` — **228/228 passed**
 - **Purpose:** authoritative inventory for PIW-MCP integration planning
 
 > Status meanings: **Implemented** = code and tests exist; **Partial** = usable core exists but stated boundary remains; **Planned** = no production implementation found in this baseline.
@@ -83,7 +83,7 @@
 | Scenario IR Given/When/Then | Implemented | uses normal ActionIR/Kernel/EventIR pipeline |
 | Scenario compile-time validation | Implemented | unknown target and invalid actions rejected |
 | Scenario state/event expectations | Implemented | packaged authoring scenarios |
-| Long-session property scenarios | Planned | suitable next extension for PIW-MCP |
+| Long-session property scenarios | Partial | 100-turn deterministic observation/replay gate exists; broader stateful/property generation remains |
 
 ## 5. Studio and EveGlyph integration
 
