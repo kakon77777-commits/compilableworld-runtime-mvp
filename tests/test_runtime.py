@@ -158,8 +158,8 @@ class RuntimeTests(unittest.TestCase):
         snapshot = Path(self.temp.name) / "save.json"
         self.runtime.save_snapshot(snapshot)
         saved = json.loads(snapshot.read_text(encoding="utf-8"))
-        self.assertEqual(saved["format"], "compilableworld.snapshot/v0.3")
-        self.assertEqual(saved["snapshot_version"], 3)
+        self.assertEqual(saved["format"], "compilableworld.snapshot/v0.4")
+        self.assertEqual(saved["snapshot_version"], 4)
         self.assertEqual(saved["action_runtime"], {})
         self.runtime.submit(ActionIR("player.neo", "move", args={"direction": "south"}))
         self.runtime.load_snapshot(snapshot)

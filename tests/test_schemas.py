@@ -75,6 +75,7 @@ class SchemaContractTests(unittest.TestCase):
         self.assertIn("fsm.completed", event_mapping["properties"]["event_type"]["enum"])
         self.assertIn("action.progressed", event_mapping["properties"]["event_type"]["enum"])
         self.assertIn("action.retry_scheduled", event_mapping["properties"]["event_type"]["enum"])
+        self.assertIn("action.child_completed", event_mapping["properties"]["event_type"]["enum"])
 
         state_machine_schema = json.loads(
             (ROOT / "schemas" / "state-machines.v0.1.schema.json").read_text(encoding="utf-8")
@@ -92,7 +93,7 @@ class SchemaContractTests(unittest.TestCase):
         self.assertNotIn("effects", transition["properties"])
 
         action_behavior_schema = json.loads(
-            (ROOT / "schemas" / "action-behaviors.v0.4.schema.json").read_text(encoding="utf-8")
+            (ROOT / "schemas" / "action-behaviors.v0.5.schema.json").read_text(encoding="utf-8")
         )
         behavior = action_behavior_schema["$defs"]["behavior"]
         self.assertEqual(action_behavior_schema["properties"]["behaviors"]["maxItems"], 1024)
@@ -107,6 +108,11 @@ class SchemaContractTests(unittest.TestCase):
             16,
         )
         self.assertIn("retry", action_behavior_schema["$defs"]["phase"]["required"])
+        self.assertIn("child_action", action_behavior_schema["$defs"]["phase"]["required"])
+        self.assertEqual(
+            action_behavior_schema["$defs"]["childAction"]["properties"]["args"]["maxProperties"],
+            16,
+        )
         self.assertEqual(
             action_behavior_schema["$defs"]["retry"]["properties"]["max_attempts"]["maximum"],
             16,
@@ -136,7 +142,7 @@ class SchemaContractTests(unittest.TestCase):
         self.assertIn("action_behaviors", runtime_package_schema["properties"]["schema_contracts"]["required"])
         self.assertEqual(
             runtime_package_schema["properties"]["schema_contracts"]["properties"]["action_behaviors"]["const"],
-            "compilableworld.schema/action-behaviors/v0.4",
+            "compilableworld.schema/action-behaviors/v0.5",
         )
         self.assertEqual(runtime_package_schema["properties"]["state_machines"]["maxItems"], 1024)
 

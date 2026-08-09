@@ -10,6 +10,11 @@ from pathlib import Path
 from typing import Any
 
 from .action_behavior import (
+    ACTION_BEHAVIOR_CHILD_ARG_FIELDS,
+    ACTION_BEHAVIOR_CHILD_ARG_LIMIT,
+    ACTION_BEHAVIOR_CHILD_MODULES,
+    ACTION_BEHAVIOR_CHILD_REQUIRED_ARGS,
+    ACTION_BEHAVIOR_CHILD_TARGET_VERBS,
     ACTION_BEHAVIOR_CONCURRENCY,
     ACTION_BEHAVIOR_CONDITION_LIMIT,
     ACTION_BEHAVIOR_CONDITION_NAMESPACES,
@@ -21,6 +26,7 @@ from .action_behavior import (
     ACTION_BEHAVIOR_FORMAT_V1,
     ACTION_BEHAVIOR_FORMAT_V2,
     ACTION_BEHAVIOR_FORMAT_V3,
+    ACTION_BEHAVIOR_FORMAT_V4,
     ACTION_BEHAVIOR_INTERRUPT_EVENTS,
     ACTION_BEHAVIOR_INTERRUPT_LIMIT,
     ACTION_BEHAVIOR_PHASE_LIMIT,
@@ -29,6 +35,7 @@ from .action_behavior import (
     ACTION_BEHAVIOR_SCHEMA_ID_V1,
     ACTION_BEHAVIOR_SCHEMA_ID_V2,
     ACTION_BEHAVIOR_SCHEMA_ID_V3,
+    ACTION_BEHAVIOR_SCHEMA_ID_V4,
 )
 from .functions import FunctionDefinitionError, FunctionRegistry, validate_function_source
 from .player_generation import template_records
@@ -229,7 +236,10 @@ def compile_world(
     overlap = entity_ids & item_ids
     if overlap:
         raise CompileError(f"entity/item ID 衝突: {sorted(overlap)}")
-    action_behaviors = _validate_action_behaviors(action_behaviors_source)
+    action_behaviors = _validate_action_behaviors(
+        action_behaviors_source,
+        entity_ids=entity_ids | item_ids,
+    )
     state_machines = _validate_scoped_state_machines(
         state_machines_source,
         world_id=manifest["world_id"],
@@ -268,6 +278,7 @@ def compile_world(
         ACTION_BEHAVIOR_FORMAT_V1: ACTION_BEHAVIOR_SCHEMA_ID_V1,
         ACTION_BEHAVIOR_FORMAT_V2: ACTION_BEHAVIOR_SCHEMA_ID_V2,
         ACTION_BEHAVIOR_FORMAT_V3: ACTION_BEHAVIOR_SCHEMA_ID_V3,
+        ACTION_BEHAVIOR_FORMAT_V4: ACTION_BEHAVIOR_SCHEMA_ID_V4,
         ACTION_BEHAVIOR_FORMAT: ACTION_BEHAVIOR_SCHEMA_ID,
     }.get(action_behaviors_source.get("format") if isinstance(action_behaviors_source, dict) else None)
     for source_key, declared_schema_id in declared_source_schemas.items():
@@ -404,6 +415,14 @@ def compile_world(
                 f"action behavior {behavior['behavior_id']} 的 completion_module "
                 f"未在 manifest.modules 宣告: {behavior['completion_module']}"
             )
+        for phase in behavior.get("phases", []):
+            child_action = phase.get("child_action")
+            if isinstance(child_action, dict) and child_action["module_id"] not in modules:
+                raise CompileError(
+                    f"action behavior {behavior['behavior_id']} child step "
+                    f"{child_action['step_id']} module is not in manifest.modules: "
+                    f"{child_action['module_id']}"
+                )
     package = {
         "format": "compilableworld.runtime-package/v0.1",
         "manifest": {
@@ -486,7 +505,96 @@ def _finite_json_scalar(value: Any) -> bool:
     )
 
 
-def _validate_action_behaviors(source: Any) -> list[dict[str, Any]]:
+def _validate_action_child(
+    raw_child: Any,
+    *,
+    label: str,
+    authored_verbs: set[str],
+    entity_ids: set[str],
+    step_ids: set[str],
+) -> dict[str, Any] | None:
+    if raw_child is None:
+        return None
+    allowed = {"step_id", "verb", "target", "args"}
+    if not isinstance(raw_child, dict):
+        raise CompileError(f"{label} must be an object or null")
+    unknown = set(raw_child) - allowed
+    missing = allowed - set(raw_child)
+    if unknown:
+        raise CompileError(f"{label} contains unknown fields: {sorted(unknown)}")
+    if missing:
+        raise CompileError(f"{label} is missing fields: {sorted(missing)}")
+
+    step_id = raw_child["step_id"]
+    verb = raw_child["verb"]
+    if not isinstance(step_id, str) or not ID_RE.match(step_id):
+        raise CompileError(f"{label}.step_id is invalid")
+    if step_id in step_ids:
+        raise CompileError(f"{label}.step_id is duplicated: {step_id}")
+    step_ids.add(step_id)
+    if verb not in ACTION_BEHAVIOR_CHILD_MODULES:
+        raise CompileError(f"{label}.verb is not a bounded primitive: {verb}")
+    if verb in authored_verbs:
+        raise CompileError(f"{label}.verb cannot invoke an authored behavior: {verb}")
+
+    target = raw_child["target"]
+    normalized_target: dict[str, str] | None = None
+    if target is not None:
+        if not isinstance(target, dict) or "source" not in target:
+            raise CompileError(f"{label}.target must be a bounded target object or null")
+        source = target.get("source")
+        expected_fields = {"source"} if source == "parent_target" else {"source", "entity_id"}
+        if set(target) != expected_fields or source not in {"parent_target", "entity"}:
+            raise CompileError(f"{label}.target shape is invalid")
+        if source == "entity":
+            entity_id = target.get("entity_id")
+            if not isinstance(entity_id, str) or entity_id not in entity_ids:
+                raise CompileError(f"{label}.target.entity_id references an unknown entity")
+            normalized_target = {"source": "entity", "entity_id": entity_id}
+        else:
+            normalized_target = {"source": "parent_target"}
+    if verb in ACTION_BEHAVIOR_CHILD_TARGET_VERBS and normalized_target is None:
+        raise CompileError(f"{label}.target is required for {verb}")
+    if verb not in ACTION_BEHAVIOR_CHILD_TARGET_VERBS and normalized_target is not None:
+        raise CompileError(f"{label}.target is forbidden for {verb}")
+
+    args = raw_child["args"]
+    if not isinstance(args, dict) or len(args) > ACTION_BEHAVIOR_CHILD_ARG_LIMIT:
+        raise CompileError(
+            f"{label}.args must be an object with at most {ACTION_BEHAVIOR_CHILD_ARG_LIMIT} fields"
+        )
+    allowed_args = ACTION_BEHAVIOR_CHILD_ARG_FIELDS[verb]
+    required_args = ACTION_BEHAVIOR_CHILD_REQUIRED_ARGS.get(verb, set())
+    if set(args) - allowed_args:
+        raise CompileError(f"{label}.args contains unsupported fields: {sorted(set(args) - allowed_args)}")
+    if required_args - set(args):
+        raise CompileError(f"{label}.args is missing fields: {sorted(required_args - set(args))}")
+    normalized_args: dict[str, Any] = {}
+    for key, value in args.items():
+        if not _finite_json_scalar(value):
+            raise CompileError(f"{label}.args.{key} must be a finite JSON scalar")
+        if key in {"direction", "recipient", "spell", "text", "topic"} and (
+            not isinstance(value, str) or not value.strip()
+        ):
+            raise CompileError(f"{label}.args.{key} must be a non-empty string")
+        normalized_args[key] = value.strip() if isinstance(value, str) else value
+    recipient = normalized_args.get("recipient")
+    if verb == "give" and recipient not in entity_ids:
+        raise CompileError(f"{label}.args.recipient references an unknown entity")
+    return {
+        "step_id": step_id,
+        "verb": verb,
+        "module_id": ACTION_BEHAVIOR_CHILD_MODULES[verb],
+        "target": normalized_target,
+        "args": normalized_args,
+    }
+
+
+def _validate_action_behaviors(
+    source: Any,
+    *,
+    entity_ids: set[str],
+) -> list[dict[str, Any]]:
     if not isinstance(source, dict):
         raise CompileError("action_behaviors.json 必須是物件")
     unknown_root = set(source) - {"format", "behaviors"}
@@ -495,7 +603,8 @@ def _validate_action_behaviors(source: Any) -> list[dict[str, Any]]:
     source_format = source.get("format")
     if source_format not in {
         ACTION_BEHAVIOR_FORMAT_V1, ACTION_BEHAVIOR_FORMAT_V2,
-        ACTION_BEHAVIOR_FORMAT_V3, ACTION_BEHAVIOR_FORMAT,
+        ACTION_BEHAVIOR_FORMAT_V3, ACTION_BEHAVIOR_FORMAT_V4,
+        ACTION_BEHAVIOR_FORMAT,
     }:
         raise CompileError("action_behaviors.json format 不支援")
     behaviors = source.get("behaviors")
@@ -512,6 +621,11 @@ def _validate_action_behaviors(source: Any) -> list[dict[str, Any]]:
     allowed = common | ({"duration_ticks"} if source_format == ACTION_BEHAVIOR_FORMAT_V1 else {"phases"})
     behavior_ids: set[str] = set()
     verbs: set[str] = set()
+    authored_verbs = {
+        behavior.get("verb")
+        for behavior in behaviors
+        if isinstance(behavior, dict) and isinstance(behavior.get("verb"), str)
+    }
     normalized: list[dict[str, Any]] = []
     for index, behavior in enumerate(behaviors):
         label = f"action_behaviors.json.behaviors[{index}]"
@@ -564,16 +678,23 @@ def _validate_action_behaviors(source: Any) -> list[dict[str, Any]]:
                 )
             phase_ids: set[str] = set()
             condition_ids: set[str] = set()
+            child_step_ids: set[str] = set()
             duration = 0
             for phase_index, phase in enumerate(raw_phases):
                 phase_label = f"{label}.phases[{phase_index}]"
                 if not isinstance(phase, dict):
                     raise CompileError(f"{phase_label} 必須是物件")
                 phase_allowed = {"phase_id", "title", "duration_ticks"}
-                if source_format in {ACTION_BEHAVIOR_FORMAT_V3, ACTION_BEHAVIOR_FORMAT}:
+                if source_format in {
+                    ACTION_BEHAVIOR_FORMAT_V3,
+                    ACTION_BEHAVIOR_FORMAT_V4,
+                    ACTION_BEHAVIOR_FORMAT,
+                }:
                     phase_allowed.add("when")
-                if source_format == ACTION_BEHAVIOR_FORMAT:
+                if source_format in {ACTION_BEHAVIOR_FORMAT_V4, ACTION_BEHAVIOR_FORMAT}:
                     phase_allowed.add("retry")
+                if source_format == ACTION_BEHAVIOR_FORMAT:
+                    phase_allowed.add("child_action")
                 phase_unknown = set(phase) - phase_allowed
                 phase_missing = phase_allowed - set(phase)
                 if phase_unknown:
@@ -604,7 +725,11 @@ def _validate_action_behaviors(source: Any) -> list[dict[str, Any]]:
                         f"{label}.phases 總 duration 不可超過 {ACTION_BEHAVIOR_DURATION_LIMIT}"
                     )
                 normalized_when: list[dict[str, Any]] = []
-                if source_format in {ACTION_BEHAVIOR_FORMAT_V3, ACTION_BEHAVIOR_FORMAT}:
+                if source_format in {
+                    ACTION_BEHAVIOR_FORMAT_V3,
+                    ACTION_BEHAVIOR_FORMAT_V4,
+                    ACTION_BEHAVIOR_FORMAT,
+                }:
                     raw_when = phase["when"]
                     if (
                         not isinstance(raw_when, list)
@@ -674,9 +799,13 @@ def _validate_action_behaviors(source: Any) -> list[dict[str, Any]]:
                     "title": phase_title.strip(),
                     "duration_ticks": phase_duration,
                 }
-                if source_format in {ACTION_BEHAVIOR_FORMAT_V3, ACTION_BEHAVIOR_FORMAT}:
+                if source_format in {
+                    ACTION_BEHAVIOR_FORMAT_V3,
+                    ACTION_BEHAVIOR_FORMAT_V4,
+                    ACTION_BEHAVIOR_FORMAT,
+                }:
                     phase_record["when"] = normalized_when
-                if source_format == ACTION_BEHAVIOR_FORMAT:
+                if source_format in {ACTION_BEHAVIOR_FORMAT_V4, ACTION_BEHAVIOR_FORMAT}:
                     retry = phase["retry"]
                     if phase_index == 0 and retry is not None:
                         raise CompileError(f"{phase_label}.retry is forbidden on the first phase")
@@ -728,7 +857,22 @@ def _validate_action_behaviors(source: Any) -> list[dict[str, Any]]:
                         }
                     else:
                         phase_record["retry"] = None
+                if source_format == ACTION_BEHAVIOR_FORMAT:
+                    raw_child = phase["child_action"]
+                    if phase_index == len(raw_phases) - 1 and raw_child is not None:
+                        raise CompileError(
+                            f"{phase_label}.child_action is forbidden on the final phase"
+                        )
+                    phase_record["child_action"] = _validate_action_child(
+                        raw_child,
+                        label=f"{phase_label}.child_action",
+                        authored_verbs=authored_verbs,
+                        entity_ids=entity_ids,
+                        step_ids=child_step_ids,
+                    )
                 phases.append(phase_record)
+            if source_format == ACTION_BEHAVIOR_FORMAT and not child_step_ids:
+                raise CompileError(f"{label}.phases must declare at least one child_action")
         if behavior["concurrency"] != ACTION_BEHAVIOR_CONCURRENCY:
             raise CompileError(f"{label}.concurrency 目前只支援 {ACTION_BEHAVIOR_CONCURRENCY}")
         interrupt_on = behavior["interrupt_on"]

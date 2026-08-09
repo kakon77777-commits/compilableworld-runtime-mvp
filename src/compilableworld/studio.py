@@ -214,6 +214,7 @@ def _action_behavior_overview(behavior: Any, index: int) -> dict[str, Any]:
                 "when": [dict(condition) for condition in phase.get("when", []) if isinstance(condition, dict)],
                 "retry": dict(phase["retry"])
                 if isinstance(phase.get("retry"), dict) else None,
+                "child_action": deepcopy(phase.get("child_action")),
             }
             for phase in behavior.get("phases", []) if isinstance(phase, dict)
         ],
@@ -297,6 +298,7 @@ def package_overview(package: dict[str, Any]) -> dict[str, Any]:
         event_types.update({
             "action.scheduled", "action.started", "action.completed",
             "action.progressed", "action.retry_scheduled", "action.cancelled",
+            "action.child_started", "action.child_completed", "action.child_failed",
             "action.interrupted", "action.failed",
         })
         event_types.update(
@@ -323,7 +325,7 @@ def package_overview(package: dict[str, Any]) -> dict[str, Any]:
             },
             "sms": {
                 "runtime_package_format": package.get("format"),
-                "snapshot_format": "compilableworld.snapshot/v0.3",
+                "snapshot_format": "compilableworld.snapshot/v0.4",
             },
             "tms": {"declared_modules": sorted(modules)},
             "dms": {"static_issue_count": len(issues)},

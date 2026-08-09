@@ -40,6 +40,9 @@
                 "event_type": {
                   "enum": [
                     "action.failed",
+                    "action.child_started",
+                    "action.child_completed",
+                    "action.child_failed",
                     "action.scheduled",
                     "action.started",
                     "action.progressed",

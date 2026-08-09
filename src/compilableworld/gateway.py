@@ -93,6 +93,24 @@ class TerminalGateway:
         self.runtime.events.subscribe("quest.failed", self._on_quest_failed)
         self.runtime.events.subscribe("action.progressed", self._on_action_progressed)
         self.runtime.events.subscribe("action.retry_scheduled", self._on_action_retry_scheduled)
+        self.runtime.events.subscribe("action.child_completed", self._on_action_child_completed)
+        self.runtime.events.subscribe("action.child_failed", self._on_action_child_failed)
+
+    def _on_action_child_completed(self, event) -> None:
+        if event.target != self.actor_id:
+            return
+        print(
+            f">> 子步驟完成：{event.payload['step_id']} "
+            f"({event.payload['child_verb']})"
+        )
+
+    def _on_action_child_failed(self, event) -> None:
+        if event.target != self.actor_id:
+            return
+        print(
+            f">> 子步驟失敗：{event.payload['step_id']}："
+            f"{event.payload.get('reason', 'unknown reason')}"
+        )
 
     def _on_action_progressed(self, event) -> None:
         if event.target != self.actor_id:

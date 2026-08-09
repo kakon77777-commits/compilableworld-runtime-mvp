@@ -28,7 +28,7 @@
     "functions": "compilableworld.schema/functions/v0.1",
     "scenarios": "compilableworld.schema/scenarios/v0.1",
     "state_machines": "compilableworld.schema/state-machines/v0.1",
-    "action_behaviors": "compilableworld.schema/action-behaviors/v0.4"
+    "action_behaviors": "compilableworld.schema/action-behaviors/v0.5"
   },
   "modules": [
     "room.core",

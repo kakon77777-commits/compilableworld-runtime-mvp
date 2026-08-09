@@ -58,7 +58,7 @@
       "additionalProperties": false,
       "required": ["action_behaviors", "functions", "scenarios", "state_machines", "runtime_package", "rooms", "exits", "entities", "items", "studio_world_ir", "studio_mapping"],
       "properties": {
-        "action_behaviors": { "const": "compilableworld.schema/action-behaviors/v0.4" },
+        "action_behaviors": { "const": "compilableworld.schema/action-behaviors/v0.5" },
         "functions": { "const": "compilableworld.schema/functions/v0.1" },
         "scenarios": { "const": "compilableworld.schema/scenarios/v0.1" },
         "state_machines": { "const": "compilableworld.schema/state-machines/v0.1" },
@@ -100,7 +100,8 @@
                 "compilableworld.schema/action-behaviors/v0.1",
                 "compilableworld.schema/action-behaviors/v0.2",
                 "compilableworld.schema/action-behaviors/v0.3",
-                "compilableworld.schema/action-behaviors/v0.4"
+                "compilableworld.schema/action-behaviors/v0.4",
+                "compilableworld.schema/action-behaviors/v0.5"
               ]
             },
             "rooms": { "const": "compilableworld.schema/csv/rooms/v0.1" },
@@ -189,6 +190,68 @@
           "type": "array",
           "maxItems": 16,
           "items": { "$ref": "#/$defs/actionBehaviorCondition" }
+        },
+        "retry": {
+          "oneOf": [
+            { "$ref": "#/$defs/actionBehaviorRetry" },
+            { "type": "null" }
+          ]
+        },
+        "child_action": {
+          "oneOf": [
+            { "$ref": "#/$defs/actionBehaviorChild" },
+            { "type": "null" }
+          ]
+        }
+      }
+    },
+    "actionBehaviorRetry": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["max_attempts", "interval_ticks", "timeout_ticks"],
+      "properties": {
+        "max_attempts": { "type": "integer", "minimum": 1, "maximum": 16 },
+        "interval_ticks": { "type": "integer", "minimum": 1, "maximum": 1000000 },
+        "timeout_ticks": { "type": "integer", "minimum": 1, "maximum": 1000000 }
+      }
+    },
+    "actionBehaviorChild": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["step_id", "verb", "module_id", "target", "args"],
+      "properties": {
+        "step_id": { "$ref": "#/$defs/id" },
+        "verb": {
+          "enum": [
+            "attack", "cast", "drop", "give", "inventory", "look", "move",
+            "open", "quests", "say", "status", "take", "talk", "unlock"
+          ]
+        },
+        "module_id": { "$ref": "#/$defs/id" },
+        "target": {
+          "oneOf": [
+            {
+              "type": "object",
+              "additionalProperties": false,
+              "required": ["source"],
+              "properties": { "source": { "const": "parent_target" } }
+            },
+            {
+              "type": "object",
+              "additionalProperties": false,
+              "required": ["source", "entity_id"],
+              "properties": {
+                "source": { "const": "entity" },
+                "entity_id": { "$ref": "#/$defs/id" }
+              }
+            },
+            { "type": "null" }
+          ]
+        },
+        "args": {
+          "type": "object",
+          "maxProperties": 16,
+          "additionalProperties": { "type": ["string", "number", "boolean", "null"] }
         }
       }
     },

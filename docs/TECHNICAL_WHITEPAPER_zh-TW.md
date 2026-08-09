@@ -334,7 +334,7 @@ AI 可以產生「嘗試無聲開門」的結構化步驟，卻不能直接宣�
 - cancellation；
 - compensation。
 
-目前參考 Runtime 已實作固定 sequence phases、bounded wait duration、phase-entry condition、fixed-interval retry/deadline 與 cancellation/interruption；parallel child Action、任意 sequence graph 與 compensation 仍未實作。所有已落地部分仍由 Action 狀態、Scheduler、EventIR、Snapshot 與 Replay 保存，不繞過 StateDelta 提交契約。
+目前參考 Runtime 已實作固定 sequence phases、bounded wait duration、非遞迴 primitive child Action sequence、phase-entry condition、fixed-interval retry/deadline 與 cancellation/interruption；parallel child Action、任意／遞迴 sequence graph、branching 與 compensation 仍未實作。所有已落地部分仍由 Action 狀態、Scheduler、EventIR、Snapshot 與 Replay 保存，不繞過 StateDelta 提交契約。
 
 ---
 

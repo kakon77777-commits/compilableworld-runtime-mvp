@@ -34,6 +34,19 @@ STATE_MACHINE_TRIGGER_EVENT_FIELDS: dict[str, set[str]] = {
     "action.failed": {
         "action_id", "behavior_id", "actor", "verb", "phase_id", "condition_id",
         "failure_code", "attempt", "max_attempts", "timeout_at_tick", "reason",
+        "step_id", "child_action_id", "child_verb",
+    },
+    "action.child_started": {
+        "parent_action_id", "behavior_id", "actor", "phase_id", "step_id",
+        "child_action_id", "child_verb", "child_target",
+    },
+    "action.child_completed": {
+        "parent_action_id", "behavior_id", "actor", "phase_id", "step_id",
+        "child_action_id", "child_verb", "child_target",
+    },
+    "action.child_failed": {
+        "parent_action_id", "behavior_id", "actor", "phase_id", "step_id",
+        "child_action_id", "child_verb", "child_target", "reason",
     },
     "action.retry_scheduled": {
         "action_id", "behavior_id", "actor", "verb", "duration_ticks", "phase_id",

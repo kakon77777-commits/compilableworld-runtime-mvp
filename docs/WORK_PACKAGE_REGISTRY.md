@@ -8,10 +8,10 @@
 | Item | Value |
 |---|---|
 | Local integrated runtime | `0.1.1` |
-| Verified tests | `297/297` |
+| Verified tests | `305/305` |
 | GitHub `master` observed head | `72334d7` (verified 2026-08-09) |
-| GitHub integration branch before bounded-retry package | `agent/m12-runtime-mcp-integration` at `719ae42` |
-| Remote synchronization status | Conditional-phase v0.3 is pushed; bounded retry/deadline v0.4 is the current reviewed integration-branch package |
+| GitHub integration branch before bounded-child package | `agent/m12-runtime-mcp-integration` at `bbe375d` |
+| Remote synchronization status | Bounded retry/deadline v0.4 is pushed; primitive child Action v0.5 is the current reviewed integration-branch package |
 | Intended next release baseline | `v0.2.0-alpha.1` or equivalent |
 
 ## Current integrated local state
@@ -251,6 +251,38 @@ out_of_scope:
   - exponential or free-form backoff, jitter and dynamic deadline extension
   - if/else branching or OR/NOT expression graphs
   - child Action execution, compensation, resume or parallel graphs
+  - Studio visual authoring/write-back form
+  - AI direct StateStore writes
+```
+
+### CW-M12-ACTION-007 — Bounded primitive child Action sequence
+
+```yaml
+owner_environment: codex
+status: completed-and-deployed-on-integration-branch
+outputs:
+  - schemas/action-behaviors.v0.5.schema.json
+  - v0.1, v0.2, v0.3 and v0.4 authoring compatibility paths
+  - compiler-normalized primitive child verb/module/target/args contract
+  - action.child_started, action.child_completed and action.child_failed EventIR
+  - atomic child Module StateDelta/EventIR plus parent checkpoint transaction
+  - Snapshot v0.4 completed-step prefix and v0.1/v0.2/v0.3 migration
+  - child-aware Replay, Studio projection and terminal notice
+  - tests/test_action_behavior.py
+acceptance:
+  - non-final phases may execute one fixed child step in authored phase order
+  - child actor/correlation are inherited and authored behaviors cannot recurse
+  - primitive verb, module owner, static/parent target and args compile fail closed
+  - completed steps do not rerun during phase-gate retry
+  - rejected child terminates the parent with explicit child provenance
+  - EventLog failure restores StateStore, tick, queue, registry and child progress
+  - Snapshot and Replay preserve an exact authored completed-step prefix
+  - child lifecycle can drive scoped StateIR without direct StateStore writes
+  - 305/305 tests pass
+out_of_scope:
+  - arbitrary or recursive child Action graphs and dynamic actors/targets
+  - if/else branching, OR/NOT graphs, parallel or join
+  - resume, rollback or compensation transactions
   - Studio visual authoring/write-back form
   - AI direct StateStore writes
 ```

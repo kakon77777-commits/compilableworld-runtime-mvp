@@ -12,6 +12,11 @@ from pathlib import Path
 from typing import Any, Callable, Iterable, Protocol
 
 from .action_behavior import (
+    ACTION_BEHAVIOR_CHILD_ARG_FIELDS,
+    ACTION_BEHAVIOR_CHILD_ARG_LIMIT,
+    ACTION_BEHAVIOR_CHILD_MODULES,
+    ACTION_BEHAVIOR_CHILD_REQUIRED_ARGS,
+    ACTION_BEHAVIOR_CHILD_TARGET_VERBS,
     ACTION_BEHAVIOR_CONDITION_NAMESPACES,
     ACTION_BEHAVIOR_CONDITION_OPERATORS,
     ACTION_BEHAVIOR_CONDITION_SUBJECTS,
@@ -39,8 +44,9 @@ class KernelTransactionError(RuntimeErrorBase):
 
 SNAPSHOT_FORMAT_V1 = "compilableworld.snapshot/v0.1"
 SNAPSHOT_FORMAT_V2 = "compilableworld.snapshot/v0.2"
-SNAPSHOT_FORMAT = "compilableworld.snapshot/v0.3"
-SNAPSHOT_VERSION = 3
+SNAPSHOT_FORMAT_V3 = "compilableworld.snapshot/v0.3"
+SNAPSHOT_FORMAT = "compilableworld.snapshot/v0.4"
+SNAPSHOT_VERSION = 4
 
 
 class ConflictError(RuntimeErrorBase):
@@ -525,7 +531,7 @@ class WorldRuntime:
             delay = duration
         if delay > 0:
             entry = self.scheduler.schedule(action, delay)
-            self.action_runtime[action.action_id] = {"retries": {}}
+            self.action_runtime[action.action_id] = {"retries": {}, "completed_steps": []}
             event = self._action_lifecycle_event("action.scheduled", action, behavior, due_tick=entry[0])
             try:
                 self.event_log.append(event)
@@ -710,6 +716,10 @@ class WorldRuntime:
                     ],
                     "retry_policy": dict(phase["retry"])
                     if isinstance(phase.get("retry"), dict) else None,
+                    "child_step_id": (
+                        phase["child_action"].get("step_id")
+                        if isinstance(phase.get("child_action"), dict) else None
+                    ),
                 }
                 for phase in authored_phases if isinstance(phase, dict)
             ]
@@ -723,6 +733,9 @@ class WorldRuntime:
                 dict(phases[min(completed_phases, len(phases) - 1)]) if phases else None
             )
             retry_records = self.action_runtime.get(action.action_id, {}).get("retries", {})
+            completed_steps = list(
+                self.action_runtime.get(action.action_id, {}).get("completed_steps", [])
+            )
             if retry_records:
                 retry_phase_id = next(iter(retry_records))
                 retry_phase_index = next(
@@ -774,6 +787,10 @@ class WorldRuntime:
                 "completed_phase_count": completed_phases,
                 "current_phase": current_phase,
                 "active_retries": active_retries,
+                "completed_child_steps": completed_steps,
+                "child_step_count": sum(
+                    phase.get("child_step_id") is not None for phase in phases
+                ),
             })
         return records
 
@@ -794,6 +811,7 @@ class WorldRuntime:
         actor_id = event.target
         if not isinstance(actor_id, str):
             return
+        causing_action = self.actions.get(event.causation_id or "")
         for entry in self.scheduler.entries():
             action = entry[2]
             behavior = self._action_behavior(action.verb)
@@ -801,6 +819,10 @@ class WorldRuntime:
                 action.actor_id == actor_id
                 and behavior is not None
                 and event.event_type in behavior["interrupt_on"]
+                and not (
+                    causing_action is not None
+                    and causing_action.correlation_id == action.correlation_id
+                )
             ):
                 self._terminate_scheduled_action(
                     entry,
@@ -844,76 +866,283 @@ class WorldRuntime:
         self.metrics[f"event:{event.event_type}"] += 1
         return ActionReceipt(action.action_id, action.status, reason, [event.event_id])
 
+    def _child_lifecycle_event(
+        self,
+        event_type: str,
+        parent: ActionIR,
+        behavior: dict[str, Any],
+        phase: dict[str, Any],
+        child_spec: dict[str, Any],
+        child: ActionIR,
+        tick: int,
+        *,
+        reason: str | None = None,
+    ) -> EventIR:
+        payload: dict[str, Any] = {
+            "parent_action_id": parent.action_id,
+            "behavior_id": behavior["behavior_id"],
+            "actor": parent.actor_id,
+            "phase_id": phase["phase_id"],
+            "step_id": child_spec["step_id"],
+            "child_action_id": child.action_id,
+            "child_verb": child.verb,
+            "child_target": child.target_id,
+        }
+        if reason is not None:
+            payload["reason"] = reason
+        return EventIR(
+            event_type=event_type,
+            source="kernel",
+            target=parent.actor_id,
+            causation_id=parent.action_id,
+            correlation_id=parent.correlation_id,
+            timestamp_tick=tick,
+            visibility="private",
+            payload=payload,
+        )
+
+    def _execute_action_child(
+        self,
+        parent: ActionIR,
+        behavior: dict[str, Any],
+        phase: dict[str, Any],
+        tick: int,
+    ) -> tuple[list[EventIR], bool, str, ActionIR | None]:
+        raw = phase.get("child_action")
+        if raw is None:
+            return [], True, "", None
+        if not isinstance(raw, dict) or set(raw) != {
+            "step_id", "verb", "module_id", "target", "args",
+        }:
+            return [], False, "compiled child Action contract is invalid", None
+        step_id = raw.get("step_id")
+        verb = raw.get("verb")
+        module_id = raw.get("module_id")
+        args = raw.get("args")
+        target_spec = raw.get("target")
+        if (
+            not isinstance(step_id, str)
+            or not step_id
+            or verb not in ACTION_BEHAVIOR_CHILD_MODULES
+            or module_id != ACTION_BEHAVIOR_CHILD_MODULES.get(verb)
+            or any(
+                isinstance(item, dict) and item.get("verb") == verb
+                for item in self.package.get("action_behaviors", [])
+            )
+            or not isinstance(args, dict)
+            or len(args) > ACTION_BEHAVIOR_CHILD_ARG_LIMIT
+        ):
+            return [], False, "compiled child Action is not a bounded primitive", None
+        allowed_args = ACTION_BEHAVIOR_CHILD_ARG_FIELDS[verb]
+        required_args = ACTION_BEHAVIOR_CHILD_REQUIRED_ARGS.get(verb, set())
+        if set(args) - allowed_args or required_args - set(args):
+            return [], False, "compiled child Action args violate the primitive contract", None
+        if any(
+            not (
+                value is None
+                or isinstance(value, (str, bool, int))
+                or (isinstance(value, float) and math.isfinite(value))
+            )
+            for value in args.values()
+        ):
+            return [], False, "compiled child Action args are not finite scalars", None
+        if any(
+            key in {"direction", "recipient", "spell", "text", "topic"}
+            and (not isinstance(value, str) or not value.strip())
+            for key, value in args.items()
+        ):
+            return [], False, "compiled child Action string args are invalid", None
+
+        target_id: str | None = None
+        if target_spec is not None:
+            if not isinstance(target_spec, dict):
+                return [], False, "compiled child Action target is invalid", None
+            if target_spec.get("source") == "parent_target" and set(target_spec) == {"source"}:
+                target_id = parent.target_id
+            elif target_spec.get("source") == "entity" and set(target_spec) == {
+                "source", "entity_id",
+            }:
+                target_id = target_spec.get("entity_id")
+            else:
+                return [], False, "compiled child Action target is invalid", None
+        if verb in ACTION_BEHAVIOR_CHILD_TARGET_VERBS and (
+            not isinstance(target_id, str) or not self.registry.contains(target_id)
+        ):
+            return [], False, f"child Action {step_id} target is unavailable", None
+        if verb not in ACTION_BEHAVIOR_CHILD_TARGET_VERBS and target_id is not None:
+            return [], False, f"child Action {step_id} forbids a target", None
+        recipient = args.get("recipient")
+        if verb == "give" and (
+            not isinstance(recipient, str) or not self.registry.contains(recipient)
+        ):
+            return [], False, f"child Action {step_id} recipient is unavailable", None
+
+        child = ActionIR(
+            actor_id=parent.actor_id,
+            verb=verb,
+            target_id=target_id,
+            args=deepcopy(args),
+            correlation_id=parent.correlation_id,
+            authority="runtime",
+            proposed_at_tick=tick,
+        )
+        self.actions[child.action_id] = child
+        started = self._child_lifecycle_event(
+            "action.child_started", parent, behavior, phase, raw, child, tick,
+        )
+        state_before = deepcopy(self.state.export())
+        try:
+            module = self.module_for(verb)
+            if module.contract.module_id != module_id:
+                raise RuntimeErrorBase(
+                    f"child Action module mismatch: {module.contract.module_id} != {module_id}"
+                )
+            child.status = ActionStatus.VALIDATED
+            child.status = ActionStatus.EXECUTING
+            result = module.evaluate(child, self)
+            if not result.accepted:
+                child.status = ActionStatus.FAILED
+                failed = self._child_lifecycle_event(
+                    "action.child_failed", parent, behavior, phase, raw, child, tick,
+                    reason=result.message,
+                )
+                return [started, failed], False, result.message, child
+            applied = self.state.commit(result.deltas, module.contract.write)
+            committed = EventIR(
+                event_type="state.committed",
+                source=module.contract.module_id,
+                target=parent.actor_id,
+                causation_id=child.action_id,
+                correlation_id=parent.correlation_id,
+                timestamp_tick=tick,
+                visibility="audit",
+                payload={"applied": applied},
+            )
+            child.status = ActionStatus.COMPLETED
+            completed = self._child_lifecycle_event(
+                "action.child_completed", parent, behavior, phase, raw, child, tick,
+            )
+            emitted = [started, committed, *result.events, completed]
+            for event in emitted[2:-1]:
+                event.causation_id = event.causation_id or child.action_id
+                event.correlation_id = event.correlation_id or parent.correlation_id
+                event.timestamp_tick = tick
+            return emitted, True, result.message, child
+        except RuntimeErrorBase as exc:
+            self.state.import_state(state_before)
+            child.status = ActionStatus.FAILED
+            failed = self._child_lifecycle_event(
+                "action.child_failed", parent, behavior, phase, raw, child, tick,
+                reason=str(exc),
+            )
+            return [started, failed], False, str(exc), child
+
     def advance(self, ticks: int = 1) -> list[ActionReceipt]:
         receipts: list[ActionReceipt] = []
         for _ in range(max(0, ticks)):
             next_tick = self.scheduler.tick + 1
-            decisions = self._action_checkpoint_decisions(next_tick)
+            state_before = deepcopy(self.state.export())
             queue_before = list(self.scheduler._queue)
             counter_before = self.scheduler._counter
             statuses_before = {
                 action.action_id: action.status for _, _, action in queue_before
             }
             action_runtime_before = deepcopy(self.action_runtime)
+            actions_before = dict(self.actions)
+            previous_tick = self.scheduler.tick
             self.scheduler.tick = next_tick
-            for event, entry, outcome, _ in decisions:
-                action = entry[2]
-                if outcome == "progress":
-                    retry_state = self.action_runtime.get(action.action_id, {}).get("retries", {})
-                    retry_state.pop(event.payload["next_phase_id"], None)
-                    continue
-                removed = self.scheduler.remove(action.action_id)
-                if removed is None:
-                    raise RuntimeErrorBase(f"checkpoint action 已不在排程中: {action.action_id}")
-                if outcome == "retry":
-                    self.scheduler.restore((event.payload["due_tick"], removed[1], action))
-                    retries = self.action_runtime.setdefault(
-                        action.action_id, {"retries": {}}
-                    )["retries"]
-                    retries[event.payload["phase_id"]] = {
-                        "attempts": event.payload["attempt"],
-                        "first_failure_tick": event.payload["first_failure_tick"],
-                        "timeout_at_tick": event.payload["timeout_at_tick"],
-                        "next_retry_tick": event.payload["retry_at_tick"],
-                        "condition_id": event.payload["condition_id"],
-                    }
-                else:
-                    action.status = ActionStatus.FAILED
-                    self.action_runtime.pop(action.action_id, None)
             try:
-                self.event_log.append_batch(event for event, _, _, _ in decisions)
+                decisions = self._action_checkpoint_decisions(next_tick)
+                for events, entry, outcome, _ in decisions:
+                    action = entry[2]
+                    event = events[-1]
+                    if outcome == "progress":
+                        retry_state = self.action_runtime.get(action.action_id, {}).get(
+                            "retries", {}
+                        )
+                        retry_state.pop(event.payload["next_phase_id"], None)
+                        continue
+                    removed = self.scheduler.remove(action.action_id)
+                    if removed is None:
+                        raise RuntimeErrorBase(
+                            f"checkpoint action is no longer queued: {action.action_id}"
+                        )
+                    if outcome == "retry":
+                        self.scheduler.restore((event.payload["due_tick"], removed[1], action))
+                        retries = self.action_runtime.setdefault(
+                            action.action_id, {"retries": {}, "completed_steps": []}
+                        )["retries"]
+                        retries[event.payload["phase_id"]] = {
+                            "attempts": event.payload["attempt"],
+                            "first_failure_tick": event.payload["first_failure_tick"],
+                            "timeout_at_tick": event.payload["timeout_at_tick"],
+                            "next_retry_tick": event.payload["retry_at_tick"],
+                            "condition_id": event.payload["condition_id"],
+                        }
+                    else:
+                        action.status = ActionStatus.FAILED
+                        self.action_runtime.pop(action.action_id, None)
+                self.event_log.append_batch(
+                    event
+                    for events, _, _, _ in decisions
+                    for event in events
+                )
             except KernelTransactionError:
-                self.scheduler.tick -= 1
+                self.state.import_state(state_before)
+                self.scheduler.tick = previous_tick
                 self.scheduler._counter = counter_before
                 self.scheduler._queue = queue_before
                 heapq.heapify(self.scheduler._queue)
                 for _, _, action in queue_before:
                     action.status = statuses_before[action.action_id]
                 self.action_runtime = action_runtime_before
+                self.actions = actions_before
                 raise
-            for event, entry, outcome, message in decisions:
+            except Exception:
+                self.state.import_state(state_before)
+                self.scheduler.tick = previous_tick
+                self.scheduler._counter = counter_before
+                self.scheduler._queue = queue_before
+                heapq.heapify(self.scheduler._queue)
+                for _, _, action in queue_before:
+                    action.status = statuses_before[action.action_id]
+                self.action_runtime = action_runtime_before
+                self.actions = actions_before
+                raise
+            for events, entry, outcome, message in decisions:
                 action = entry[2]
                 if outcome == "failed":
                     self.metrics["actions_failed"] += 1
                     receipts.append(ActionReceipt(
-                        action.action_id, action.status, message or "phase condition failed",
-                        [event.event_id],
+                        action.action_id,
+                        action.status,
+                        message or "phase or child Action failed",
+                        [event.event_id for event in events],
                     ))
                 elif outcome == "retry":
                     self.metrics["actions_retried"] += 1
                     receipts.append(ActionReceipt(
-                        action.action_id, action.status, message or "phase retry scheduled",
-                        [event.event_id],
+                        action.action_id,
+                        action.status,
+                        message or "phase retry scheduled",
+                        [event.event_id for event in events],
                     ))
-                self.events.publish(event)
-                self.metrics[f"event:{event.event_type}"] += 1
+                for event in events:
+                    if event.event_type == "action.child_completed":
+                        self.metrics["child_actions_completed"] += 1
+                    elif event.event_type == "action.child_failed":
+                        self.metrics["child_actions_failed"] += 1
+                    self.events.publish(event)
+                    self.metrics[f"event:{event.event_type}"] += 1
             receipts.extend(self._execute(action) for action in self.scheduler.pop_ready())
         return receipts
 
     def _action_checkpoint_decisions(
         self, tick: int,
-    ) -> list[tuple[EventIR, tuple[int, int, ActionIR], str, str | None]]:
-        decisions: list[tuple[EventIR, tuple[int, int, ActionIR], str, str | None]] = []
+    ) -> list[tuple[list[EventIR], tuple[int, int, ActionIR], str, str | None]]:
+        decisions: list[
+            tuple[list[EventIR], tuple[int, int, ActionIR], str, str | None]
+        ] = []
         for entry in self.scheduler.entries():
             due_tick, _, action = entry
             behavior = self._action_behavior(action.verb)
@@ -936,6 +1165,48 @@ class WorldRuntime:
                 if elapsed != cumulative:
                     continue
                 next_phase = phases[phase_index + 1]
+                events: list[EventIR] = []
+                child_spec = phase.get("child_action")
+                step_id = (
+                    child_spec.get("step_id") if isinstance(child_spec, dict) else None
+                )
+                completed_steps = self.action_runtime.setdefault(
+                    action.action_id, {"retries": {}, "completed_steps": []}
+                ).setdefault("completed_steps", [])
+                if isinstance(step_id, str) and step_id not in completed_steps:
+                    child_events, child_ok, child_message, child = self._execute_action_child(
+                        action, behavior, phase, tick,
+                    )
+                    events.extend(child_events)
+                    if not child_ok:
+                        message = (
+                            f"child Action {step_id} failed: {child_message}"
+                        )
+                        events.append(EventIR(
+                            event_type="action.failed",
+                            source="kernel",
+                            target=action.actor_id,
+                            causation_id=action.action_id,
+                            correlation_id=action.correlation_id,
+                            timestamp_tick=tick,
+                            visibility="private",
+                            payload={
+                                "action_id": action.action_id,
+                                "behavior_id": behavior["behavior_id"],
+                                "actor": action.actor_id,
+                                "verb": action.verb,
+                                "duration_ticks": duration,
+                                "phase_id": phase["phase_id"],
+                                "step_id": step_id,
+                                "child_action_id": child.action_id if child else None,
+                                "child_verb": child.verb if child else child_spec.get("verb"),
+                                "failure_code": "child_action_failed",
+                                "reason": message,
+                            },
+                        ))
+                        decisions.append((events, entry, "failed", message))
+                        continue
+                    completed_steps.append(step_id)
                 failed_condition = next(
                     (
                         condition for condition in next_phase.get("when", [])
@@ -972,10 +1243,10 @@ class WorldRuntime:
                             and retry_at_tick <= timeout_at_tick
                         ):
                             retry_message = (
-                                f"{message}；retry {attempt}/{retry_policy['max_attempts']} "
+                                f"{message}; retry {attempt}/{retry_policy['max_attempts']} "
                                 f"scheduled for tick {retry_at_tick}"
                             )
-                            decisions.append((EventIR(
+                            events.append(EventIR(
                                 event_type="action.retry_scheduled",
                                 source="kernel",
                                 target=action.actor_id,
@@ -1000,7 +1271,8 @@ class WorldRuntime:
                                     "due_tick": due_tick + retry_policy["interval_ticks"],
                                     "reason": retry_message,
                                 },
-                            ), entry, "retry", retry_message))
+                            ))
+                            decisions.append((events, entry, "retry", retry_message))
                             continue
                     failure_code = (
                         "retry_exhausted" if isinstance(retry_policy, dict)
@@ -1024,7 +1296,7 @@ class WorldRuntime:
                             "max_attempts": retry_policy["max_attempts"],
                             "timeout_at_tick": timeout_at_tick,
                         })
-                    decisions.append((EventIR(
+                    events.append(EventIR(
                         event_type="action.failed",
                         source="kernel",
                         target=action.actor_id,
@@ -1033,9 +1305,10 @@ class WorldRuntime:
                         timestamp_tick=tick,
                         visibility="private",
                         payload=failure_payload,
-                    ), entry, "failed", message))
+                    ))
+                    decisions.append((events, entry, "failed", message))
                     continue
-                decisions.append((EventIR(
+                events.append(EventIR(
                     event_type="action.progressed",
                     source="kernel",
                     target=action.actor_id,
@@ -1057,7 +1330,8 @@ class WorldRuntime:
                         "progress_ticks": cumulative,
                         "duration_ticks": duration,
                     },
-                ), entry, "progress", None))
+                ))
+                decisions.append((events, entry, "progress", None))
         return decisions
 
     def _action_condition_matches(self, action: ActionIR, condition: Any) -> bool:
@@ -1148,9 +1422,13 @@ class WorldRuntime:
         *,
         require_all: bool,
         snapshot_tick: int,
+        snapshot_version: int,
     ) -> dict[str, dict[str, Any]]:
         if payload is None and not require_all:
-            return {action_id: {"retries": {}} for action_id in queued_actions}
+            return {
+                action_id: {"retries": {}, "completed_steps": []}
+                for action_id in queued_actions
+            }
         if not isinstance(payload, dict):
             raise RuntimeErrorBase("Snapshot action_runtime must be an object")
         if set(payload) - set(queued_actions):
@@ -1161,7 +1439,10 @@ class WorldRuntime:
         validated: dict[str, dict[str, Any]] = {}
         for action_id, action in queued_actions.items():
             raw_record = payload.get(action_id, {"retries": {}})
-            if not isinstance(raw_record, dict) or set(raw_record) != {"retries"}:
+            expected_fields = (
+                {"retries", "completed_steps"} if snapshot_version >= 4 else {"retries"}
+            )
+            if not isinstance(raw_record, dict) or set(raw_record) != expected_fields:
                 raise RuntimeErrorBase("Snapshot action_runtime record is invalid")
             raw_retries = raw_record["retries"]
             if not isinstance(raw_retries, dict):
@@ -1175,6 +1456,42 @@ class WorldRuntime:
                 for phase in phases
                 if isinstance(phase, dict) and isinstance(phase.get("phase_id"), str)
             }
+            authored_steps = [
+                phase["child_action"]["step_id"]
+                for phase in phases
+                if isinstance(phase, dict)
+                and isinstance(phase.get("child_action"), dict)
+                and isinstance(phase["child_action"].get("step_id"), str)
+            ]
+            cumulative_ticks = 0
+            earliest_step_ticks: dict[str, int] = {}
+            for phase in phases:
+                if not isinstance(phase, dict):
+                    continue
+                duration_ticks = phase.get("duration_ticks")
+                if isinstance(duration_ticks, int) and not isinstance(duration_ticks, bool):
+                    cumulative_ticks += duration_ticks
+                child_action = phase.get("child_action")
+                if isinstance(child_action, dict) and isinstance(
+                    child_action.get("step_id"), str
+                ):
+                    earliest_step_ticks[child_action["step_id"]] = (
+                        action.proposed_at_tick + cumulative_ticks
+                    )
+            raw_completed_steps = raw_record.get("completed_steps", [])
+            if (
+                not isinstance(raw_completed_steps, list)
+                or any(not isinstance(step_id, str) for step_id in raw_completed_steps)
+                or len(raw_completed_steps) != len(set(raw_completed_steps))
+                or raw_completed_steps != authored_steps[:len(raw_completed_steps)]
+                or any(
+                    earliest_step_ticks.get(step_id, snapshot_tick + 1) > snapshot_tick
+                    for step_id in raw_completed_steps
+                )
+            ):
+                raise RuntimeErrorBase(
+                    "Snapshot action_runtime.completed_steps is not an authored prefix"
+                )
             retries: dict[str, dict[str, Any]] = {}
             for phase_id, retry_state in raw_retries.items():
                 if not isinstance(phase_id, str) or phase_id not in phase_by_id:
@@ -1223,7 +1540,10 @@ class WorldRuntime:
                     "next_retry_tick": next_retry_tick,
                     "condition_id": condition_id,
                 }
-            validated[action_id] = {"retries": retries}
+            validated[action_id] = {
+                "retries": retries,
+                "completed_steps": list(raw_completed_steps),
+            }
         return validated
 
     def save_snapshot(self, path: str | Path) -> None:
@@ -1246,7 +1566,9 @@ class WorldRuntime:
             "active_player_id": self.active_player_id,
             "scheduler": self.scheduler.export(),
             "action_runtime": {
-                action_id: deepcopy(self.action_runtime.get(action_id, {"retries": {}}))
+                action_id: deepcopy(self.action_runtime.get(
+                    action_id, {"retries": {}, "completed_steps": []}
+                ))
                 for action_id in sorted(pending_ids)
             },
             "event_count": len(self.event_log.events),
@@ -1258,7 +1580,9 @@ class WorldRuntime:
         if not isinstance(payload, dict):
             raise RuntimeErrorBase("Snapshot 根資料格式無效")
         snapshot_format = payload.get("format")
-        if snapshot_format not in {SNAPSHOT_FORMAT_V1, SNAPSHOT_FORMAT_V2, SNAPSHOT_FORMAT}:
+        if snapshot_format not in {
+            SNAPSHOT_FORMAT_V1, SNAPSHOT_FORMAT_V2, SNAPSHOT_FORMAT_V3, SNAPSHOT_FORMAT,
+        }:
             raise RuntimeErrorBase("不支援的 Snapshot 格式")
         try:
             snapshot_version = int(payload.get("snapshot_version", 1 if snapshot_format == SNAPSHOT_FORMAT_V1 else 0))
@@ -1269,7 +1593,8 @@ class WorldRuntime:
         expected_snapshot_version = {
             SNAPSHOT_FORMAT_V1: 1,
             SNAPSHOT_FORMAT_V2: 2,
-            SNAPSHOT_FORMAT: 3,
+            SNAPSHOT_FORMAT_V3: 3,
+            SNAPSHOT_FORMAT: 4,
         }[snapshot_format]
         if snapshot_version != expected_snapshot_version:
             raise RuntimeErrorBase("Snapshot format 與 snapshot_version 不一致")
@@ -1337,6 +1662,7 @@ class WorldRuntime:
             next_actions,
             require_all=snapshot_version >= 3,
             snapshot_tick=next_scheduler.tick,
+            snapshot_version=snapshot_version,
         )
 
         preserved_entities = {
@@ -1392,7 +1718,36 @@ class WorldRuntime:
                 lifecycle_order += 1
                 action.status = ActionStatus.SCHEDULED
                 pending_actions[action.action_id] = (due_tick, lifecycle_order, action)
-                pending_action_runtime[action.action_id] = {"retries": {}}
+                pending_action_runtime[action.action_id] = {
+                    "retries": {}, "completed_steps": [],
+                }
+            elif event.event_type == "action.child_completed":
+                action_id = event.payload.get("parent_action_id")
+                step_id = event.payload.get("step_id")
+                entry = pending_actions.get(action_id) if isinstance(action_id, str) else None
+                if entry is None or not isinstance(step_id, str):
+                    raise RuntimeErrorBase(
+                        "EventLog action.child_completed references no pending parent"
+                    )
+                behavior = self._action_behavior(entry[2].verb)
+                authored_steps = [
+                    phase["child_action"]["step_id"]
+                    for phase in behavior.get("phases", [])
+                    if isinstance(phase, dict)
+                    and isinstance(phase.get("child_action"), dict)
+                    and isinstance(phase["child_action"].get("step_id"), str)
+                ] if isinstance(behavior, dict) else []
+                completed_steps = pending_action_runtime[action_id]["completed_steps"]
+                if (
+                    len(completed_steps) >= len(authored_steps)
+                    or authored_steps[len(completed_steps)] != step_id
+                ):
+                    raise RuntimeErrorBase(
+                        "EventLog action.child_completed violates authored sequence"
+                    )
+                completed_steps.append(step_id)
+                lifecycle_seen = True
+                lifecycle_tick = max(lifecycle_tick, event.timestamp_tick)
             elif event.event_type == "action.retry_scheduled":
                 action_id = event.payload.get("action_id")
                 entry = pending_actions.get(action_id) if isinstance(action_id, str) else None
