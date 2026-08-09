@@ -4,6 +4,7 @@ import json
 import shutil
 import tempfile
 import unittest
+from copy import deepcopy
 from pathlib import Path
 from unittest.mock import patch
 
@@ -44,7 +45,7 @@ class ActionBehaviorTests(unittest.TestCase):
         self.assertIn("combat.damage_applied", behavior["interrupt_on"])
         self.assertEqual(
             self.package["manifest"]["source_schemas"]["action_behaviors"],
-            "compilableworld.schema/action-behaviors/v0.2",
+            "compilableworld.schema/action-behaviors/v0.3",
         )
 
     def test_search_runs_scheduled_started_completed_lifecycle(self) -> None:
@@ -244,11 +245,100 @@ class ActionBehaviorTests(unittest.TestCase):
         self.assertEqual(len(progressed), 1)
         self.assertEqual(progressed[0].timestamp_tick, 1)
 
-    def test_failed_completion_emits_started_then_failed_without_effect(self) -> None:
+    def test_phase_condition_failure_is_terminal_and_auditable(self) -> None:
         action = ActionIR("player.neo", "search")
         self.runtime.submit(action)
         self.runtime.state.seed("player.neo", "status", "alive", False)
-        receipt = self.runtime.advance(2)[0]
+
+        failed = self.runtime.advance(1)
+        self.assertEqual(failed[0].status, ActionStatus.FAILED)
+        self.assertEqual(action.status, ActionStatus.FAILED)
+        self.assertEqual(self.runtime.scheduler.queued, 0)
+        self.assertIsNone(self.runtime.state.get("player.neo", "exploration", "search_count"))
+        event = self.runtime.event_log.events[-1]
+        self.assertEqual(event.event_type, "action.failed")
+        self.assertEqual(event.timestamp_tick, 1)
+        self.assertEqual(event.payload["phase_id"], "inspect")
+        self.assertEqual(event.payload["condition_id"], "actor_alive")
+        self.assertNotIn("action.progressed", [item.event_type for item in self.runtime.event_log.events])
+        replayed = WorldRuntime(self.package)
+        replayed.replay(self.runtime.event_log.events)
+        self.assertEqual(replayed.scheduler.queued, 0)
+
+    def test_target_numeric_condition_and_strict_boolean_equality(self) -> None:
+        numeric_package = deepcopy(self.package)
+        condition = numeric_package["action_behaviors"][0]["phases"][1]["when"][0]
+        condition.update({
+            "subject": "target",
+            "namespace": "health",
+            "key": "current",
+            "operator": "greater_than",
+            "value": 0,
+        })
+        numeric_runtime = WorldRuntime(numeric_package)
+        install_builtin_modules(numeric_runtime)
+        numeric_runtime.submit(ActionIR("player.neo", "search", "npc.guard"))
+        self.assertEqual(numeric_runtime.advance(1), [])
+        self.assertEqual(numeric_runtime.event_log.events[-1].event_type, "action.progressed")
+
+        strict_package = deepcopy(self.package)
+        strict_package["action_behaviors"][0]["phases"][1]["when"][0]["value"] = 1
+        strict_runtime = WorldRuntime(strict_package)
+        install_builtin_modules(strict_runtime)
+        strict_runtime.submit(ActionIR("player.neo", "search"))
+        failed = strict_runtime.advance(1)
+        self.assertEqual(failed[0].status, ActionStatus.FAILED)
+        self.assertEqual(failed[0].message.split()[-2:], ["actor_alive", "未滿足"])
+
+        unsafe_package = deepcopy(self.package)
+        unsafe_package["action_behaviors"][0]["phases"][1]["when"][0]["value"] = {
+            "unexpected": True
+        }
+        unsafe_runtime = WorldRuntime(unsafe_package)
+        install_builtin_modules(unsafe_runtime)
+        unsafe_runtime.submit(ActionIR("player.neo", "search"))
+        self.assertEqual(unsafe_runtime.advance(1)[0].status, ActionStatus.FAILED)
+
+        missing_id_package = deepcopy(self.package)
+        missing_id_package["action_behaviors"][0]["phases"][1]["when"][0].pop(
+            "condition_id"
+        )
+        missing_id_runtime = WorldRuntime(missing_id_package)
+        install_builtin_modules(missing_id_runtime)
+        missing_id_runtime.submit(ActionIR("player.neo", "search"))
+        self.assertEqual(missing_id_runtime.advance(1)[0].status, ActionStatus.FAILED)
+        self.assertEqual(
+            missing_id_runtime.event_log.events[-1].payload["condition_id"],
+            "invalid_condition",
+        )
+
+    def test_condition_failure_log_rollback_restores_tick_queue_and_status(self) -> None:
+        action = ActionIR("player.neo", "search")
+        self.runtime.submit(action)
+        self.runtime.state.seed("player.neo", "status", "alive", False)
+        with patch.object(
+            self.runtime.event_log, "append_batch",
+            side_effect=KernelTransactionError("condition log failure"),
+        ):
+            with self.assertRaises(KernelTransactionError):
+                self.runtime.advance(1)
+        self.assertEqual(self.runtime.scheduler.tick, 0)
+        self.assertEqual(self.runtime.scheduler.queued, 1)
+        self.assertEqual(action.status, ActionStatus.SCHEDULED)
+
+        failed = self.runtime.advance(1)
+        self.assertEqual(failed[0].status, ActionStatus.FAILED)
+        self.assertEqual(
+            len([event for event in self.runtime.event_log.events if event.event_type == "action.failed"]),
+            1,
+        )
+
+    def test_failed_completion_emits_started_then_failed_without_effect(self) -> None:
+        action = ActionIR("player.neo", "search")
+        self.runtime.submit(action)
+        self.runtime.advance(1)
+        self.runtime.state.seed("player.neo", "status", "alive", False)
+        receipt = self.runtime.advance(1)[0]
         self.assertEqual(receipt.status, ActionStatus.FAILED)
         self.assertEqual(self.runtime.state.get("player.neo", "exploration", "search_count"), None)
         self.assertEqual(
@@ -265,6 +355,23 @@ class ActionBehaviorTests(unittest.TestCase):
 
         def duplicate_phase(source: dict, manifest: dict) -> None:
             source["behaviors"][0]["phases"][1]["phase_id"] = "survey"
+
+        def first_phase_condition(source: dict, manifest: dict) -> None:
+            source["behaviors"][0]["phases"][0]["when"] = [
+                dict(source["behaviors"][0]["phases"][1]["when"][0])
+            ]
+
+        def duplicate_condition(source: dict, manifest: dict) -> None:
+            condition = dict(source["behaviors"][0]["phases"][1]["when"][0])
+            source["behaviors"][0]["phases"][1]["when"].append(condition)
+
+        def unknown_condition_namespace(source: dict, manifest: dict) -> None:
+            source["behaviors"][0]["phases"][1]["when"][0]["namespace"] = "secret"
+
+        def non_numeric_ordering(source: dict, manifest: dict) -> None:
+            condition = source["behaviors"][0]["phases"][1]["when"][0]
+            condition["operator"] = "greater_than"
+            condition["value"] = "yes"
 
         def free_guard(source: dict, manifest: dict) -> None:
             source["behaviors"][0]["guard"] = "actor.focus > 10"
@@ -283,6 +390,10 @@ class ActionBehaviorTests(unittest.TestCase):
         for label, change in {
             "duration_zero": duration_zero,
             "duplicate_phase": duplicate_phase,
+            "first_phase_condition": first_phase_condition,
+            "duplicate_condition": duplicate_condition,
+            "unknown_condition_namespace": unknown_condition_namespace,
+            "non_numeric_ordering": non_numeric_ordering,
             "free_guard": free_guard,
             "unknown_interrupt": unknown_interrupt,
             "duplicate_verb": duplicate_verb,
@@ -338,7 +449,40 @@ class ActionBehaviorTests(unittest.TestCase):
         )
         self.assertEqual(
             package["schema_contracts"]["action_behaviors"],
+            "compilableworld.schema/action-behaviors/v0.3",
+        )
+
+    def test_v02_sequential_authoring_remains_compilable(self) -> None:
+        with tempfile.TemporaryDirectory() as temp:
+            world = Path(temp) / "world"
+            shutil.copytree(GRAY_CROWN, world)
+            source_path = world / "action_behaviors.json"
+            manifest_path = world / "manifest.json"
+            source = json.loads(source_path.read_text(encoding="utf-8"))
+            source["format"] = "compilableworld.action-behaviors/v0.2"
+            for phase in source["behaviors"][0]["phases"]:
+                phase.pop("when")
+            manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+            manifest["source_schemas"]["action_behaviors"] = (
+                "compilableworld.schema/action-behaviors/v0.2"
+            )
+            source_path.write_text(
+                json.dumps(source, ensure_ascii=False, indent=2) + "\n", encoding="utf-8"
+            )
+            manifest_path.write_text(
+                json.dumps(manifest, ensure_ascii=False, indent=2) + "\n", encoding="utf-8"
+            )
+            package_path = compile_world(world, Path(temp) / "build")
+            package = json.loads(package_path.read_text(encoding="utf-8"))
+
+        self.assertNotIn("when", package["action_behaviors"][0]["phases"][1])
+        self.assertEqual(
+            package["manifest"]["source_schemas"]["action_behaviors"],
             "compilableworld.schema/action-behaviors/v0.2",
+        )
+        self.assertEqual(
+            package["schema_contracts"]["action_behaviors"],
+            "compilableworld.schema/action-behaviors/v0.3",
         )
 
     def test_action_completed_event_can_drive_scoped_state_ir(self) -> None:
@@ -419,12 +563,55 @@ class ActionBehaviorTests(unittest.TestCase):
                 runtime.state.get("player.neo", "exploration", "search_count")
             )
 
+    def test_condition_failure_can_drive_scoped_state_ir(self) -> None:
+        with tempfile.TemporaryDirectory() as temp:
+            world = Path(temp) / "world"
+            shutil.copytree(GRAY_CROWN, world)
+            machines_path = world / "state_machines.json"
+            source = json.loads(machines_path.read_text(encoding="utf-8"))
+            source["state_machines"].append({
+                "state_machine_id": "fsm.world.search_condition_failure",
+                "title": "搜索條件失敗觀測",
+                "owner_scope": "world",
+                "owner_id": "world",
+                "states": ["waiting", "completed"],
+                "initial_state": "waiting",
+                "persistence": "runtime",
+                "visibility": "public",
+                "authority": "state_machine.core",
+                "transitions": [{
+                    "transition_id": "fsm.world.search_condition_failure.observed",
+                    "from": "waiting",
+                    "on": "action.failed",
+                    "to": "completed",
+                    "event_match": {"condition_id": "actor_alive"},
+                }],
+            })
+            machines_path.write_text(
+                json.dumps(source, ensure_ascii=False, indent=2) + "\n", encoding="utf-8"
+            )
+            runtime = WorldRuntime.from_package(compile_world(world, Path(temp) / "build"))
+            install_builtin_modules(runtime)
+            runtime.submit(ActionIR("player.neo", "search"))
+            runtime.state.seed("player.neo", "status", "alive", False)
+            runtime.advance(1)
+            self.assertEqual(
+                runtime.state.get(
+                    "gray_crown_demo", "fsm", "fsm.world.search_condition_failure"
+                ),
+                "completed",
+            )
+
     def test_studio_projects_behavior_and_live_pending_progress(self) -> None:
         static = package_overview(self.package)
         self.assertEqual(static["action_behaviors"][0]["verb"], "search")
         self.assertEqual(
             [phase["phase_id"] for phase in static["action_behaviors"][0]["phases"]],
             ["survey", "inspect"],
+        )
+        self.assertEqual(
+            static["action_behaviors"][0]["phases"][1]["when"][0]["condition_id"],
+            "actor_alive",
         )
         self.assertIn("action.completed", static["events"]["declared"])
         self.assertIn("action.progressed", static["events"]["declared"])
@@ -434,6 +621,16 @@ class ActionBehaviorTests(unittest.TestCase):
         self.assertEqual(live["pending_actions"][0]["action_id"], action.action_id)
         self.assertEqual(live["pending_actions"][0]["remaining_ticks"], 2)
         self.assertEqual(live["pending_actions"][0]["current_phase"]["phase_id"], "survey")
+        self.assertNotIn("when", live["pending_actions"][0]["current_phase"])
+        self.assertTrue(
+            all("when" not in phase for phase in live["pending_actions"][0]["phases"])
+        )
+        self.runtime.advance(1)
+        live = runtime_overview(self.runtime)
+        self.assertEqual(
+            live["pending_actions"][0]["current_phase"]["condition_ids"],
+            ["actor_alive"],
+        )
 
     def test_parser_exposes_search_as_normal_action_ir(self) -> None:
         action = DeterministicIntentParser().parse("search", "player.neo", self.runtime)

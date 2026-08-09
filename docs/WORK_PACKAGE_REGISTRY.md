@@ -8,10 +8,10 @@
 | Item | Value |
 |---|---|
 | Local integrated runtime | `0.1.1` |
-| Verified tests | `285/285` |
+| Verified tests | `290/290` |
 | GitHub `master` observed head | `72334d7` (verified 2026-08-09) |
-| GitHub integration branch before sequential-phase package | `agent/m12-runtime-mcp-integration` at `4174ea9` |
-| Remote synchronization status | Action-scope v0.1 is pushed; sequential-phase v0.2 is the current reviewed integration-branch package |
+| GitHub integration branch before conditional-phase package | `agent/m12-runtime-mcp-integration` at `75ed42d` |
+| Remote synchronization status | Sequential-phase v0.2 is pushed; conditional-phase v0.3 is the current reviewed integration-branch package |
 | Intended next release baseline | `v0.2.0-alpha.1` or equivalent |
 
 ## Current integrated local state
@@ -191,6 +191,36 @@ out_of_scope:
   - child Action execution or generic phase effects
   - conditional, retry, timeout or parallel graphs
   - resume and compensation transactions
+  - Studio visual authoring/write-back form
+  - AI direct StateStore writes
+```
+
+### CW-M12-ACTION-005 — Fail-closed phase-entry conditions
+
+```yaml
+owner_environment: codex
+status: completed-and-deployed-on-integration-branch
+outputs:
+  - schemas/action-behaviors.v0.3.schema.json
+  - v0.1 and v0.2 authoring compatibility paths
+  - bounded actor/target State Cell condition evaluator
+  - atomic conditional action.failed lifecycle
+  - condition-aware Studio and redacted player pending projections
+  - tests/test_action_behavior.py
+acceptance:
+  - non-initial phases accept at most sixteen deterministic AND conditions
+  - subjects, namespaces, keys, operators and finite scalar values compile fail closed
+  - missing owners/cells, bad types and non-finite values fail without coercion
+  - target numeric comparisons and strict boolean equality are verified
+  - condition failure atomically removes the queue item and emits phase/condition provenance
+  - EventLog failure restores tick, queue and ActionStatus without duplicate failure
+  - conditional action.failed can drive scoped StateIR
+  - player pending projection does not expose condition path, operator or value
+  - 290/290 tests pass
+out_of_scope:
+  - if/else branching or OR/NOT expression graphs
+  - child Action execution or generic phase effects
+  - retry, timeout, resume, compensation or parallel graphs
   - Studio visual authoring/write-back form
   - AI direct StateStore writes
 ```

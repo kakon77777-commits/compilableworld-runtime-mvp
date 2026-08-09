@@ -31,7 +31,9 @@ STATE_MACHINE_REWARD_CURRENCY_LIMIT = 1_000_000_000
 # ownership is resolved separately from ActionIR causation and is therefore not
 # exposed as an ad-hoc payload match for events that do not carry it.
 STATE_MACHINE_TRIGGER_EVENT_FIELDS: dict[str, set[str]] = {
-    "action.failed": {"action_id", "behavior_id", "actor", "verb", "reason"},
+    "action.failed": {
+        "action_id", "behavior_id", "actor", "verb", "phase_id", "condition_id", "reason",
+    },
     "action.scheduled": {
         "action_id", "behavior_id", "actor", "verb", "duration_ticks", "due_tick",
     },

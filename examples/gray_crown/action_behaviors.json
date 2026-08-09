@@ -1,5 +1,5 @@
 {
-  "format": "compilableworld.action-behaviors/v0.2",
+  "format": "compilableworld.action-behaviors/v0.3",
   "behaviors": [
     {
       "behavior_id": "behavior.search.careful",
@@ -9,12 +9,23 @@
         {
           "phase_id": "survey",
           "title": "觀察搜索範圍",
-          "duration_ticks": 1
+          "duration_ticks": 1,
+          "when": []
         },
         {
           "phase_id": "inspect",
           "title": "仔細檢查線索",
-          "duration_ticks": 1
+          "duration_ticks": 1,
+          "when": [
+            {
+              "condition_id": "actor_alive",
+              "subject": "actor",
+              "namespace": "status",
+              "key": "alive",
+              "operator": "equals",
+              "value": true
+            }
+          ]
         }
       ],
       "completion_module": "exploration.core",

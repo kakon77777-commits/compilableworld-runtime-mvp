@@ -100,7 +100,7 @@ Checked-in schemas:
 6. `entities.v0.1.csv.schema.json`
 7. `items.v0.1.csv.schema.json`
 8. `state-machines.v0.1.schema.json`
-9. `action-behaviors.v0.2.schema.json`（Compiler 仍接受保留的 v0.1 單階段來源）
+9. `action-behaviors.v0.3.schema.json`（Compiler 仍接受保留的 v0.1 單階段與 v0.2 sequential 來源）
 10. `studio-world-ir.v0.1.schema.json`
 11. `studio-mapping.v0.1.schema.json`
 

@@ -211,6 +211,7 @@ def _action_behavior_overview(behavior: Any, index: int) -> dict[str, Any]:
                 "phase_id": phase.get("phase_id"),
                 "title": phase.get("title", ""),
                 "duration_ticks": phase.get("duration_ticks"),
+                "when": [dict(condition) for condition in phase.get("when", []) if isinstance(condition, dict)],
             }
             for phase in behavior.get("phases", []) if isinstance(phase, dict)
         ],

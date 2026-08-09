@@ -3,6 +3,7 @@ from __future__ import annotations
 import fnmatch
 import heapq
 import json
+import math
 import os
 from copy import deepcopy
 from collections import Counter, defaultdict
@@ -10,7 +11,12 @@ from dataclasses import asdict
 from pathlib import Path
 from typing import Any, Callable, Iterable, Protocol
 
-from .action_behavior import ACTION_BEHAVIOR_INTERRUPT_EVENTS
+from .action_behavior import (
+    ACTION_BEHAVIOR_CONDITION_NAMESPACES,
+    ACTION_BEHAVIOR_CONDITION_OPERATORS,
+    ACTION_BEHAVIOR_CONDITION_SUBJECTS,
+    ACTION_BEHAVIOR_INTERRUPT_EVENTS,
+)
 from .models import (
     ActionIR, ActionReceipt, ActionStatus, Entity, EventIR, ModuleContract,
     StateCell, StateDelta, TransitionResult, new_id,
@@ -678,7 +684,20 @@ class WorldRuntime:
             )
             started_tick = due_tick - duration
             progress = min(duration, max(0, self.scheduler.tick - started_tick))
-            phases = list(behavior.get("phases", [])) if behavior else []
+            authored_phases = list(behavior.get("phases", [])) if behavior else []
+            phases = [
+                {
+                    "phase_id": phase["phase_id"],
+                    "title": phase["title"],
+                    "duration_ticks": phase["duration_ticks"],
+                    "condition_ids": [
+                        condition["condition_id"]
+                        for condition in phase.get("when", [])
+                        if isinstance(condition, dict) and isinstance(condition.get("condition_id"), str)
+                    ],
+                }
+                for phase in authored_phases if isinstance(phase, dict)
+            ]
             completed_phases = 0
             elapsed_boundary = 0
             for phase in phases:
@@ -777,22 +796,45 @@ class WorldRuntime:
         receipts: list[ActionReceipt] = []
         for _ in range(max(0, ticks)):
             next_tick = self.scheduler.tick + 1
-            progress_events = self._action_progress_events(next_tick)
+            decisions = self._action_checkpoint_decisions(next_tick)
+            removed_failures: list[tuple[tuple[int, int, ActionIR], ActionStatus]] = []
             self.scheduler.tick = next_tick
+            for _, failed_entry, _ in decisions:
+                if failed_entry is None:
+                    continue
+                action = failed_entry[2]
+                removed = self.scheduler.remove(action.action_id)
+                if removed is None:
+                    raise RuntimeErrorBase(f"條件失敗 action 已不在排程中: {action.action_id}")
+                removed_failures.append((removed, action.status))
+                action.status = ActionStatus.FAILED
             try:
-                self.event_log.append_batch(progress_events)
+                self.event_log.append_batch(event for event, _, _ in decisions)
             except KernelTransactionError:
                 self.scheduler.tick -= 1
+                for entry, previous_status in removed_failures:
+                    entry[2].status = previous_status
+                    self.scheduler.restore(entry)
                 raise
-            for event in progress_events:
+            for event, failed_entry, message in decisions:
+                if failed_entry is not None:
+                    action = failed_entry[2]
+                    self.metrics["actions_failed"] += 1
+                    receipts.append(ActionReceipt(
+                        action.action_id, action.status, message or "phase condition failed",
+                        [event.event_id],
+                    ))
                 self.events.publish(event)
                 self.metrics[f"event:{event.event_type}"] += 1
             receipts.extend(self._execute(action) for action in self.scheduler.pop_ready())
         return receipts
 
-    def _action_progress_events(self, tick: int) -> list[EventIR]:
-        events: list[EventIR] = []
-        for due_tick, _, action in self.scheduler.entries():
+    def _action_checkpoint_decisions(
+        self, tick: int,
+    ) -> list[tuple[EventIR, tuple[int, int, ActionIR] | None, str | None]]:
+        decisions: list[tuple[EventIR, tuple[int, int, ActionIR] | None, str | None]] = []
+        for entry in self.scheduler.entries():
+            due_tick, _, action = entry
             behavior = self._action_behavior(action.verb)
             phases = behavior.get("phases", []) if isinstance(behavior, dict) else []
             if not isinstance(phases, list) or len(phases) < 2:
@@ -806,7 +848,42 @@ class WorldRuntime:
                 if elapsed != cumulative:
                     continue
                 next_phase = phases[phase_index + 1]
-                events.append(EventIR(
+                failed_condition = next(
+                    (
+                        condition for condition in next_phase.get("when", [])
+                        if not self._action_condition_matches(action, condition)
+                    ),
+                    None,
+                )
+                if failed_condition is not None:
+                    condition_id = failed_condition.get("condition_id")
+                    if not isinstance(condition_id, str) or not condition_id:
+                        condition_id = "invalid_condition"
+                    message = (
+                        f"行為 {behavior['title']} 無法進入 phase {next_phase['title']}："
+                        f"條件 {condition_id} 未滿足"
+                    )
+                    decisions.append((EventIR(
+                        event_type="action.failed",
+                        source="kernel",
+                        target=action.actor_id,
+                        causation_id=action.action_id,
+                        correlation_id=action.correlation_id,
+                        timestamp_tick=tick,
+                        visibility="private",
+                        payload={
+                            "action_id": action.action_id,
+                            "behavior_id": behavior["behavior_id"],
+                            "actor": action.actor_id,
+                            "verb": action.verb,
+                            "duration_ticks": duration,
+                            "phase_id": next_phase["phase_id"],
+                            "condition_id": condition_id,
+                            "reason": message,
+                        },
+                    ), entry, message))
+                    continue
+                decisions.append((EventIR(
                     event_type="action.progressed",
                     source="kernel",
                     target=action.actor_id,
@@ -828,8 +905,68 @@ class WorldRuntime:
                         "progress_ticks": cumulative,
                         "duration_ticks": duration,
                     },
-                ))
-        return events
+                ), None, None))
+        return decisions
+
+    def _action_condition_matches(self, action: ActionIR, condition: Any) -> bool:
+        if not isinstance(condition, dict):
+            return False
+        condition_id = condition.get("condition_id")
+        subject = condition.get("subject")
+        namespace = condition.get("namespace")
+        key = condition.get("key")
+        operator = condition.get("operator")
+        if (
+            not isinstance(condition_id, str)
+            or not condition_id
+            or subject not in ACTION_BEHAVIOR_CONDITION_SUBJECTS
+            or namespace not in ACTION_BEHAVIOR_CONDITION_NAMESPACES
+            or not isinstance(key, str)
+            or operator not in ACTION_BEHAVIOR_CONDITION_OPERATORS
+        ):
+            return False
+        owner = action.actor_id if subject == "actor" else action.target_id
+        if not isinstance(owner, str) or not self.registry.contains(owner):
+            return False
+        missing = object()
+        actual = self.state.get(owner, namespace, key, missing)
+        if actual is missing or not self._finite_condition_scalar(actual):
+            return False
+        expected = condition.get("value")
+        if not self._finite_condition_scalar(expected):
+            return False
+        if operator in {"equals", "not_equals"}:
+            equal = self._strict_scalar_equal(actual, expected)
+            return equal if operator == "equals" else not equal
+        if (
+            isinstance(actual, bool)
+            or isinstance(expected, bool)
+            or not isinstance(actual, (int, float))
+            or not isinstance(expected, (int, float))
+        ):
+            return False
+        return {
+            "less_than": actual < expected,
+            "less_or_equal": actual <= expected,
+            "greater_than": actual > expected,
+            "greater_or_equal": actual >= expected,
+        }[operator]
+
+    @staticmethod
+    def _strict_scalar_equal(actual: Any, expected: Any) -> bool:
+        if isinstance(actual, bool) or isinstance(expected, bool):
+            return type(actual) is type(expected) and actual == expected
+        if isinstance(actual, (int, float)) and isinstance(expected, (int, float)):
+            return actual == expected
+        return type(actual) is type(expected) and actual == expected
+
+    @staticmethod
+    def _finite_condition_scalar(value: Any) -> bool:
+        return (
+            value is None
+            or isinstance(value, (str, bool, int))
+            or (isinstance(value, float) and math.isfinite(value))
+        )
 
     def save_snapshot(self, path: str | Path) -> None:
         payload = {

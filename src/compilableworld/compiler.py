@@ -11,15 +11,21 @@ from typing import Any
 
 from .action_behavior import (
     ACTION_BEHAVIOR_CONCURRENCY,
+    ACTION_BEHAVIOR_CONDITION_LIMIT,
+    ACTION_BEHAVIOR_CONDITION_NAMESPACES,
+    ACTION_BEHAVIOR_CONDITION_OPERATORS,
+    ACTION_BEHAVIOR_CONDITION_SUBJECTS,
     ACTION_BEHAVIOR_DEFINITION_LIMIT,
     ACTION_BEHAVIOR_DURATION_LIMIT,
     ACTION_BEHAVIOR_FORMAT,
     ACTION_BEHAVIOR_FORMAT_V1,
+    ACTION_BEHAVIOR_FORMAT_V2,
     ACTION_BEHAVIOR_INTERRUPT_EVENTS,
     ACTION_BEHAVIOR_INTERRUPT_LIMIT,
     ACTION_BEHAVIOR_PHASE_LIMIT,
     ACTION_BEHAVIOR_SCHEMA_ID,
     ACTION_BEHAVIOR_SCHEMA_ID_V1,
+    ACTION_BEHAVIOR_SCHEMA_ID_V2,
 )
 from .functions import FunctionDefinitionError, FunctionRegistry, validate_function_source
 from .player_generation import template_records
@@ -257,6 +263,7 @@ def compile_world(
         raise CompileError(f"manifest.source_schemas 含未知來源: {sorted(unknown_schema_keys)}")
     action_behavior_schema_id = {
         ACTION_BEHAVIOR_FORMAT_V1: ACTION_BEHAVIOR_SCHEMA_ID_V1,
+        ACTION_BEHAVIOR_FORMAT_V2: ACTION_BEHAVIOR_SCHEMA_ID_V2,
         ACTION_BEHAVIOR_FORMAT: ACTION_BEHAVIOR_SCHEMA_ID,
     }.get(action_behaviors_source.get("format") if isinstance(action_behaviors_source, dict) else None)
     for source_key, declared_schema_id in declared_source_schemas.items():
@@ -467,6 +474,14 @@ def _bool(value: str) -> bool:
     return str(value).strip().lower() in {"1", "true", "yes", "y"}
 
 
+def _finite_json_scalar(value: Any) -> bool:
+    return (
+        value is None
+        or isinstance(value, (str, bool, int))
+        or (isinstance(value, float) and math.isfinite(value))
+    )
+
+
 def _validate_action_behaviors(source: Any) -> list[dict[str, Any]]:
     if not isinstance(source, dict):
         raise CompileError("action_behaviors.json 必須是物件")
@@ -474,7 +489,9 @@ def _validate_action_behaviors(source: Any) -> list[dict[str, Any]]:
     if unknown_root:
         raise CompileError(f"action_behaviors.json 含未知欄位: {sorted(unknown_root)}")
     source_format = source.get("format")
-    if source_format not in {ACTION_BEHAVIOR_FORMAT_V1, ACTION_BEHAVIOR_FORMAT}:
+    if source_format not in {
+        ACTION_BEHAVIOR_FORMAT_V1, ACTION_BEHAVIOR_FORMAT_V2, ACTION_BEHAVIOR_FORMAT,
+    }:
         raise CompileError("action_behaviors.json format 不支援")
     behaviors = source.get("behaviors")
     if not isinstance(behaviors, list):
@@ -541,12 +558,15 @@ def _validate_action_behaviors(source: Any) -> list[dict[str, Any]]:
                     f"{label}.phases 必須包含 2 到 {ACTION_BEHAVIOR_PHASE_LIMIT} 個 phase"
                 )
             phase_ids: set[str] = set()
+            condition_ids: set[str] = set()
             duration = 0
             for phase_index, phase in enumerate(raw_phases):
                 phase_label = f"{label}.phases[{phase_index}]"
                 if not isinstance(phase, dict):
                     raise CompileError(f"{phase_label} 必須是物件")
                 phase_allowed = {"phase_id", "title", "duration_ticks"}
+                if source_format == ACTION_BEHAVIOR_FORMAT:
+                    phase_allowed.add("when")
                 phase_unknown = set(phase) - phase_allowed
                 phase_missing = phase_allowed - set(phase)
                 if phase_unknown:
@@ -576,11 +596,80 @@ def _validate_action_behaviors(source: Any) -> list[dict[str, Any]]:
                     raise CompileError(
                         f"{label}.phases 總 duration 不可超過 {ACTION_BEHAVIOR_DURATION_LIMIT}"
                     )
-                phases.append({
+                normalized_when: list[dict[str, Any]] = []
+                if source_format == ACTION_BEHAVIOR_FORMAT:
+                    raw_when = phase["when"]
+                    if (
+                        not isinstance(raw_when, list)
+                        or len(raw_when) > ACTION_BEHAVIOR_CONDITION_LIMIT
+                    ):
+                        raise CompileError(
+                            f"{phase_label}.when 必須是最多 {ACTION_BEHAVIOR_CONDITION_LIMIT} 個條件"
+                        )
+                    if phase_index == 0 and raw_when:
+                        raise CompileError(f"{phase_label}.when 第一個 phase 必須為空")
+                    for condition_index, condition in enumerate(raw_when):
+                        condition_label = f"{phase_label}.when[{condition_index}]"
+                        condition_allowed = {
+                            "condition_id", "subject", "namespace", "key", "operator", "value",
+                        }
+                        if not isinstance(condition, dict):
+                            raise CompileError(f"{condition_label} 必須是物件")
+                        condition_unknown = set(condition) - condition_allowed
+                        condition_missing = condition_allowed - set(condition)
+                        if condition_unknown:
+                            raise CompileError(
+                                f"{condition_label} 含未知欄位: {sorted(condition_unknown)}"
+                            )
+                        if condition_missing:
+                            raise CompileError(
+                                f"{condition_label} 缺少必填欄位: {sorted(condition_missing)}"
+                            )
+                        condition_id = condition["condition_id"]
+                        subject = condition["subject"]
+                        namespace = condition["namespace"]
+                        key = condition["key"]
+                        operator = condition["operator"]
+                        expected = condition["value"]
+                        if not isinstance(condition_id, str) or not ID_RE.match(condition_id):
+                            raise CompileError(f"{condition_label}.condition_id 不合法")
+                        if condition_id in condition_ids:
+                            raise CompileError(
+                                f"{label} 含重複 condition_id: {condition_id}"
+                            )
+                        condition_ids.add(condition_id)
+                        if subject not in ACTION_BEHAVIOR_CONDITION_SUBJECTS:
+                            raise CompileError(f"{condition_label}.subject 不支援")
+                        if namespace not in ACTION_BEHAVIOR_CONDITION_NAMESPACES:
+                            raise CompileError(f"{condition_label}.namespace 不支援")
+                        if not isinstance(key, str) or not ID_RE.match(key):
+                            raise CompileError(f"{condition_label}.key 不合法")
+                        if operator not in ACTION_BEHAVIOR_CONDITION_OPERATORS:
+                            raise CompileError(f"{condition_label}.operator 不支援")
+                        if not _finite_json_scalar(expected):
+                            raise CompileError(f"{condition_label}.value 必須是 finite JSON scalar")
+                        if operator in {
+                            "less_than", "less_or_equal", "greater_than", "greater_or_equal",
+                        } and (
+                            isinstance(expected, bool) or not isinstance(expected, (int, float))
+                        ):
+                            raise CompileError(f"{condition_label}.value 數值比較必須使用 number")
+                        normalized_when.append({
+                            "condition_id": condition_id,
+                            "subject": subject,
+                            "namespace": namespace,
+                            "key": key,
+                            "operator": operator,
+                            "value": expected,
+                        })
+                phase_record = {
                     "phase_id": phase_id,
                     "title": phase_title.strip(),
                     "duration_ticks": phase_duration,
-                })
+                }
+                if source_format == ACTION_BEHAVIOR_FORMAT:
+                    phase_record["when"] = normalized_when
+                phases.append(phase_record)
         if behavior["concurrency"] != ACTION_BEHAVIOR_CONCURRENCY:
             raise CompileError(f"{label}.concurrency 目前只支援 {ACTION_BEHAVIOR_CONCURRENCY}")
         interrupt_on = behavior["interrupt_on"]
