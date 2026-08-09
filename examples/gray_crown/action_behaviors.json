@@ -1,5 +1,5 @@
 {
-  "format": "compilableworld.action-behaviors/v0.3",
+  "format": "compilableworld.action-behaviors/v0.4",
   "behaviors": [
     {
       "behavior_id": "behavior.search.careful",
@@ -10,7 +10,8 @@
           "phase_id": "survey",
           "title": "觀察搜索範圍",
           "duration_ticks": 1,
-          "when": []
+          "when": [],
+          "retry": null
         },
         {
           "phase_id": "inspect",
@@ -25,7 +26,12 @@
               "operator": "equals",
               "value": true
             }
-          ]
+          ],
+          "retry": {
+            "max_attempts": 2,
+            "interval_ticks": 1,
+            "timeout_ticks": 2
+          }
         }
       ],
       "completion_module": "exploration.core",

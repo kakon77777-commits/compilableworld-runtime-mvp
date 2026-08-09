@@ -92,6 +92,7 @@ class TerminalGateway:
         self.runtime.events.subscribe("quest.completed", self._on_quest_completed)
         self.runtime.events.subscribe("quest.failed", self._on_quest_failed)
         self.runtime.events.subscribe("action.progressed", self._on_action_progressed)
+        self.runtime.events.subscribe("action.retry_scheduled", self._on_action_retry_scheduled)
 
     def _on_action_progressed(self, event) -> None:
         if event.target != self.actor_id:
@@ -99,6 +100,15 @@ class TerminalGateway:
         print(
             f">> 行為進度：{event.payload['phase_title']} "
             f"[{event.payload['completed_phases']}/{event.payload['total_phases']}]"
+        )
+
+    def _on_action_retry_scheduled(self, event) -> None:
+        if event.target != self.actor_id:
+            return
+        print(
+            f">> 行為等待條件：{event.payload['phase_id']}，"
+            f"retry {event.payload['attempt']}/{event.payload['max_attempts']} "
+            f"at tick {event.payload['retry_at_tick']}"
         )
 
     def _on_quest_transitioned(self, event) -> None:

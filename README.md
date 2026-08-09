@@ -100,7 +100,7 @@ Function Registry 同時提供有上限的 LRU memoization（預設 2048 筆）�
 
 ### Authoring Schema 契約
 
-目前十一個核心交換邊界已有版本化 Schema，放在 [`schemas/`](schemas/)；Action behavior 同時保留 v0.1、v0.2 與 v0.3，因此實際共有十三份檔案：
+目前十一個核心交換邊界已有版本化 Schema，放在 [`schemas/`](schemas/)；Action behavior 同時保留 v0.1、v0.2、v0.3 與 v0.4，因此實際共有十四份檔案：
 
 - `functions.v0.1.schema.json`：FunctionIR 純公式來源。
 - `scenarios.v0.1.schema.json`：ScenarioIR 的 Given／When／Then 來源。
@@ -108,7 +108,7 @@ Function Registry 同時提供有上限的 LRU memoization（預設 2048 筆）�
 - `rooms.v0.1.csv.schema.json`、`exits.v0.1.csv.schema.json`：地圖房間與出口表格。
 - `entities.v0.1.csv.schema.json`、`items.v0.1.csv.schema.json`：實體與物品表格。
 - `state-machines.v0.1.schema.json`：World／Region／Scene／Entity／System owner scope 的可執行 StateIR。
-- `action-behaviors.v0.3.schema.json`：有界 sequential phases、phase-entry conditions、完成模組、並行限制與中斷事件；v0.1 單階段與 v0.2 sequential 來源仍可編譯。
+- `action-behaviors.v0.4.schema.json`：有界 sequential phases、phase-entry conditions、fixed-interval retry/deadline、完成模組、並行限制與中斷事件；v0.1 單階段、v0.2 sequential 與 v0.3 condition-gated 來源仍可編譯。
 - `studio-world-ir.v0.1.schema.json`：EveGlyph YAML 到共用 Studio World IR 的 migration，含 bounded event_match 與 requirements。
 - `studio-mapping.v0.1.schema.json`：人工確認 World IR 到 Runtime 房間、表格、EventIR、priority、reward、requirements 與 guard 的映射。
 
@@ -230,13 +230,13 @@ owner scope 在 v0.1 表示狀態所有權與可見性，不會自動把事件�
 
 ### Action-scope 複合行為
 
-`action_behaviors.json` 可將一個玩家 verb 綁定到 2–64 個固定順序 phase，每個 phase 有獨立名稱與 1–1,000,000 tick duration，總長仍不得超過 1,000,000 tick。v0.3 的非首 phase 可再宣告最多 16 個 AND gate，只能以 `equals`／`not_equals` 或有型別檢查的數值比較讀取 actor／target 的白名單 State Cell；缺值、未知 owner、錯誤型別或非有限數字一律 fail closed。Kernel 在條件通過的非最終 phase 邊界產生 `action.progressed`，不通過則產生可追溯的 `action.failed`；最後效果仍由唯一 completion module 透過 StateDelta／EventIR 原子提交。
+`action_behaviors.json` 可將一個玩家 verb 綁定到 2–64 個固定順序 phase，每個 phase 有獨立名稱與 1–1,000,000 tick duration，原始總長仍不得超過 1,000,000 tick。v0.4 的非首 phase 可宣告最多 16 個 AND gate，以及可選的 1–16 次 fixed-interval retry 與 authored deadline；只能以 `equals`／`not_equals` 或有型別檢查的數值比較讀取 actor／target 白名單 State Cell。缺值、未知 owner、錯誤型別或非有限數字一律 fail closed。Kernel 在條件通過時產生 `action.progressed`；不通過且仍在 policy 內時延後 due tick 並產生 `action.retry_scheduled`，次數或 deadline 耗盡才產生 `action.failed(failure_code=retry_exhausted)`。最後效果仍由唯一 completion module 透過 StateDelta／EventIR 原子提交。
 
-Gray Crown 的 `search` 是第一個完整切片：第一 tick 只有在 `actor_alive` condition 成立時，才會由「觀察搜索範圍」進入「仔細檢查線索」並發出 checkpoint；第二 tick 才由 `exploration.core` 提交搜索計數與 `exploration.searched`。終端會顯示 phase 進度，也可用 `pending` 檢視或取消；player projection 只顯示 condition ID，不公開 namespace、operator 或比較值。Snapshot 保存精確 tick／phase，EventLog Replay 可由 private lifecycle 重建尚未結束的 queue。完整規格見 `docs/ACTION_SCOPE_BEHAVIOR_EXECUTION_CONTRACT_zh-TW.md`。
+Gray Crown 的 `search` 是第一個完整切片：`actor_alive` 成立時由「觀察搜索範圍」進入「仔細檢查線索」；不成立時最多以一 tick 間隔 retry 兩次，第一次失敗後兩 tick 到期。條件恢復後才繼續，否則 terminal fail。終端會顯示 phase 與 retry 進度，也可用 `pending` 檢視或取消；player projection 只顯示 condition ID 與安全的 retry attempt/deadline，不公開 namespace、operator 或比較值。Snapshot v0.3 與 EventLog Replay 都可重建 due tick 與 retry state。完整規格見 `docs/ACTION_SCOPE_BEHAVIOR_EXECUTION_CONTRACT_zh-TW.md`。
 
 ### Snapshot 與排程恢復
 
-`save_snapshot` 使用 `compilableworld.snapshot/v0.2`，除了 Runtime State、動態玩家與生成 profile，也保存目前 tick 和尚未執行的排程 Action。載入時會驗證 Snapshot 格式、版本、世界 ID 與世界版本；舊的 `v0.1` Snapshot 仍會以空排程佇列自動遷移，因此不會把不存在的排程行為假裝恢復。
+`save_snapshot` 使用 `compilableworld.snapshot/v0.3`，除了 Runtime State、動態玩家、生成 profile、目前 tick 與排程 Action，也保存 pending Action 的 retry attempt、first failure、next retry 與 deadline。載入時會驗證 Snapshot 格式、版本、世界 ID、世界版本及 retry state；舊 `v0.1` 以空排程遷移，`v0.2` 的 pending Action 則以空 retry state 遷移。
 
 ### AMK v0.1（可選的受治理記憶核心）
 
@@ -263,10 +263,10 @@ PYTHONPATH=src python3 -m compilableworld play build/gray_crown/world.package.js
 - Scheduler 已支援版本化 Action-scope 行為、生命週期、取消、中斷、pending 投影、Snapshot 與 Replay；Studio 目前只有唯讀 overview，尚未提供視覺化 authoring/write-back 表單。
 - 房間有可選的 `narrative.json` 條件式文字投影；NPC 有可選的 `dialogues.json` 單回合、狀態感知對話，兩者都由 CLI 與 Web 共用。已能由對話事件接取任務，但尚未實作多輪對話 session、玩家可見的選項卡、語義理解與 AI 生成敘事。`visible_entities` 仍會標示實體是否存活（終端機顯示「（已死亡）」，網頁介面同步）。
 - Quest 模組保留原有的兩種事件驅動 requirement（`deliver:<item>:<target>`、`reach:<room>`）與貨幣報酬，並新增顯式的多階段／分支／失敗 transition。未知 requirement、未知事件欄位、終態再轉移與同優先權分支衝突都會在編譯期 fail closed。尚未支援：複合布林條件、時間／排程觸發、回復／撤銷轉移、道具型報酬與執行期生成新實體。
-- World／Region／Scene／Entity／System 的 scoped StateIR 已可透過 EventIR 跨層轉移；Action-scope 也已有可中斷／取消的 bounded v0.3 sequential phase checkpoints 與 phase-entry AND gates。兩者都尚未支援地理感知的自動事件路由、自由 guard、if/else branching、retry／timeout、resume／補償交易，或會逐步執行任意子 Action 的 parallel／sequence graph。
+- World／Region／Scene／Entity／System 的 scoped StateIR 已可透過 EventIR 跨層轉移；Action-scope 也已有可中斷／取消的 bounded v0.4 sequential phase checkpoints、phase-entry AND gates 與 fixed-interval retry/deadline。兩者都尚未支援地理感知的自動事件路由、自由 guard、if/else branching、resume／補償交易、自由 backoff/jitter，或會逐步執行任意子 Action 的 parallel／sequence graph。
 - Intent Parser 是確定性參考實作；AI Adapter 必須輸出同一 `ActionIR` 並接受 Kernel 驗證。
 - Module Contract 的寫入範圍已由 Kernel 強制檢查；讀取範圍與 Action authority 的強制隔離留待 v0.2。
-- 核心 JSON／CSV Schema 已外部化為 `schemas/` 下的十一個交換邊界（十三份檔案，含 Action behavior v0.1／v0.2 相容契約）；CSV header、scoped StateIR、Action-scope behavior、EveGlyph World IR migration 與人工 mapping validation 已接入，跨檔案引用與其他語意規則仍由 Compiler 驗證。
+- 核心 JSON／CSV Schema 已外部化為 `schemas/` 下的十一個交換邊界（十四份檔案，含 Action behavior v0.1／v0.2／v0.3 相容契約）；CSV header、scoped StateIR、Action-scope behavior、EveGlyph World IR migration 與人工 mapping validation 已接入，跨檔案引用與其他語意規則仍由 Compiler 驗證。
 - Replay 重放已提交 Delta；跨版本重放仍需 migration registry。
 - 戰鬥有兩條判定路徑，同一場戰鬥不會混用：(1) **簡易路徑**——命中率 85%、傷害區間 3-7、`combatant` component 存活反擊機率 75%（區間 1-3），取材自對真實 LPC MUD（mhsj）戰鬥系統的研究，見 `docs/whitepapers/`；(2) **公式路徑**——當雙方都在 `entities.csv` 填了完整五維屬性（`str/con/mag/agi/dex` + 選填 `phase_tier`）時自動啟用，直接還原 `worlds/mingyun_zhiyu/data/drafts/combat_resolution_system.json`（Neo 已審閱核准）的比率制命中/傷害/突破門檻公式**與交鋒（Exchange）先攻回合制**——一次 `attack` 指令＝一次交鋒，`IV=AGI+0.5×DEX` 決定雙方各自的行動次數（`clamp(round(IV_己方/IV_對方),1,4)`），較快一方的行動全部先解算完才輪到較慢一方（來源文件是敘事上的交錯描寫，這裡簡化成「先攻方全部行動完再輪下一方」，非逐拍交錯，有明確記錄不是隱藏簡化）。見 `src/compilableworld/combat_formulas.py`，`tests/test_combat_formulas.py` 用該文件自己的 worked example（露芙緹雅 vs 格洛森、IV比值3.2→3次行動）逐位數比對回歸測試。`examples/mingyun_zhiyu_peace_city` 的 `player.newcomer`（地板值屬性，tier0）與 `npc.woerkan`（真實 canon 數值，tier1）雙方都已授權屬性，實際觸發公式路徑；`creature.sewer_rat`／`npc.guard` 等舊有戰鬥實體刻意留在簡易路徑——公式常數（HP=CON×8、傷害×0.1縮放）是為數百點屬性的正式 canon 角色校準的，硬套在地板值內容上會異常緩慢/肉質過厚（實際算過，不是猜測）。五維屬性欄位為全有全無（部分填寫會編譯失敗），且與舊版 `health` 欄位互斥（HP 改由 CON 推導）。
 - 規則魔法施法系統（同一份 `combat_resolution_system.json` 的 `rule_magic_casting_system`）已實作 MP/FP 資源池（由 MAG/DEX 在編譯期自動推導，五維屬性齊全的實體都會有）與 `cast <法術名>` 指令，目前接了兩個法術：`護盾術`（5 符號，MP40/FP25，temp_HP=施法者MAG×2，優先於真實生命值承受傷害，且與其他狀態一樣持續 3 次交鋒——耗盡或到期兩者先到者為準）、`疾風步`（3 符號，MP24/FP15，IV×1.5 持續 3 次交鋒；symbol_count=3 是本專案自己從 `combo_home` 標籤數推斷的，來源文件沒有給這個法術的具體數字，跟 `護盾術` 是文件自己給的範例不同）。異常狀態現在是一個真正通用、會隨交鋒衰減的機制（`combat.status_effects`，見 `combat_formulas.py` 的 `refresh_status`／`decay_status_effects`），不是只為了護盾寫死的一次性欄位——`疾風步` 直接證明這點：它改的是先攻回合制的行動次數，不是傷害或血量。**刻意未實作**：多交鋒引導詠唱（`cast_time_exchanges>1` 的高階法術，需要在交鋒之間插入「引導中斷判定」，目前交鋒已實作但引導/中斷邏輯還沒有——本輪也刻意簡化成「施法本身不消耗交鋒」，跟來源文件嚴格定義有落差，已記錄）；完整的異常狀態框架其餘 9 種（麻痺/破綻/凍傷/束縛/靜默等，目前只做了 shield_buff／haste_疾風 兩種，通用的衰減/刷新機制已就位，加新狀態的邊際成本應該不高）；近戰以外招式（`ranged_precision_physical`／`mental_spiritual` 這兩種攻擊類型公式已在來源文件定義好，尚未接線）。這些是該檔案裡份量最大的剩餘部分，留待未來階段。

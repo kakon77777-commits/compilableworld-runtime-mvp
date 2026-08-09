@@ -212,6 +212,8 @@ def _action_behavior_overview(behavior: Any, index: int) -> dict[str, Any]:
                 "title": phase.get("title", ""),
                 "duration_ticks": phase.get("duration_ticks"),
                 "when": [dict(condition) for condition in phase.get("when", []) if isinstance(condition, dict)],
+                "retry": dict(phase["retry"])
+                if isinstance(phase.get("retry"), dict) else None,
             }
             for phase in behavior.get("phases", []) if isinstance(phase, dict)
         ],
@@ -294,7 +296,8 @@ def package_overview(package: dict[str, Any]) -> dict[str, Any]:
     if action_behaviors:
         event_types.update({
             "action.scheduled", "action.started", "action.completed",
-            "action.progressed", "action.cancelled", "action.interrupted", "action.failed",
+            "action.progressed", "action.retry_scheduled", "action.cancelled",
+            "action.interrupted", "action.failed",
         })
         event_types.update(
             event_type
@@ -320,7 +323,7 @@ def package_overview(package: dict[str, Any]) -> dict[str, Any]:
             },
             "sms": {
                 "runtime_package_format": package.get("format"),
-                "snapshot_format": "compilableworld.snapshot/v0.2",
+                "snapshot_format": "compilableworld.snapshot/v0.3",
             },
             "tms": {"declared_modules": sorted(modules)},
             "dms": {"static_issue_count": len(issues)},

@@ -20,12 +20,15 @@ from .action_behavior import (
     ACTION_BEHAVIOR_FORMAT,
     ACTION_BEHAVIOR_FORMAT_V1,
     ACTION_BEHAVIOR_FORMAT_V2,
+    ACTION_BEHAVIOR_FORMAT_V3,
     ACTION_BEHAVIOR_INTERRUPT_EVENTS,
     ACTION_BEHAVIOR_INTERRUPT_LIMIT,
     ACTION_BEHAVIOR_PHASE_LIMIT,
+    ACTION_BEHAVIOR_RETRY_ATTEMPT_LIMIT,
     ACTION_BEHAVIOR_SCHEMA_ID,
     ACTION_BEHAVIOR_SCHEMA_ID_V1,
     ACTION_BEHAVIOR_SCHEMA_ID_V2,
+    ACTION_BEHAVIOR_SCHEMA_ID_V3,
 )
 from .functions import FunctionDefinitionError, FunctionRegistry, validate_function_source
 from .player_generation import template_records
@@ -264,6 +267,7 @@ def compile_world(
     action_behavior_schema_id = {
         ACTION_BEHAVIOR_FORMAT_V1: ACTION_BEHAVIOR_SCHEMA_ID_V1,
         ACTION_BEHAVIOR_FORMAT_V2: ACTION_BEHAVIOR_SCHEMA_ID_V2,
+        ACTION_BEHAVIOR_FORMAT_V3: ACTION_BEHAVIOR_SCHEMA_ID_V3,
         ACTION_BEHAVIOR_FORMAT: ACTION_BEHAVIOR_SCHEMA_ID,
     }.get(action_behaviors_source.get("format") if isinstance(action_behaviors_source, dict) else None)
     for source_key, declared_schema_id in declared_source_schemas.items():
@@ -490,7 +494,8 @@ def _validate_action_behaviors(source: Any) -> list[dict[str, Any]]:
         raise CompileError(f"action_behaviors.json 含未知欄位: {sorted(unknown_root)}")
     source_format = source.get("format")
     if source_format not in {
-        ACTION_BEHAVIOR_FORMAT_V1, ACTION_BEHAVIOR_FORMAT_V2, ACTION_BEHAVIOR_FORMAT,
+        ACTION_BEHAVIOR_FORMAT_V1, ACTION_BEHAVIOR_FORMAT_V2,
+        ACTION_BEHAVIOR_FORMAT_V3, ACTION_BEHAVIOR_FORMAT,
     }:
         raise CompileError("action_behaviors.json format 不支援")
     behaviors = source.get("behaviors")
@@ -565,8 +570,10 @@ def _validate_action_behaviors(source: Any) -> list[dict[str, Any]]:
                 if not isinstance(phase, dict):
                     raise CompileError(f"{phase_label} 必須是物件")
                 phase_allowed = {"phase_id", "title", "duration_ticks"}
-                if source_format == ACTION_BEHAVIOR_FORMAT:
+                if source_format in {ACTION_BEHAVIOR_FORMAT_V3, ACTION_BEHAVIOR_FORMAT}:
                     phase_allowed.add("when")
+                if source_format == ACTION_BEHAVIOR_FORMAT:
+                    phase_allowed.add("retry")
                 phase_unknown = set(phase) - phase_allowed
                 phase_missing = phase_allowed - set(phase)
                 if phase_unknown:
@@ -597,7 +604,7 @@ def _validate_action_behaviors(source: Any) -> list[dict[str, Any]]:
                         f"{label}.phases 總 duration 不可超過 {ACTION_BEHAVIOR_DURATION_LIMIT}"
                     )
                 normalized_when: list[dict[str, Any]] = []
-                if source_format == ACTION_BEHAVIOR_FORMAT:
+                if source_format in {ACTION_BEHAVIOR_FORMAT_V3, ACTION_BEHAVIOR_FORMAT}:
                     raw_when = phase["when"]
                     if (
                         not isinstance(raw_when, list)
@@ -667,8 +674,60 @@ def _validate_action_behaviors(source: Any) -> list[dict[str, Any]]:
                     "title": phase_title.strip(),
                     "duration_ticks": phase_duration,
                 }
-                if source_format == ACTION_BEHAVIOR_FORMAT:
+                if source_format in {ACTION_BEHAVIOR_FORMAT_V3, ACTION_BEHAVIOR_FORMAT}:
                     phase_record["when"] = normalized_when
+                if source_format == ACTION_BEHAVIOR_FORMAT:
+                    retry = phase["retry"]
+                    if phase_index == 0 and retry is not None:
+                        raise CompileError(f"{phase_label}.retry is forbidden on the first phase")
+                    if not normalized_when and retry is not None:
+                        raise CompileError(f"{phase_label}.retry requires at least one when condition")
+                    if retry is not None:
+                        retry_allowed = {"max_attempts", "interval_ticks", "timeout_ticks"}
+                        if not isinstance(retry, dict):
+                            raise CompileError(f"{phase_label}.retry must be an object or null")
+                        retry_unknown = set(retry) - retry_allowed
+                        retry_missing = retry_allowed - set(retry)
+                        if retry_unknown:
+                            raise CompileError(
+                                f"{phase_label}.retry contains unknown fields: {sorted(retry_unknown)}"
+                            )
+                        if retry_missing:
+                            raise CompileError(
+                                f"{phase_label}.retry is missing fields: {sorted(retry_missing)}"
+                            )
+                        max_attempts = retry["max_attempts"]
+                        interval_ticks = retry["interval_ticks"]
+                        timeout_ticks = retry["timeout_ticks"]
+                        if (
+                            isinstance(max_attempts, bool)
+                            or not isinstance(max_attempts, int)
+                            or not 1 <= max_attempts <= ACTION_BEHAVIOR_RETRY_ATTEMPT_LIMIT
+                        ):
+                            raise CompileError(
+                                f"{phase_label}.retry.max_attempts must be between 1 and "
+                                f"{ACTION_BEHAVIOR_RETRY_ATTEMPT_LIMIT}"
+                            )
+                        for retry_key, retry_value in {
+                            "interval_ticks": interval_ticks,
+                            "timeout_ticks": timeout_ticks,
+                        }.items():
+                            if (
+                                isinstance(retry_value, bool)
+                                or not isinstance(retry_value, int)
+                                or not 1 <= retry_value <= ACTION_BEHAVIOR_DURATION_LIMIT
+                            ):
+                                raise CompileError(
+                                    f"{phase_label}.retry.{retry_key} must be between 1 and "
+                                    f"{ACTION_BEHAVIOR_DURATION_LIMIT}"
+                                )
+                        phase_record["retry"] = {
+                            "max_attempts": max_attempts,
+                            "interval_ticks": interval_ticks,
+                            "timeout_ticks": timeout_ticks,
+                        }
+                    else:
+                        phase_record["retry"] = None
                 phases.append(phase_record)
         if behavior["concurrency"] != ACTION_BEHAVIOR_CONCURRENCY:
             raise CompileError(f"{label}.concurrency 目前只支援 {ACTION_BEHAVIOR_CONCURRENCY}")

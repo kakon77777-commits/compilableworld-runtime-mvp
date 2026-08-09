@@ -43,6 +43,7 @@
                     "action.scheduled",
                     "action.started",
                     "action.progressed",
+                    "action.retry_scheduled",
                     "action.completed",
                     "action.cancelled",
                     "action.interrupted",

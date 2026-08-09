@@ -4,7 +4,7 @@
 - **Baseline source:** uploaded integrated local snapshot
 - **Runtime package version:** `0.1.1`
 - **Audit date:** 2026-08-09
-- **Verification:** `PYTHONPATH=src python -m unittest discover -s tests` — **290/290 passed**
+- **Verification:** `PYTHONPATH=src python -m unittest discover -s tests` — **297/297 passed**
 - **Purpose:** authoritative inventory for PIW-MCP integration planning
 
 > Status meanings: **Implemented** = code and tests exist; **Partial** = usable core exists but stated boundary remains; **Planned** = no production implementation found in this baseline.
@@ -52,7 +52,7 @@
 | Quests: event transitions | Implemented | action failure, movement, inventory, door, dialogue, combat, magic and terminal quest chaining share one bounded trigger contract |
 | Quests: branch/failure/priority | Implemented | deterministic priority, actor causation, event matching, requirements, graph reachability, terminal-state rejection, ambiguous dispatch rejection and exactly-once terminal reward; see `docs/WORLD_STATE_MACHINE_EXECUTION_CONTRACT_zh-TW.md` |
 | Scoped StateIR: World/Region/Scene/Entity/System | Implemented | versioned authoring schema, owner validation, isolated `fsm.*` cells, deterministic EventIR transitions, visibility projection, terminal chaining, Snapshot and Replay; owner scope is not implicit geographic event routing; see `docs/SCOPED_STATE_IR_EXECUTION_CONTRACT_zh-TW.md` |
-| Action-scope state machines | Implemented | v0.3 bounded sequential phases plus fail-closed actor/target State Cell AND gates, exact-tick `action.progressed`/conditional `action.failed`, v0.1/v0.2 compatibility, lifecycle, cancellation, interruption, Snapshot and pending Replay; child Action Graph, branching, retry, timeout, resume, compensation, parallel steps and arbitrary guards remain pending; see `docs/ACTION_SCOPE_BEHAVIOR_EXECUTION_CONTRACT_zh-TW.md` |
+| Action-scope state machines | Implemented | v0.4 bounded sequential phases, fail-closed actor/target State Cell AND gates, fixed-interval retry/deadline, exact-tick `action.progressed`/`action.retry_scheduled`/conditional `action.failed`, v0.1/v0.2/v0.3 compatibility, lifecycle, cancellation, interruption, Snapshot v0.3 and pending Replay; child Action Graph, branching, resume, compensation, parallel steps, free backoff/jitter and arbitrary guards remain pending; see `docs/ACTION_SCOPE_BEHAVIOR_EXECUTION_CONTRACT_zh-TW.md` |
 | Runtime-generated items/entities | Partial | generated player exists; generic runtime entity spawning remains bounded |
 
 ## 3. Narrative, dialogue and player entry

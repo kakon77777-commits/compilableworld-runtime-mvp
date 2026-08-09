@@ -100,11 +100,11 @@ Studio 投影仍是唯讀；正式修改必須回到 authoring source、Compiler
 
 ## 7. v0.1 明確不包含
 
-- 本 StateIR 契約內的 Action-scope 狀態；可中斷／取消、sequential checkpoint 與 bounded phase gates 已由獨立 `action-behaviors/v0.3` 契約提供，但 child Action Graph、branching、resume／補償／平行子步驟仍未包含；
+- 本 StateIR 契約內的 Action-scope 狀態；可中斷／取消、sequential checkpoint、bounded phase gates 與 fixed-interval retry/deadline 已由獨立 `action-behaviors/v0.4` 契約提供，但 child Action Graph、branching、resume／補償／平行子步驟仍未包含；
 - 階層父子狀態、parallel region 與 history state；
 - 自由形式 guard、腳本、任意 effect/reward；
 - Runtime 對 Studio bounded random metadata 的自行抽樣；
 - 隱式地理事件路由；
 - AI 自動採納草稿或直接改寫 Runtime State。
 
-驗證基線由 `tests/test_scoped_state_machine.py` 覆蓋五種 owner、跨層 chaining、terminal FSM 到 Quest、Snapshot、Replay、Studio projection、legacy seed 相容與 reaction rollback；完整測試為 290/290。
+驗證基線由 `tests/test_scoped_state_machine.py` 覆蓋五種 owner、跨層 chaining、terminal FSM 到 Quest、Snapshot、Replay、Studio projection、legacy seed 相容與 reaction rollback；完整測試為 297/297。

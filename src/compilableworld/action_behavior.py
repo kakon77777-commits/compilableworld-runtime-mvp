@@ -1,9 +1,9 @@
 """Shared bounded contract for authored Action-scope behavior lifecycles.
 
 The Compiler, Kernel, and Studio use this module instead of inventing their
-own duration, phase-gate, or interruption rules. Older source versions remain
-compiler inputs; the current contract adds bounded AND conditions at phase
-boundaries without introducing an expression evaluator.
+own duration, phase-gate, retry, or interruption rules. Older source versions
+remain compiler inputs; the current contract adds bounded fixed-interval retry
+and timeout policy without introducing an expression evaluator or backoff DSL.
 """
 
 from __future__ import annotations
@@ -11,14 +11,17 @@ from __future__ import annotations
 
 ACTION_BEHAVIOR_FORMAT_V1 = "compilableworld.action-behaviors/v0.1"
 ACTION_BEHAVIOR_FORMAT_V2 = "compilableworld.action-behaviors/v0.2"
-ACTION_BEHAVIOR_FORMAT = "compilableworld.action-behaviors/v0.3"
+ACTION_BEHAVIOR_FORMAT_V3 = "compilableworld.action-behaviors/v0.3"
+ACTION_BEHAVIOR_FORMAT = "compilableworld.action-behaviors/v0.4"
 ACTION_BEHAVIOR_SCHEMA_ID_V1 = "compilableworld.schema/action-behaviors/v0.1"
 ACTION_BEHAVIOR_SCHEMA_ID_V2 = "compilableworld.schema/action-behaviors/v0.2"
-ACTION_BEHAVIOR_SCHEMA_ID = "compilableworld.schema/action-behaviors/v0.3"
+ACTION_BEHAVIOR_SCHEMA_ID_V3 = "compilableworld.schema/action-behaviors/v0.3"
+ACTION_BEHAVIOR_SCHEMA_ID = "compilableworld.schema/action-behaviors/v0.4"
 ACTION_BEHAVIOR_DEFINITION_LIMIT = 1024
 ACTION_BEHAVIOR_DURATION_LIMIT = 1_000_000
 ACTION_BEHAVIOR_PHASE_LIMIT = 64
 ACTION_BEHAVIOR_CONDITION_LIMIT = 16
+ACTION_BEHAVIOR_RETRY_ATTEMPT_LIMIT = 16
 ACTION_BEHAVIOR_INTERRUPT_LIMIT = 16
 ACTION_BEHAVIOR_INTERRUPT_EVENTS = {
     "combat.actor_defeated",
@@ -47,10 +50,13 @@ __all__ = [
     "ACTION_BEHAVIOR_FORMAT",
     "ACTION_BEHAVIOR_FORMAT_V1",
     "ACTION_BEHAVIOR_FORMAT_V2",
+    "ACTION_BEHAVIOR_FORMAT_V3",
     "ACTION_BEHAVIOR_INTERRUPT_EVENTS",
     "ACTION_BEHAVIOR_INTERRUPT_LIMIT",
     "ACTION_BEHAVIOR_PHASE_LIMIT",
+    "ACTION_BEHAVIOR_RETRY_ATTEMPT_LIMIT",
     "ACTION_BEHAVIOR_SCHEMA_ID",
     "ACTION_BEHAVIOR_SCHEMA_ID_V1",
     "ACTION_BEHAVIOR_SCHEMA_ID_V2",
+    "ACTION_BEHAVIOR_SCHEMA_ID_V3",
 ]

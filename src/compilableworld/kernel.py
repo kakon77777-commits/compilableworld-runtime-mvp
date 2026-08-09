@@ -15,7 +15,9 @@ from .action_behavior import (
     ACTION_BEHAVIOR_CONDITION_NAMESPACES,
     ACTION_BEHAVIOR_CONDITION_OPERATORS,
     ACTION_BEHAVIOR_CONDITION_SUBJECTS,
+    ACTION_BEHAVIOR_DURATION_LIMIT,
     ACTION_BEHAVIOR_INTERRUPT_EVENTS,
+    ACTION_BEHAVIOR_RETRY_ATTEMPT_LIMIT,
 )
 from .models import (
     ActionIR, ActionReceipt, ActionStatus, Entity, EventIR, ModuleContract,
@@ -36,8 +38,9 @@ class KernelTransactionError(RuntimeErrorBase):
 
 
 SNAPSHOT_FORMAT_V1 = "compilableworld.snapshot/v0.1"
-SNAPSHOT_FORMAT = "compilableworld.snapshot/v0.2"
-SNAPSHOT_VERSION = 2
+SNAPSHOT_FORMAT_V2 = "compilableworld.snapshot/v0.2"
+SNAPSHOT_FORMAT = "compilableworld.snapshot/v0.3"
+SNAPSHOT_VERSION = 3
 
 
 class ConflictError(RuntimeErrorBase):
@@ -333,6 +336,7 @@ class WorldRuntime:
         self.scheduler = Scheduler()
         self.modules: dict[str, RuntimeModule] = {}
         self.actions: dict[str, ActionIR] = {}
+        self.action_runtime: dict[str, dict[str, Any]] = {}
         self.metrics: Counter[str] = Counter()
         self.dynamic_entities: set[str] = set()
         self.player_profiles: dict[str, dict[str, Any]] = {}
@@ -521,12 +525,14 @@ class WorldRuntime:
             delay = duration
         if delay > 0:
             entry = self.scheduler.schedule(action, delay)
+            self.action_runtime[action.action_id] = {"retries": {}}
             event = self._action_lifecycle_event("action.scheduled", action, behavior, due_tick=entry[0])
             try:
                 self.event_log.append(event)
             except KernelTransactionError:
                 self.scheduler.remove(action.action_id)
                 self.actions.pop(action.action_id, None)
+                self.action_runtime.pop(action.action_id, None)
                 action.status = ActionStatus.PARSED
                 raise
             self.events.publish(event)
@@ -579,12 +585,14 @@ class WorldRuntime:
         except KernelTransactionError:
             self.state.import_state(state_before)
             action.status = ActionStatus.FAILED
+            self.action_runtime.pop(action.action_id, None)
             self.metrics["actions_failed"] += 1
             raise
         except RuntimeErrorBase as exc:
             self.state.import_state(state_before)
             return self._fail(action, str(exc), lifecycle_started=scheduled_behavior is not None)
         action.status = ActionStatus.COMPLETED
+        self.action_runtime.pop(action.action_id, None)
         self.metrics["actions_completed"] += 1
         for event in emitted:
             self.events.publish(event)
@@ -618,7 +626,12 @@ class WorldRuntime:
             payload=payload,
         )
         emitted = [*([started] if started else []), event]
-        self.event_log.append_batch(emitted)
+        try:
+            self.event_log.append_batch(emitted)
+        except KernelTransactionError:
+            self.action_runtime.pop(action.action_id, None)
+            raise
+        self.action_runtime.pop(action.action_id, None)
         for emitted_event in emitted:
             self.events.publish(emitted_event)
             self.metrics[f"event:{emitted_event.event_type}"] += 1
@@ -695,6 +708,8 @@ class WorldRuntime:
                         for condition in phase.get("when", [])
                         if isinstance(condition, dict) and isinstance(condition.get("condition_id"), str)
                     ],
+                    "retry_policy": dict(phase["retry"])
+                    if isinstance(phase.get("retry"), dict) else None,
                 }
                 for phase in authored_phases if isinstance(phase, dict)
             ]
@@ -707,6 +722,41 @@ class WorldRuntime:
             current_phase = (
                 dict(phases[min(completed_phases, len(phases) - 1)]) if phases else None
             )
+            retry_records = self.action_runtime.get(action.action_id, {}).get("retries", {})
+            if retry_records:
+                retry_phase_id = next(iter(retry_records))
+                retry_phase_index = next(
+                    (
+                        index for index, phase in enumerate(phases)
+                        if phase["phase_id"] == retry_phase_id
+                    ),
+                    0,
+                )
+                progress = sum(
+                    phase["duration_ticks"] for phase in phases[:retry_phase_index]
+                )
+                completed_phases = retry_phase_index
+                current_phase = dict(phases[max(0, retry_phase_index - 1)])
+            active_retries = [
+                {
+                    "phase_id": phase_id,
+                    "condition_id": retry_state.get("condition_id"),
+                    "attempts": retry_state.get("attempts"),
+                    "max_attempts": next(
+                        (
+                            phase["retry_policy"]["max_attempts"]
+                            for phase in phases
+                            if phase["phase_id"] == phase_id
+                            and isinstance(phase.get("retry_policy"), dict)
+                        ),
+                        None,
+                    ),
+                    "next_retry_tick": retry_state.get("next_retry_tick"),
+                    "timeout_at_tick": retry_state.get("timeout_at_tick"),
+                }
+                for phase_id, retry_state in sorted(retry_records.items())
+                if isinstance(retry_state, dict)
+            ]
             records.append({
                 "action_id": action.action_id,
                 "actor_id": action.actor_id,
@@ -723,6 +773,7 @@ class WorldRuntime:
                 "phases": [dict(phase) for phase in phases],
                 "completed_phase_count": completed_phases,
                 "current_phase": current_phase,
+                "active_retries": active_retries,
             })
         return records
 
@@ -787,6 +838,7 @@ class WorldRuntime:
             action.status = previous_status
             self.scheduler.restore(removed)
             raise
+        self.action_runtime.pop(action.action_id, None)
         self.events.publish(event)
         self.metrics[f"actions_{status.value}"] += 1
         self.metrics[f"event:{event.event_type}"] += 1
@@ -797,31 +849,60 @@ class WorldRuntime:
         for _ in range(max(0, ticks)):
             next_tick = self.scheduler.tick + 1
             decisions = self._action_checkpoint_decisions(next_tick)
-            removed_failures: list[tuple[tuple[int, int, ActionIR], ActionStatus]] = []
+            queue_before = list(self.scheduler._queue)
+            counter_before = self.scheduler._counter
+            statuses_before = {
+                action.action_id: action.status for _, _, action in queue_before
+            }
+            action_runtime_before = deepcopy(self.action_runtime)
             self.scheduler.tick = next_tick
-            for _, failed_entry, _ in decisions:
-                if failed_entry is None:
+            for event, entry, outcome, _ in decisions:
+                action = entry[2]
+                if outcome == "progress":
+                    retry_state = self.action_runtime.get(action.action_id, {}).get("retries", {})
+                    retry_state.pop(event.payload["next_phase_id"], None)
                     continue
-                action = failed_entry[2]
                 removed = self.scheduler.remove(action.action_id)
                 if removed is None:
-                    raise RuntimeErrorBase(f"條件失敗 action 已不在排程中: {action.action_id}")
-                removed_failures.append((removed, action.status))
-                action.status = ActionStatus.FAILED
+                    raise RuntimeErrorBase(f"checkpoint action 已不在排程中: {action.action_id}")
+                if outcome == "retry":
+                    self.scheduler.restore((event.payload["due_tick"], removed[1], action))
+                    retries = self.action_runtime.setdefault(
+                        action.action_id, {"retries": {}}
+                    )["retries"]
+                    retries[event.payload["phase_id"]] = {
+                        "attempts": event.payload["attempt"],
+                        "first_failure_tick": event.payload["first_failure_tick"],
+                        "timeout_at_tick": event.payload["timeout_at_tick"],
+                        "next_retry_tick": event.payload["retry_at_tick"],
+                        "condition_id": event.payload["condition_id"],
+                    }
+                else:
+                    action.status = ActionStatus.FAILED
+                    self.action_runtime.pop(action.action_id, None)
             try:
-                self.event_log.append_batch(event for event, _, _ in decisions)
+                self.event_log.append_batch(event for event, _, _, _ in decisions)
             except KernelTransactionError:
                 self.scheduler.tick -= 1
-                for entry, previous_status in removed_failures:
-                    entry[2].status = previous_status
-                    self.scheduler.restore(entry)
+                self.scheduler._counter = counter_before
+                self.scheduler._queue = queue_before
+                heapq.heapify(self.scheduler._queue)
+                for _, _, action in queue_before:
+                    action.status = statuses_before[action.action_id]
+                self.action_runtime = action_runtime_before
                 raise
-            for event, failed_entry, message in decisions:
-                if failed_entry is not None:
-                    action = failed_entry[2]
+            for event, entry, outcome, message in decisions:
+                action = entry[2]
+                if outcome == "failed":
                     self.metrics["actions_failed"] += 1
                     receipts.append(ActionReceipt(
                         action.action_id, action.status, message or "phase condition failed",
+                        [event.event_id],
+                    ))
+                elif outcome == "retry":
+                    self.metrics["actions_retried"] += 1
+                    receipts.append(ActionReceipt(
+                        action.action_id, action.status, message or "phase retry scheduled",
                         [event.event_id],
                     ))
                 self.events.publish(event)
@@ -831,13 +912,20 @@ class WorldRuntime:
 
     def _action_checkpoint_decisions(
         self, tick: int,
-    ) -> list[tuple[EventIR, tuple[int, int, ActionIR] | None, str | None]]:
-        decisions: list[tuple[EventIR, tuple[int, int, ActionIR] | None, str | None]] = []
+    ) -> list[tuple[EventIR, tuple[int, int, ActionIR], str, str | None]]:
+        decisions: list[tuple[EventIR, tuple[int, int, ActionIR], str, str | None]] = []
         for entry in self.scheduler.entries():
             due_tick, _, action = entry
             behavior = self._action_behavior(action.verb)
             phases = behavior.get("phases", []) if isinstance(behavior, dict) else []
             if not isinstance(phases, list) or len(phases) < 2:
+                continue
+            active_retries = self.action_runtime.get(action.action_id, {}).get("retries", {})
+            if active_retries and tick not in {
+                retry_state.get("next_retry_tick")
+                for retry_state in active_retries.values()
+                if isinstance(retry_state, dict)
+            }:
                 continue
             duration = behavior["duration_ticks"]
             start_tick = due_tick - duration
@@ -863,6 +951,79 @@ class WorldRuntime:
                         f"行為 {behavior['title']} 無法進入 phase {next_phase['title']}："
                         f"條件 {condition_id} 未滿足"
                     )
+                    raw_retry_policy = next_phase.get("retry")
+                    retry_policy = self._bounded_action_retry_policy(raw_retry_policy)
+                    retry_state = self.action_runtime.get(action.action_id, {}).get(
+                        "retries", {}
+                    ).get(next_phase["phase_id"])
+                    if isinstance(retry_policy, dict):
+                        first_failure_tick = (
+                            retry_state["first_failure_tick"]
+                            if isinstance(retry_state, dict) else tick
+                        )
+                        attempt = (
+                            retry_state["attempts"] + 1
+                            if isinstance(retry_state, dict) else 1
+                        )
+                        retry_at_tick = tick + retry_policy["interval_ticks"]
+                        timeout_at_tick = first_failure_tick + retry_policy["timeout_ticks"]
+                        if (
+                            attempt <= retry_policy["max_attempts"]
+                            and retry_at_tick <= timeout_at_tick
+                        ):
+                            retry_message = (
+                                f"{message}；retry {attempt}/{retry_policy['max_attempts']} "
+                                f"scheduled for tick {retry_at_tick}"
+                            )
+                            decisions.append((EventIR(
+                                event_type="action.retry_scheduled",
+                                source="kernel",
+                                target=action.actor_id,
+                                causation_id=action.action_id,
+                                correlation_id=action.correlation_id,
+                                timestamp_tick=tick,
+                                visibility="private",
+                                payload={
+                                    "action_id": action.action_id,
+                                    "behavior_id": behavior["behavior_id"],
+                                    "actor": action.actor_id,
+                                    "verb": action.verb,
+                                    "duration_ticks": duration,
+                                    "phase_id": next_phase["phase_id"],
+                                    "condition_id": condition_id,
+                                    "attempt": attempt,
+                                    "max_attempts": retry_policy["max_attempts"],
+                                    "interval_ticks": retry_policy["interval_ticks"],
+                                    "first_failure_tick": first_failure_tick,
+                                    "retry_at_tick": retry_at_tick,
+                                    "timeout_at_tick": timeout_at_tick,
+                                    "due_tick": due_tick + retry_policy["interval_ticks"],
+                                    "reason": retry_message,
+                                },
+                            ), entry, "retry", retry_message))
+                            continue
+                    failure_code = (
+                        "retry_exhausted" if isinstance(retry_policy, dict)
+                        else "invalid_retry_policy" if raw_retry_policy is not None
+                        else "condition_failed"
+                    )
+                    failure_payload = {
+                        "action_id": action.action_id,
+                        "behavior_id": behavior["behavior_id"],
+                        "actor": action.actor_id,
+                        "verb": action.verb,
+                        "duration_ticks": duration,
+                        "phase_id": next_phase["phase_id"],
+                        "condition_id": condition_id,
+                        "failure_code": failure_code,
+                        "reason": message,
+                    }
+                    if isinstance(retry_policy, dict):
+                        failure_payload.update({
+                            "attempt": attempt,
+                            "max_attempts": retry_policy["max_attempts"],
+                            "timeout_at_tick": timeout_at_tick,
+                        })
                     decisions.append((EventIR(
                         event_type="action.failed",
                         source="kernel",
@@ -871,17 +1032,8 @@ class WorldRuntime:
                         correlation_id=action.correlation_id,
                         timestamp_tick=tick,
                         visibility="private",
-                        payload={
-                            "action_id": action.action_id,
-                            "behavior_id": behavior["behavior_id"],
-                            "actor": action.actor_id,
-                            "verb": action.verb,
-                            "duration_ticks": duration,
-                            "phase_id": next_phase["phase_id"],
-                            "condition_id": condition_id,
-                            "reason": message,
-                        },
-                    ), entry, message))
+                        payload=failure_payload,
+                    ), entry, "failed", message))
                     continue
                 decisions.append((EventIR(
                     event_type="action.progressed",
@@ -905,7 +1057,7 @@ class WorldRuntime:
                         "progress_ticks": cumulative,
                         "duration_ticks": duration,
                     },
-                ), None, None))
+                ), entry, "progress", None))
         return decisions
 
     def _action_condition_matches(self, action: ActionIR, condition: Any) -> bool:
@@ -968,7 +1120,116 @@ class WorldRuntime:
             or (isinstance(value, float) and math.isfinite(value))
         )
 
+    @staticmethod
+    def _bounded_action_retry_policy(value: Any) -> dict[str, int] | None:
+        required = {"max_attempts", "interval_ticks", "timeout_ticks"}
+        if not isinstance(value, dict) or set(value) != required:
+            return None
+        max_attempts = value["max_attempts"]
+        interval_ticks = value["interval_ticks"]
+        timeout_ticks = value["timeout_ticks"]
+        if (
+            any(isinstance(item, bool) or not isinstance(item, int) for item in value.values())
+            or not 1 <= max_attempts <= ACTION_BEHAVIOR_RETRY_ATTEMPT_LIMIT
+            or not 1 <= interval_ticks <= ACTION_BEHAVIOR_DURATION_LIMIT
+            or not 1 <= timeout_ticks <= ACTION_BEHAVIOR_DURATION_LIMIT
+        ):
+            return None
+        return {
+            "max_attempts": max_attempts,
+            "interval_ticks": interval_ticks,
+            "timeout_ticks": timeout_ticks,
+        }
+
+    def _validated_action_runtime(
+        self,
+        payload: Any,
+        queued_actions: dict[str, ActionIR],
+        *,
+        require_all: bool,
+        snapshot_tick: int,
+    ) -> dict[str, dict[str, Any]]:
+        if payload is None and not require_all:
+            return {action_id: {"retries": {}} for action_id in queued_actions}
+        if not isinstance(payload, dict):
+            raise RuntimeErrorBase("Snapshot action_runtime must be an object")
+        if set(payload) - set(queued_actions):
+            raise RuntimeErrorBase("Snapshot action_runtime references non-pending actions")
+        if require_all and set(payload) != set(queued_actions):
+            raise RuntimeErrorBase("Snapshot action_runtime must cover every pending action")
+
+        validated: dict[str, dict[str, Any]] = {}
+        for action_id, action in queued_actions.items():
+            raw_record = payload.get(action_id, {"retries": {}})
+            if not isinstance(raw_record, dict) or set(raw_record) != {"retries"}:
+                raise RuntimeErrorBase("Snapshot action_runtime record is invalid")
+            raw_retries = raw_record["retries"]
+            if not isinstance(raw_retries, dict):
+                raise RuntimeErrorBase("Snapshot action_runtime.retries must be an object")
+            if len(raw_retries) > 1:
+                raise RuntimeErrorBase("Snapshot action_runtime has multiple active retries")
+            behavior = self._action_behavior(action.verb)
+            phases = behavior.get("phases", []) if isinstance(behavior, dict) else []
+            phase_by_id = {
+                phase.get("phase_id"): phase
+                for phase in phases
+                if isinstance(phase, dict) and isinstance(phase.get("phase_id"), str)
+            }
+            retries: dict[str, dict[str, Any]] = {}
+            for phase_id, retry_state in raw_retries.items():
+                if not isinstance(phase_id, str) or phase_id not in phase_by_id:
+                    raise RuntimeErrorBase("Snapshot action_runtime phase is invalid")
+                phase = phase_by_id[phase_id]
+                retry_policy = self._bounded_action_retry_policy(phase.get("retry"))
+                if not isinstance(retry_policy, dict) or not isinstance(retry_state, dict):
+                    raise RuntimeErrorBase("Snapshot action_runtime retry policy is unavailable")
+                required = {
+                    "attempts", "first_failure_tick", "timeout_at_tick",
+                    "next_retry_tick", "condition_id",
+                }
+                if set(retry_state) != required:
+                    raise RuntimeErrorBase("Snapshot action_runtime retry record is invalid")
+                attempts = retry_state["attempts"]
+                first_failure_tick = retry_state["first_failure_tick"]
+                timeout_at_tick = retry_state["timeout_at_tick"]
+                next_retry_tick = retry_state["next_retry_tick"]
+                condition_id = retry_state["condition_id"]
+                if (
+                    isinstance(attempts, bool)
+                    or not isinstance(attempts, int)
+                    or not 1 <= attempts <= min(
+                        ACTION_BEHAVIOR_RETRY_ATTEMPT_LIMIT,
+                        retry_policy["max_attempts"],
+                    )
+                    or any(
+                        isinstance(value, bool) or not isinstance(value, int) or value < 0
+                        for value in (first_failure_tick, timeout_at_tick, next_retry_tick)
+                    )
+                    or timeout_at_tick != first_failure_tick + retry_policy["timeout_ticks"]
+                    or not first_failure_tick < next_retry_tick <= timeout_at_tick
+                    or next_retry_tick <= snapshot_tick
+                    or not isinstance(condition_id, str)
+                    or condition_id not in {
+                        condition.get("condition_id")
+                        for condition in phase.get("when", [])
+                        if isinstance(condition, dict)
+                    }
+                ):
+                    raise RuntimeErrorBase("Snapshot action_runtime retry values are invalid")
+                retries[phase_id] = {
+                    "attempts": attempts,
+                    "first_failure_tick": first_failure_tick,
+                    "timeout_at_tick": timeout_at_tick,
+                    "next_retry_tick": next_retry_tick,
+                    "condition_id": condition_id,
+                }
+            validated[action_id] = {"retries": retries}
+        return validated
+
     def save_snapshot(self, path: str | Path) -> None:
+        pending_ids = {
+            action.action_id for _, _, action in self.scheduler.entries()
+        }
         payload = {
             "format": SNAPSHOT_FORMAT,
             "snapshot_version": SNAPSHOT_VERSION,
@@ -984,6 +1245,10 @@ class WorldRuntime:
             "player_profiles": self.player_profiles,
             "active_player_id": self.active_player_id,
             "scheduler": self.scheduler.export(),
+            "action_runtime": {
+                action_id: deepcopy(self.action_runtime.get(action_id, {"retries": {}}))
+                for action_id in sorted(pending_ids)
+            },
             "event_count": len(self.event_log.events),
         }
         Path(path).write_text(json.dumps(payload, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
@@ -993,7 +1258,7 @@ class WorldRuntime:
         if not isinstance(payload, dict):
             raise RuntimeErrorBase("Snapshot 根資料格式無效")
         snapshot_format = payload.get("format")
-        if snapshot_format not in {SNAPSHOT_FORMAT_V1, SNAPSHOT_FORMAT}:
+        if snapshot_format not in {SNAPSHOT_FORMAT_V1, SNAPSHOT_FORMAT_V2, SNAPSHOT_FORMAT}:
             raise RuntimeErrorBase("不支援的 Snapshot 格式")
         try:
             snapshot_version = int(payload.get("snapshot_version", 1 if snapshot_format == SNAPSHOT_FORMAT_V1 else 0))
@@ -1001,6 +1266,13 @@ class WorldRuntime:
             raise RuntimeErrorBase("Snapshot 版本格式無效") from exc
         if snapshot_version < 1 or snapshot_version > SNAPSHOT_VERSION:
             raise RuntimeErrorBase(f"不支援的 Snapshot 版本: {snapshot_version}")
+        expected_snapshot_version = {
+            SNAPSHOT_FORMAT_V1: 1,
+            SNAPSHOT_FORMAT_V2: 2,
+            SNAPSHOT_FORMAT: 3,
+        }[snapshot_format]
+        if snapshot_version != expected_snapshot_version:
+            raise RuntimeErrorBase("Snapshot format 與 snapshot_version 不一致")
         if payload.get("world_id") != self.package["manifest"]["world_id"]:
             raise RuntimeErrorBase("Snapshot 屬於不同世界")
         if payload.get("world_version") != self.package["manifest"]["world_version"]:
@@ -1060,6 +1332,12 @@ class WorldRuntime:
         next_scheduler = Scheduler()
         queued_actions = next_scheduler.import_state(scheduler_payload)
         next_actions = {action.action_id: action for action in queued_actions}
+        next_action_runtime = self._validated_action_runtime(
+            payload.get("action_runtime"),
+            next_actions,
+            require_all=snapshot_version >= 3,
+            snapshot_tick=next_scheduler.tick,
+        )
 
         preserved_entities = {
             entity_id: entity
@@ -1086,9 +1364,11 @@ class WorldRuntime:
         self.scheduler._counter = next_scheduler._counter
         self.scheduler._queue = next_scheduler._queue
         self.actions = next_actions
+        self.action_runtime = next_action_runtime
 
     def replay(self, events: Iterable[EventIR]) -> None:
         pending_actions: dict[str, tuple[int, int, ActionIR]] = {}
+        pending_action_runtime: dict[str, dict[str, Any]] = {}
         lifecycle_seen = False
         lifecycle_tick = 0
         lifecycle_order = 0
@@ -1112,9 +1392,88 @@ class WorldRuntime:
                 lifecycle_order += 1
                 action.status = ActionStatus.SCHEDULED
                 pending_actions[action.action_id] = (due_tick, lifecycle_order, action)
+                pending_action_runtime[action.action_id] = {"retries": {}}
+            elif event.event_type == "action.retry_scheduled":
+                action_id = event.payload.get("action_id")
+                entry = pending_actions.get(action_id) if isinstance(action_id, str) else None
+                if entry is None:
+                    raise RuntimeErrorBase("EventLog action.retry_scheduled references no pending action")
+                behavior = self._action_behavior(entry[2].verb)
+                phases = behavior.get("phases", []) if isinstance(behavior, dict) else []
+                phase = next(
+                    (
+                        item for item in phases
+                        if isinstance(item, dict)
+                        and item.get("phase_id") == event.payload.get("phase_id")
+                    ),
+                    None,
+                )
+                retry_policy = self._bounded_action_retry_policy(
+                    phase.get("retry") if isinstance(phase, dict) else None
+                )
+                try:
+                    attempt = int(event.payload["attempt"])
+                    max_attempts = int(event.payload["max_attempts"])
+                    interval_ticks = int(event.payload["interval_ticks"])
+                    first_failure_tick = int(event.payload["first_failure_tick"])
+                    retry_at_tick = int(event.payload["retry_at_tick"])
+                    timeout_at_tick = int(event.payload["timeout_at_tick"])
+                    due_tick = int(event.payload["due_tick"])
+                    condition_id = event.payload["condition_id"]
+                except (KeyError, TypeError, ValueError) as exc:
+                    raise RuntimeErrorBase("EventLog action.retry_scheduled is invalid") from exc
+                previous_retry = pending_action_runtime[action_id]["retries"].get(
+                    event.payload.get("phase_id")
+                )
+                active_retry_ids = set(pending_action_runtime[action_id]["retries"])
+                if active_retry_ids and event.payload.get("phase_id") not in active_retry_ids:
+                    raise RuntimeErrorBase("EventLog action.retry_scheduled overlaps another phase")
+                expected_attempt = (
+                    previous_retry["attempts"] + 1
+                    if isinstance(previous_retry, dict) else 1
+                )
+                expected_first_failure_tick = (
+                    previous_retry["first_failure_tick"]
+                    if isinstance(previous_retry, dict) else event.timestamp_tick
+                )
+                if (
+                    not isinstance(retry_policy, dict)
+                    or attempt != expected_attempt
+                    or max_attempts != retry_policy["max_attempts"]
+                    or interval_ticks != retry_policy["interval_ticks"]
+                    or not 1 <= attempt <= max_attempts
+                    or first_failure_tick != expected_first_failure_tick
+                    or retry_at_tick != event.timestamp_tick + interval_ticks
+                    or timeout_at_tick != first_failure_tick + retry_policy["timeout_ticks"]
+                    or retry_at_tick > timeout_at_tick
+                    or due_tick != entry[0] + interval_ticks
+                    or not isinstance(condition_id, str)
+                    or condition_id not in {
+                        condition.get("condition_id")
+                        for condition in phase.get("when", [])
+                        if isinstance(condition, dict)
+                    }
+                ):
+                    raise RuntimeErrorBase("EventLog action.retry_scheduled violates authored policy")
+                lifecycle_seen = True
+                lifecycle_tick = max(lifecycle_tick, event.timestamp_tick)
+                pending_actions[action_id] = (due_tick, entry[1], entry[2])
+                pending_action_runtime[action_id]["retries"][phase["phase_id"]] = {
+                    "attempts": attempt,
+                    "first_failure_tick": first_failure_tick,
+                    "timeout_at_tick": timeout_at_tick,
+                    "next_retry_tick": retry_at_tick,
+                    "condition_id": condition_id,
+                }
             elif event.event_type == "action.progressed":
                 lifecycle_seen = True
                 lifecycle_tick = max(lifecycle_tick, event.timestamp_tick)
+                action_id = event.payload.get("action_id")
+                next_phase_id = event.payload.get("next_phase_id")
+                if isinstance(action_id, str) and isinstance(next_phase_id, str):
+                    pending_action_runtime.get(action_id, {}).get("retries", {}).pop(
+                        next_phase_id, None
+                    )
             elif event.event_type in {
                 "action.completed", "action.cancelled", "action.interrupted", "action.failed",
             }:
@@ -1123,6 +1482,7 @@ class WorldRuntime:
                     lifecycle_seen = True
                     lifecycle_tick = max(lifecycle_tick, event.timestamp_tick)
                     pending_actions.pop(action_id, None)
+                    pending_action_runtime.pop(action_id, None)
         if lifecycle_seen:
             self.scheduler.tick = lifecycle_tick
             self.scheduler._counter = lifecycle_order
@@ -1131,6 +1491,7 @@ class WorldRuntime:
             self.actions = {
                 action.action_id: action for _, _, action in pending_actions.values()
             }
+            self.action_runtime = pending_action_runtime
 
     def diagnostics(self) -> dict[str, Any]:
         return {

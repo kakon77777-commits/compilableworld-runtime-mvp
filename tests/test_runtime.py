@@ -158,8 +158,9 @@ class RuntimeTests(unittest.TestCase):
         snapshot = Path(self.temp.name) / "save.json"
         self.runtime.save_snapshot(snapshot)
         saved = json.loads(snapshot.read_text(encoding="utf-8"))
-        self.assertEqual(saved["format"], "compilableworld.snapshot/v0.2")
-        self.assertEqual(saved["snapshot_version"], 2)
+        self.assertEqual(saved["format"], "compilableworld.snapshot/v0.3")
+        self.assertEqual(saved["snapshot_version"], 3)
+        self.assertEqual(saved["action_runtime"], {})
         self.runtime.submit(ActionIR("player.neo", "move", args={"direction": "south"}))
         self.runtime.load_snapshot(snapshot)
         self.assertEqual(self.runtime.state.get("player.neo", "position", "room"), "room.market")
@@ -228,6 +229,7 @@ class RuntimeTests(unittest.TestCase):
         payload["format"] = "compilableworld.snapshot/v0.1"
         payload.pop("snapshot_version", None)
         payload.pop("scheduler", None)
+        payload.pop("action_runtime", None)
         snapshot.write_text(json.dumps(payload), encoding="utf-8")
 
         self.runtime.submit(ActionIR("player.neo", "move", args={"direction": "north"}))
@@ -243,6 +245,11 @@ class RuntimeTests(unittest.TestCase):
         payload["snapshot_version"] = 99
         snapshot.write_text(json.dumps(payload), encoding="utf-8")
         with self.assertRaisesRegex(RuntimeError, "不支援的 Snapshot 版本"):
+            self.runtime.load_snapshot(snapshot)
+
+        payload["snapshot_version"] = 2
+        snapshot.write_text(json.dumps(payload), encoding="utf-8")
+        with self.assertRaisesRegex(RuntimeError, "format 與 snapshot_version 不一致"):
             self.runtime.load_snapshot(snapshot)
 
     def test_scheduler_delays_execution(self) -> None:

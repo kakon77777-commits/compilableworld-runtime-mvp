@@ -32,7 +32,13 @@ STATE_MACHINE_REWARD_CURRENCY_LIMIT = 1_000_000_000
 # exposed as an ad-hoc payload match for events that do not carry it.
 STATE_MACHINE_TRIGGER_EVENT_FIELDS: dict[str, set[str]] = {
     "action.failed": {
-        "action_id", "behavior_id", "actor", "verb", "phase_id", "condition_id", "reason",
+        "action_id", "behavior_id", "actor", "verb", "phase_id", "condition_id",
+        "failure_code", "attempt", "max_attempts", "timeout_at_tick", "reason",
+    },
+    "action.retry_scheduled": {
+        "action_id", "behavior_id", "actor", "verb", "duration_ticks", "phase_id",
+        "condition_id", "attempt", "max_attempts", "interval_ticks",
+        "first_failure_tick", "retry_at_tick", "timeout_at_tick", "due_tick", "reason",
     },
     "action.scheduled": {
         "action_id", "behavior_id", "actor", "verb", "duration_ticks", "due_tick",

@@ -8,10 +8,10 @@
 | Item | Value |
 |---|---|
 | Local integrated runtime | `0.1.1` |
-| Verified tests | `290/290` |
+| Verified tests | `297/297` |
 | GitHub `master` observed head | `72334d7` (verified 2026-08-09) |
-| GitHub integration branch before conditional-phase package | `agent/m12-runtime-mcp-integration` at `75ed42d` |
-| Remote synchronization status | Sequential-phase v0.2 is pushed; conditional-phase v0.3 is the current reviewed integration-branch package |
+| GitHub integration branch before bounded-retry package | `agent/m12-runtime-mcp-integration` at `719ae42` |
+| Remote synchronization status | Conditional-phase v0.3 is pushed; bounded retry/deadline v0.4 is the current reviewed integration-branch package |
 | Intended next release baseline | `v0.2.0-alpha.1` or equivalent |
 
 ## Current integrated local state
@@ -221,6 +221,36 @@ out_of_scope:
   - if/else branching or OR/NOT expression graphs
   - child Action execution or generic phase effects
   - retry, timeout, resume, compensation or parallel graphs
+  - Studio visual authoring/write-back form
+  - AI direct StateStore writes
+```
+
+### CW-M12-ACTION-006 — Bounded retry and timeout
+
+```yaml
+owner_environment: codex
+status: completed-and-deployed-on-integration-branch
+outputs:
+  - schemas/action-behaviors.v0.4.schema.json
+  - v0.1, v0.2 and v0.3 authoring compatibility paths
+  - fixed-interval retry and deadline checkpoint execution
+  - action.retry_scheduled and retry_exhausted EventIR
+  - Snapshot v0.3 action runtime state and v0.1/v0.2 migration
+  - retry-aware EventLog Replay, Studio pending projection and terminal notice
+  - tests/test_action_behavior.py
+acceptance:
+  - non-initial conditional phases may author one to sixteen retry attempts
+  - interval and timeout are positive, bounded and compiler-validated
+  - failed gates atomically shift due tick or terminate at attempt/deadline exhaustion
+  - EventLog failure restores tick, queue, due tick, ActionStatus and retry state
+  - Snapshot and Replay preserve attempt, first failure, next retry and deadline
+  - action.retry_scheduled can drive scoped StateIR without direct StateStore writes
+  - v0.1/v0.2/v0.3 sources preserve their original no-retry semantics
+  - 297/297 tests pass
+out_of_scope:
+  - exponential or free-form backoff, jitter and dynamic deadline extension
+  - if/else branching or OR/NOT expression graphs
+  - child Action execution, compensation, resume or parallel graphs
   - Studio visual authoring/write-back form
   - AI direct StateStore writes
 ```
