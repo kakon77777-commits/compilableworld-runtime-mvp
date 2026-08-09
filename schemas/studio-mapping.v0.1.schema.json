@@ -42,6 +42,7 @@
                     "action.failed",
                     "action.scheduled",
                     "action.started",
+                    "action.progressed",
                     "action.completed",
                     "action.cancelled",
                     "action.interrupted",

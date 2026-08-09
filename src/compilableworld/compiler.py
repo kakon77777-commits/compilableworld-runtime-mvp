@@ -14,8 +14,12 @@ from .action_behavior import (
     ACTION_BEHAVIOR_DEFINITION_LIMIT,
     ACTION_BEHAVIOR_DURATION_LIMIT,
     ACTION_BEHAVIOR_FORMAT,
+    ACTION_BEHAVIOR_FORMAT_V1,
     ACTION_BEHAVIOR_INTERRUPT_EVENTS,
     ACTION_BEHAVIOR_INTERRUPT_LIMIT,
+    ACTION_BEHAVIOR_PHASE_LIMIT,
+    ACTION_BEHAVIOR_SCHEMA_ID,
+    ACTION_BEHAVIOR_SCHEMA_ID_V1,
 )
 from .functions import FunctionDefinitionError, FunctionRegistry, validate_function_source
 from .player_generation import template_records
@@ -251,8 +255,17 @@ def compile_world(
     unknown_schema_keys = set(declared_source_schemas) - set(contract_ids)
     if unknown_schema_keys:
         raise CompileError(f"manifest.source_schemas 含未知來源: {sorted(unknown_schema_keys)}")
+    action_behavior_schema_id = {
+        ACTION_BEHAVIOR_FORMAT_V1: ACTION_BEHAVIOR_SCHEMA_ID_V1,
+        ACTION_BEHAVIOR_FORMAT: ACTION_BEHAVIOR_SCHEMA_ID,
+    }.get(action_behaviors_source.get("format") if isinstance(action_behaviors_source, dict) else None)
     for source_key, declared_schema_id in declared_source_schemas.items():
-        if declared_schema_id != contract_ids[source_key]:
+        expected_schema_id = (
+            action_behavior_schema_id
+            if source_key == "action_behaviors" and action_behavior_schema_id is not None
+            else contract_ids[source_key]
+        )
+        if declared_schema_id != expected_schema_id:
             raise CompileError(
                 f"manifest.source_schemas.{source_key} 與正式契約不符: {declared_schema_id}"
             )
@@ -266,6 +279,8 @@ def compile_world(
         )
         if key in sources
     }
+    if "action_behaviors" in sources and action_behavior_schema_id is not None:
+        source_schema_ids["action_behaviors"] = action_behavior_schema_id
 
     for row in exits:
         if row["from_room"] not in room_ids or row["to_room"] not in room_ids:
@@ -458,7 +473,8 @@ def _validate_action_behaviors(source: Any) -> list[dict[str, Any]]:
     unknown_root = set(source) - {"format", "behaviors"}
     if unknown_root:
         raise CompileError(f"action_behaviors.json 含未知欄位: {sorted(unknown_root)}")
-    if source.get("format") != ACTION_BEHAVIOR_FORMAT:
+    source_format = source.get("format")
+    if source_format not in {ACTION_BEHAVIOR_FORMAT_V1, ACTION_BEHAVIOR_FORMAT}:
         raise CompileError("action_behaviors.json format 不支援")
     behaviors = source.get("behaviors")
     if not isinstance(behaviors, list):
@@ -468,10 +484,10 @@ def _validate_action_behaviors(source: Any) -> list[dict[str, Any]]:
             f"action_behaviors.json 不可超過 {ACTION_BEHAVIOR_DEFINITION_LIMIT} 個 behavior"
         )
 
-    allowed = {
-        "behavior_id", "title", "verb", "duration_ticks",
-        "completion_module", "concurrency", "interrupt_on",
+    common = {
+        "behavior_id", "title", "verb", "completion_module", "concurrency", "interrupt_on",
     }
+    allowed = common | ({"duration_ticks"} if source_format == ACTION_BEHAVIOR_FORMAT_V1 else {"phases"})
     behavior_ids: set[str] = set()
     verbs: set[str] = set()
     normalized: list[dict[str, Any]] = []
@@ -504,17 +520,69 @@ def _validate_action_behaviors(source: Any) -> list[dict[str, Any]]:
         title = behavior["title"]
         if not isinstance(title, str) or not title.strip():
             raise CompileError(f"{label}.title 必須是非空字串")
-        duration = behavior["duration_ticks"]
-        if (
-            isinstance(duration, bool)
-            or not isinstance(duration, int)
-            or not 1 <= duration <= ACTION_BEHAVIOR_DURATION_LIMIT
-        ):
-            raise CompileError(
-                f"{label}.duration_ticks 必須是 1 到 {ACTION_BEHAVIOR_DURATION_LIMIT} 的整數"
-            )
+        phases: list[dict[str, Any]] = []
+        if source_format == ACTION_BEHAVIOR_FORMAT_V1:
+            duration = behavior["duration_ticks"]
+            if (
+                isinstance(duration, bool)
+                or not isinstance(duration, int)
+                or not 1 <= duration <= ACTION_BEHAVIOR_DURATION_LIMIT
+            ):
+                raise CompileError(
+                    f"{label}.duration_ticks 必須是 1 到 {ACTION_BEHAVIOR_DURATION_LIMIT} 的整數"
+                )
+        else:
+            raw_phases = behavior["phases"]
+            if (
+                not isinstance(raw_phases, list)
+                or not 2 <= len(raw_phases) <= ACTION_BEHAVIOR_PHASE_LIMIT
+            ):
+                raise CompileError(
+                    f"{label}.phases 必須包含 2 到 {ACTION_BEHAVIOR_PHASE_LIMIT} 個 phase"
+                )
+            phase_ids: set[str] = set()
+            duration = 0
+            for phase_index, phase in enumerate(raw_phases):
+                phase_label = f"{label}.phases[{phase_index}]"
+                if not isinstance(phase, dict):
+                    raise CompileError(f"{phase_label} 必須是物件")
+                phase_allowed = {"phase_id", "title", "duration_ticks"}
+                phase_unknown = set(phase) - phase_allowed
+                phase_missing = phase_allowed - set(phase)
+                if phase_unknown:
+                    raise CompileError(f"{phase_label} 含未知欄位: {sorted(phase_unknown)}")
+                if phase_missing:
+                    raise CompileError(f"{phase_label} 缺少必填欄位: {sorted(phase_missing)}")
+                phase_id = phase["phase_id"]
+                phase_title = phase["title"]
+                phase_duration = phase["duration_ticks"]
+                if not isinstance(phase_id, str) or not ID_RE.match(phase_id):
+                    raise CompileError(f"{phase_label}.phase_id 不合法")
+                if phase_id in phase_ids:
+                    raise CompileError(f"{label}.phases 含重複 phase_id: {phase_id}")
+                phase_ids.add(phase_id)
+                if not isinstance(phase_title, str) or not phase_title.strip():
+                    raise CompileError(f"{phase_label}.title 必須是非空字串")
+                if (
+                    isinstance(phase_duration, bool)
+                    or not isinstance(phase_duration, int)
+                    or not 1 <= phase_duration <= ACTION_BEHAVIOR_DURATION_LIMIT
+                ):
+                    raise CompileError(
+                        f"{phase_label}.duration_ticks 必須是 1 到 {ACTION_BEHAVIOR_DURATION_LIMIT} 的整數"
+                    )
+                duration += phase_duration
+                if duration > ACTION_BEHAVIOR_DURATION_LIMIT:
+                    raise CompileError(
+                        f"{label}.phases 總 duration 不可超過 {ACTION_BEHAVIOR_DURATION_LIMIT}"
+                    )
+                phases.append({
+                    "phase_id": phase_id,
+                    "title": phase_title.strip(),
+                    "duration_ticks": phase_duration,
+                })
         if behavior["concurrency"] != ACTION_BEHAVIOR_CONCURRENCY:
-            raise CompileError(f"{label}.concurrency v0.1 只支援 {ACTION_BEHAVIOR_CONCURRENCY}")
+            raise CompileError(f"{label}.concurrency 目前只支援 {ACTION_BEHAVIOR_CONCURRENCY}")
         interrupt_on = behavior["interrupt_on"]
         if (
             not isinstance(interrupt_on, list)
@@ -525,7 +593,7 @@ def _validate_action_behaviors(source: Any) -> list[dict[str, Any]]:
             raise CompileError(
                 f"{label}.interrupt_on 必須是不重複、最多 {ACTION_BEHAVIOR_INTERRUPT_LIMIT} 個受支援 EventIR"
             )
-        normalized.append({
+        record = {
             "behavior_id": behavior_id,
             "title": title.strip(),
             "verb": verb,
@@ -533,7 +601,10 @@ def _validate_action_behaviors(source: Any) -> list[dict[str, Any]]:
             "completion_module": completion_module,
             "concurrency": ACTION_BEHAVIOR_CONCURRENCY,
             "interrupt_on": list(interrupt_on),
-        })
+        }
+        if phases:
+            record["phases"] = phases
+        normalized.append(record)
     return normalized
 
 

@@ -1,11 +1,22 @@
 {
-  "format": "compilableworld.action-behaviors/v0.1",
+  "format": "compilableworld.action-behaviors/v0.2",
   "behaviors": [
     {
       "behavior_id": "behavior.search.careful",
       "title": "仔細搜索",
       "verb": "search",
-      "duration_ticks": 2,
+      "phases": [
+        {
+          "phase_id": "survey",
+          "title": "觀察搜索範圍",
+          "duration_ticks": 1
+        },
+        {
+          "phase_id": "inspect",
+          "title": "仔細檢查線索",
+          "duration_ticks": 1
+        }
+      ],
       "completion_module": "exploration.core",
       "concurrency": "one_per_actor",
       "interrupt_on": [

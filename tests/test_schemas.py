@@ -73,6 +73,7 @@ class SchemaContractTests(unittest.TestCase):
         self.assertIn("combat.actor_defeated", event_mapping["properties"]["event_type"]["enum"])
         self.assertIn("quest.completed", event_mapping["properties"]["event_type"]["enum"])
         self.assertIn("fsm.completed", event_mapping["properties"]["event_type"]["enum"])
+        self.assertIn("action.progressed", event_mapping["properties"]["event_type"]["enum"])
 
         state_machine_schema = json.loads(
             (ROOT / "schemas" / "state-machines.v0.1.schema.json").read_text(encoding="utf-8")
@@ -90,11 +91,16 @@ class SchemaContractTests(unittest.TestCase):
         self.assertNotIn("effects", transition["properties"])
 
         action_behavior_schema = json.loads(
-            (ROOT / "schemas" / "action-behaviors.v0.1.schema.json").read_text(encoding="utf-8")
+            (ROOT / "schemas" / "action-behaviors.v0.2.schema.json").read_text(encoding="utf-8")
         )
         behavior = action_behavior_schema["$defs"]["behavior"]
         self.assertEqual(action_behavior_schema["properties"]["behaviors"]["maxItems"], 1024)
-        self.assertEqual(behavior["properties"]["duration_ticks"]["maximum"], 1000000)
+        self.assertEqual(behavior["properties"]["phases"]["minItems"], 2)
+        self.assertEqual(behavior["properties"]["phases"]["maxItems"], 64)
+        self.assertEqual(
+            action_behavior_schema["$defs"]["phase"]["properties"]["duration_ticks"]["maximum"],
+            1000000,
+        )
         self.assertEqual(behavior["properties"]["interrupt_on"]["maxItems"], 16)
         self.assertNotIn("guard", behavior["properties"])
 
@@ -110,6 +116,10 @@ class SchemaContractTests(unittest.TestCase):
         self.assertIn("action_behaviors", runtime_package_schema["required"])
         self.assertIn("state_machines", runtime_package_schema["properties"]["schema_contracts"]["required"])
         self.assertIn("action_behaviors", runtime_package_schema["properties"]["schema_contracts"]["required"])
+        self.assertEqual(
+            runtime_package_schema["properties"]["schema_contracts"]["properties"]["action_behaviors"]["const"],
+            "compilableworld.schema/action-behaviors/v0.2",
+        )
         self.assertEqual(runtime_package_schema["properties"]["state_machines"]["maxItems"], 1024)
 
     def test_csv_header_contract_rejects_unknown_columns(self) -> None:

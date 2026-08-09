@@ -8,10 +8,10 @@
 | Item | Value |
 |---|---|
 | Local integrated runtime | `0.1.1` |
-| Verified tests | `281/281` |
+| Verified tests | `285/285` |
 | GitHub `master` observed head | `72334d7` (verified 2026-08-09) |
-| GitHub integration branch before Action-scope package | `agent/m12-runtime-mcp-integration` at `fc2bfec` |
-| Remote synchronization status | Scoped StateIR package is pushed; Action-scope package is ready for the reviewed integration-branch commit |
+| GitHub integration branch before sequential-phase package | `agent/m12-runtime-mcp-integration` at `4174ea9` |
+| Remote synchronization status | Action-scope v0.1 is pushed; sequential-phase v0.2 is the current reviewed integration-branch package |
 | Intended next release baseline | `v0.2.0-alpha.1` or equivalent |
 
 ## Current integrated local state
@@ -163,5 +163,34 @@ out_of_scope:
   - parallel child steps or arbitrary interrupt expressions
   - Studio visual authoring/write-back form
   - player/MCP remote control of authoritative Runtime time
+  - AI direct StateStore writes
+```
+
+### CW-M12-ACTION-004 — Bounded sequential phase checkpoints
+
+```yaml
+owner_environment: codex
+status: completed-and-deployed-on-integration-branch
+outputs:
+  - schemas/action-behaviors.v0.2.schema.json
+  - v0.1 authoring compatibility path
+  - exact-tick action.progressed EventIR
+  - phase-aware pending, Snapshot, Replay and Studio projections
+  - terminal phase progress notification
+  - tests/test_action_behavior.py
+acceptance:
+  - each behavior declares two to sixty-four ordered bounded phases
+  - Compiler derives total duration and rejects duplicate or unbounded phases
+  - advance across multiple ticks emits every checkpoint at its exact tick
+  - checkpoint EventLog failure restores tick and retries without duplication
+  - Snapshot preserves current phase and Replay restores the last emitted checkpoint
+  - action.progressed can drive scoped StateIR without direct StateStore writes
+  - legacy v0.1 single-stage authoring remains compilable and truthfully identified
+  - 285/285 tests pass
+out_of_scope:
+  - child Action execution or generic phase effects
+  - conditional, retry, timeout or parallel graphs
+  - resume and compensation transactions
+  - Studio visual authoring/write-back form
   - AI direct StateStore writes
 ```

@@ -206,6 +206,14 @@ def _action_behavior_overview(behavior: Any, index: int) -> dict[str, Any]:
         "title": behavior.get("title", ""),
         "verb": behavior.get("verb"),
         "duration_ticks": behavior.get("duration_ticks"),
+        "phases": [
+            {
+                "phase_id": phase.get("phase_id"),
+                "title": phase.get("title", ""),
+                "duration_ticks": phase.get("duration_ticks"),
+            }
+            for phase in behavior.get("phases", []) if isinstance(phase, dict)
+        ],
         "completion_module": behavior.get("completion_module"),
         "concurrency": behavior.get("concurrency"),
         "interrupt_on": list(behavior.get("interrupt_on", [])),
@@ -285,7 +293,7 @@ def package_overview(package: dict[str, Any]) -> dict[str, Any]:
     if action_behaviors:
         event_types.update({
             "action.scheduled", "action.started", "action.completed",
-            "action.cancelled", "action.interrupted", "action.failed",
+            "action.progressed", "action.cancelled", "action.interrupted", "action.failed",
         })
         event_types.update(
             event_type

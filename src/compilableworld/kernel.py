@@ -259,6 +259,9 @@ class Scheduler:
 
     def advance(self, ticks: int = 1) -> list[ActionIR]:
         self.tick += max(0, ticks)
+        return self.pop_ready()
+
+    def pop_ready(self) -> list[ActionIR]:
         ready: list[ActionIR] = []
         while self._queue and self._queue[0][0] <= self.tick:
             ready.append(heapq.heappop(self._queue)[2])
@@ -675,6 +678,16 @@ class WorldRuntime:
             )
             started_tick = due_tick - duration
             progress = min(duration, max(0, self.scheduler.tick - started_tick))
+            phases = list(behavior.get("phases", [])) if behavior else []
+            completed_phases = 0
+            elapsed_boundary = 0
+            for phase in phases:
+                elapsed_boundary += phase["duration_ticks"]
+                if elapsed_boundary <= progress:
+                    completed_phases += 1
+            current_phase = (
+                dict(phases[min(completed_phases, len(phases) - 1)]) if phases else None
+            )
             records.append({
                 "action_id": action.action_id,
                 "actor_id": action.actor_id,
@@ -688,6 +701,9 @@ class WorldRuntime:
                 "progress_ticks": progress,
                 "remaining_ticks": max(0, due_tick - self.scheduler.tick),
                 "interrupt_on": list(behavior["interrupt_on"]) if behavior else [],
+                "phases": [dict(phase) for phase in phases],
+                "completed_phase_count": completed_phases,
+                "current_phase": current_phase,
             })
         return records
 
@@ -758,7 +774,62 @@ class WorldRuntime:
         return ActionReceipt(action.action_id, action.status, reason, [event.event_id])
 
     def advance(self, ticks: int = 1) -> list[ActionReceipt]:
-        return [self._execute(action) for action in self.scheduler.advance(ticks)]
+        receipts: list[ActionReceipt] = []
+        for _ in range(max(0, ticks)):
+            next_tick = self.scheduler.tick + 1
+            progress_events = self._action_progress_events(next_tick)
+            self.scheduler.tick = next_tick
+            try:
+                self.event_log.append_batch(progress_events)
+            except KernelTransactionError:
+                self.scheduler.tick -= 1
+                raise
+            for event in progress_events:
+                self.events.publish(event)
+                self.metrics[f"event:{event.event_type}"] += 1
+            receipts.extend(self._execute(action) for action in self.scheduler.pop_ready())
+        return receipts
+
+    def _action_progress_events(self, tick: int) -> list[EventIR]:
+        events: list[EventIR] = []
+        for due_tick, _, action in self.scheduler.entries():
+            behavior = self._action_behavior(action.verb)
+            phases = behavior.get("phases", []) if isinstance(behavior, dict) else []
+            if not isinstance(phases, list) or len(phases) < 2:
+                continue
+            duration = behavior["duration_ticks"]
+            start_tick = due_tick - duration
+            elapsed = tick - start_tick
+            cumulative = 0
+            for phase_index, phase in enumerate(phases[:-1]):
+                cumulative += phase["duration_ticks"]
+                if elapsed != cumulative:
+                    continue
+                next_phase = phases[phase_index + 1]
+                events.append(EventIR(
+                    event_type="action.progressed",
+                    source="kernel",
+                    target=action.actor_id,
+                    causation_id=action.action_id,
+                    correlation_id=action.correlation_id,
+                    timestamp_tick=tick,
+                    visibility="private",
+                    payload={
+                        "action_id": action.action_id,
+                        "behavior_id": behavior["behavior_id"],
+                        "actor": action.actor_id,
+                        "verb": action.verb,
+                        "phase_id": phase["phase_id"],
+                        "phase_title": phase["title"],
+                        "phase_index": phase_index + 1,
+                        "completed_phases": phase_index + 1,
+                        "total_phases": len(phases),
+                        "next_phase_id": next_phase["phase_id"],
+                        "progress_ticks": cumulative,
+                        "duration_ticks": duration,
+                    },
+                ))
+        return events
 
     def save_snapshot(self, path: str | Path) -> None:
         payload = {
@@ -904,6 +975,9 @@ class WorldRuntime:
                 lifecycle_order += 1
                 action.status = ActionStatus.SCHEDULED
                 pending_actions[action.action_id] = (due_tick, lifecycle_order, action)
+            elif event.event_type == "action.progressed":
+                lifecycle_seen = True
+                lifecycle_tick = max(lifecycle_tick, event.timestamp_tick)
             elif event.event_type in {
                 "action.completed", "action.cancelled", "action.interrupted", "action.failed",
             }:

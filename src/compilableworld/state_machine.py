@@ -36,6 +36,11 @@ STATE_MACHINE_TRIGGER_EVENT_FIELDS: dict[str, set[str]] = {
         "action_id", "behavior_id", "actor", "verb", "duration_ticks", "due_tick",
     },
     "action.started": {"action_id", "behavior_id", "actor", "verb", "duration_ticks"},
+    "action.progressed": {
+        "action_id", "behavior_id", "actor", "verb", "phase_id", "phase_title",
+        "phase_index", "completed_phases", "total_phases", "next_phase_id",
+        "progress_ticks", "duration_ticks",
+    },
     "action.completed": {"action_id", "behavior_id", "actor", "verb", "duration_ticks"},
     "action.cancelled": {
         "action_id", "behavior_id", "actor", "verb", "duration_ticks", "due_tick", "reason",

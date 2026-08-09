@@ -58,7 +58,7 @@
       "additionalProperties": false,
       "required": ["action_behaviors", "functions", "scenarios", "state_machines", "runtime_package", "rooms", "exits", "entities", "items", "studio_world_ir", "studio_mapping"],
       "properties": {
-        "action_behaviors": { "const": "compilableworld.schema/action-behaviors/v0.1" },
+        "action_behaviors": { "const": "compilableworld.schema/action-behaviors/v0.2" },
         "functions": { "const": "compilableworld.schema/functions/v0.1" },
         "scenarios": { "const": "compilableworld.schema/scenarios/v0.1" },
         "state_machines": { "const": "compilableworld.schema/state-machines/v0.1" },
@@ -95,7 +95,12 @@
           "type": "object",
           "additionalProperties": false,
           "properties": {
-            "action_behaviors": { "const": "compilableworld.schema/action-behaviors/v0.1" },
+            "action_behaviors": {
+              "enum": [
+                "compilableworld.schema/action-behaviors/v0.1",
+                "compilableworld.schema/action-behaviors/v0.2"
+              ]
+            },
             "rooms": { "const": "compilableworld.schema/csv/rooms/v0.1" },
             "exits": { "const": "compilableworld.schema/csv/exits/v0.1" },
             "entities": { "const": "compilableworld.schema/csv/entities/v0.1" },
@@ -161,7 +166,23 @@
               "movement.actor_moved"
             ]
           }
+        },
+        "phases": {
+          "type": "array",
+          "minItems": 2,
+          "maxItems": 64,
+          "items": { "$ref": "#/$defs/actionBehaviorPhase" }
         }
+      }
+    },
+    "actionBehaviorPhase": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["phase_id", "title", "duration_ticks"],
+      "properties": {
+        "phase_id": { "$ref": "#/$defs/id" },
+        "title": { "type": "string", "minLength": 1 },
+        "duration_ticks": { "type": "integer", "minimum": 1, "maximum": 1000000 }
       }
     },
     "stateMachineTransition": {
