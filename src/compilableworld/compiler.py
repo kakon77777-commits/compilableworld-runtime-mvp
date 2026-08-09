@@ -15,6 +15,8 @@ from .action_behavior import (
     ACTION_BEHAVIOR_CHILD_MODULES,
     ACTION_BEHAVIOR_CHILD_REQUIRED_ARGS,
     ACTION_BEHAVIOR_CHILD_TARGET_VERBS,
+    ACTION_BEHAVIOR_BRANCH_LIMIT,
+    ACTION_BEHAVIOR_BRANCH_PRIORITY_LIMIT,
     ACTION_BEHAVIOR_CONCURRENCY,
     ACTION_BEHAVIOR_CONDITION_LIMIT,
     ACTION_BEHAVIOR_CONDITION_NAMESPACES,
@@ -27,6 +29,7 @@ from .action_behavior import (
     ACTION_BEHAVIOR_FORMAT_V2,
     ACTION_BEHAVIOR_FORMAT_V3,
     ACTION_BEHAVIOR_FORMAT_V4,
+    ACTION_BEHAVIOR_FORMAT_V5,
     ACTION_BEHAVIOR_INTERRUPT_EVENTS,
     ACTION_BEHAVIOR_INTERRUPT_LIMIT,
     ACTION_BEHAVIOR_PHASE_LIMIT,
@@ -36,6 +39,7 @@ from .action_behavior import (
     ACTION_BEHAVIOR_SCHEMA_ID_V2,
     ACTION_BEHAVIOR_SCHEMA_ID_V3,
     ACTION_BEHAVIOR_SCHEMA_ID_V4,
+    ACTION_BEHAVIOR_SCHEMA_ID_V5,
 )
 from .functions import FunctionDefinitionError, FunctionRegistry, validate_function_source
 from .player_generation import template_records
@@ -279,6 +283,7 @@ def compile_world(
         ACTION_BEHAVIOR_FORMAT_V2: ACTION_BEHAVIOR_SCHEMA_ID_V2,
         ACTION_BEHAVIOR_FORMAT_V3: ACTION_BEHAVIOR_SCHEMA_ID_V3,
         ACTION_BEHAVIOR_FORMAT_V4: ACTION_BEHAVIOR_SCHEMA_ID_V4,
+        ACTION_BEHAVIOR_FORMAT_V5: ACTION_BEHAVIOR_SCHEMA_ID_V5,
         ACTION_BEHAVIOR_FORMAT: ACTION_BEHAVIOR_SCHEMA_ID,
     }.get(action_behaviors_source.get("format") if isinstance(action_behaviors_source, dict) else None)
     for source_key, declared_schema_id in declared_source_schemas.items():
@@ -423,6 +428,17 @@ def compile_world(
                     f"{child_action['step_id']} module is not in manifest.modules: "
                     f"{child_action['module_id']}"
                 )
+            for branch in phase.get("branches", []):
+                branch_child = branch.get("child_action")
+                if (
+                    isinstance(branch_child, dict)
+                    and branch_child["module_id"] not in modules
+                ):
+                    raise CompileError(
+                        f"action behavior {behavior['behavior_id']} branch "
+                        f"{branch['branch_id']} child module is not in manifest.modules: "
+                        f"{branch_child['module_id']}"
+                    )
     package = {
         "format": "compilableworld.runtime-package/v0.1",
         "manifest": {
@@ -590,6 +606,71 @@ def _validate_action_child(
     }
 
 
+def _validate_action_branch_conditions(
+    raw_conditions: Any,
+    *,
+    label: str,
+    condition_ids: set[str],
+) -> list[dict[str, Any]]:
+    if (
+        not isinstance(raw_conditions, list)
+        or len(raw_conditions) > ACTION_BEHAVIOR_CONDITION_LIMIT
+    ):
+        raise CompileError(
+            f"{label} must contain at most {ACTION_BEHAVIOR_CONDITION_LIMIT} conditions"
+        )
+    normalized: list[dict[str, Any]] = []
+    allowed = {"condition_id", "subject", "namespace", "key", "operator", "value"}
+    for index, condition in enumerate(raw_conditions):
+        condition_label = f"{label}[{index}]"
+        if not isinstance(condition, dict):
+            raise CompileError(f"{condition_label} must be an object")
+        unknown = set(condition) - allowed
+        missing = allowed - set(condition)
+        if unknown:
+            raise CompileError(
+                f"{condition_label} contains unknown fields: {sorted(unknown)}"
+            )
+        if missing:
+            raise CompileError(
+                f"{condition_label} is missing fields: {sorted(missing)}"
+            )
+        condition_id = condition["condition_id"]
+        subject = condition["subject"]
+        namespace = condition["namespace"]
+        key = condition["key"]
+        operator = condition["operator"]
+        expected = condition["value"]
+        if not isinstance(condition_id, str) or not ID_RE.match(condition_id):
+            raise CompileError(f"{condition_label}.condition_id is invalid")
+        if condition_id in condition_ids:
+            raise CompileError(f"duplicate action condition_id: {condition_id}")
+        condition_ids.add(condition_id)
+        if subject not in ACTION_BEHAVIOR_CONDITION_SUBJECTS:
+            raise CompileError(f"{condition_label}.subject is unsupported")
+        if namespace not in ACTION_BEHAVIOR_CONDITION_NAMESPACES:
+            raise CompileError(f"{condition_label}.namespace is unsupported")
+        if not isinstance(key, str) or not ID_RE.match(key):
+            raise CompileError(f"{condition_label}.key is invalid")
+        if operator not in ACTION_BEHAVIOR_CONDITION_OPERATORS:
+            raise CompileError(f"{condition_label}.operator is unsupported")
+        if not _finite_json_scalar(expected):
+            raise CompileError(f"{condition_label}.value must be a finite JSON scalar")
+        if operator in {
+            "less_than", "less_or_equal", "greater_than", "greater_or_equal",
+        } and (isinstance(expected, bool) or not isinstance(expected, (int, float))):
+            raise CompileError(f"{condition_label}.value must be numeric")
+        normalized.append({
+            "condition_id": condition_id,
+            "subject": subject,
+            "namespace": namespace,
+            "key": key,
+            "operator": operator,
+            "value": expected,
+        })
+    return normalized
+
+
 def _validate_action_behaviors(
     source: Any,
     *,
@@ -604,6 +685,7 @@ def _validate_action_behaviors(
     if source_format not in {
         ACTION_BEHAVIOR_FORMAT_V1, ACTION_BEHAVIOR_FORMAT_V2,
         ACTION_BEHAVIOR_FORMAT_V3, ACTION_BEHAVIOR_FORMAT_V4,
+        ACTION_BEHAVIOR_FORMAT_V5,
         ACTION_BEHAVIOR_FORMAT,
     }:
         raise CompileError("action_behaviors.json format 不支援")
@@ -679,6 +761,8 @@ def _validate_action_behaviors(
             phase_ids: set[str] = set()
             condition_ids: set[str] = set()
             child_step_ids: set[str] = set()
+            branch_ids: set[str] = set()
+            behavior_has_branches = False
             duration = 0
             for phase_index, phase in enumerate(raw_phases):
                 phase_label = f"{label}.phases[{phase_index}]"
@@ -688,13 +772,20 @@ def _validate_action_behaviors(
                 if source_format in {
                     ACTION_BEHAVIOR_FORMAT_V3,
                     ACTION_BEHAVIOR_FORMAT_V4,
+                    ACTION_BEHAVIOR_FORMAT_V5,
                     ACTION_BEHAVIOR_FORMAT,
                 }:
                     phase_allowed.add("when")
-                if source_format in {ACTION_BEHAVIOR_FORMAT_V4, ACTION_BEHAVIOR_FORMAT}:
+                if source_format in {
+                    ACTION_BEHAVIOR_FORMAT_V4,
+                    ACTION_BEHAVIOR_FORMAT_V5,
+                    ACTION_BEHAVIOR_FORMAT,
+                }:
                     phase_allowed.add("retry")
-                if source_format == ACTION_BEHAVIOR_FORMAT:
+                if source_format == ACTION_BEHAVIOR_FORMAT_V5:
                     phase_allowed.add("child_action")
+                if source_format == ACTION_BEHAVIOR_FORMAT:
+                    phase_allowed.add("branches")
                 phase_unknown = set(phase) - phase_allowed
                 phase_missing = phase_allowed - set(phase)
                 if phase_unknown:
@@ -728,6 +819,7 @@ def _validate_action_behaviors(
                 if source_format in {
                     ACTION_BEHAVIOR_FORMAT_V3,
                     ACTION_BEHAVIOR_FORMAT_V4,
+                    ACTION_BEHAVIOR_FORMAT_V5,
                     ACTION_BEHAVIOR_FORMAT,
                 }:
                     raw_when = phase["when"]
@@ -802,10 +894,15 @@ def _validate_action_behaviors(
                 if source_format in {
                     ACTION_BEHAVIOR_FORMAT_V3,
                     ACTION_BEHAVIOR_FORMAT_V4,
+                    ACTION_BEHAVIOR_FORMAT_V5,
                     ACTION_BEHAVIOR_FORMAT,
                 }:
                     phase_record["when"] = normalized_when
-                if source_format in {ACTION_BEHAVIOR_FORMAT_V4, ACTION_BEHAVIOR_FORMAT}:
+                if source_format in {
+                    ACTION_BEHAVIOR_FORMAT_V4,
+                    ACTION_BEHAVIOR_FORMAT_V5,
+                    ACTION_BEHAVIOR_FORMAT,
+                }:
                     retry = phase["retry"]
                     if phase_index == 0 and retry is not None:
                         raise CompileError(f"{phase_label}.retry is forbidden on the first phase")
@@ -857,7 +954,7 @@ def _validate_action_behaviors(
                         }
                     else:
                         phase_record["retry"] = None
-                if source_format == ACTION_BEHAVIOR_FORMAT:
+                if source_format == ACTION_BEHAVIOR_FORMAT_V5:
                     raw_child = phase["child_action"]
                     if phase_index == len(raw_phases) - 1 and raw_child is not None:
                         raise CompileError(
@@ -870,9 +967,111 @@ def _validate_action_behaviors(
                         entity_ids=entity_ids,
                         step_ids=child_step_ids,
                     )
+                if source_format == ACTION_BEHAVIOR_FORMAT:
+                    raw_branches = phase["branches"]
+                    if not isinstance(raw_branches, list):
+                        raise CompileError(f"{phase_label}.branches must be an array")
+                    if phase_index == len(raw_phases) - 1:
+                        if raw_branches:
+                            raise CompileError(
+                                f"{phase_label}.branches is forbidden on the final phase"
+                            )
+                        phase_record["branches"] = []
+                    elif raw_branches:
+                        behavior_has_branches = True
+                        if not 2 <= len(raw_branches) <= ACTION_BEHAVIOR_BRANCH_LIMIT:
+                            raise CompileError(
+                                f"{phase_label}.branches must contain 2 to "
+                                f"{ACTION_BEHAVIOR_BRANCH_LIMIT} alternatives"
+                            )
+                        normalized_branches: list[dict[str, Any]] = []
+                        priorities: set[int] = set()
+                        fallback_count = 0
+                        conditional_priorities: list[int] = []
+                        fallback_priority: int | None = None
+                        branch_allowed = {
+                            "branch_id", "priority", "when", "child_action",
+                        }
+                        for branch_index, branch in enumerate(raw_branches):
+                            branch_label = f"{phase_label}.branches[{branch_index}]"
+                            if not isinstance(branch, dict):
+                                raise CompileError(f"{branch_label} must be an object")
+                            unknown = set(branch) - branch_allowed
+                            missing = branch_allowed - set(branch)
+                            if unknown:
+                                raise CompileError(
+                                    f"{branch_label} contains unknown fields: {sorted(unknown)}"
+                                )
+                            if missing:
+                                raise CompileError(
+                                    f"{branch_label} is missing fields: {sorted(missing)}"
+                                )
+                            branch_id = branch["branch_id"]
+                            priority = branch["priority"]
+                            if not isinstance(branch_id, str) or not ID_RE.match(branch_id):
+                                raise CompileError(f"{branch_label}.branch_id is invalid")
+                            if branch_id in branch_ids:
+                                raise CompileError(f"duplicate action branch_id: {branch_id}")
+                            branch_ids.add(branch_id)
+                            if (
+                                isinstance(priority, bool)
+                                or not isinstance(priority, int)
+                                or not 0 <= priority <= ACTION_BEHAVIOR_BRANCH_PRIORITY_LIMIT
+                            ):
+                                raise CompileError(
+                                    f"{branch_label}.priority must be between 0 and "
+                                    f"{ACTION_BEHAVIOR_BRANCH_PRIORITY_LIMIT}"
+                                )
+                            if priority in priorities:
+                                raise CompileError(
+                                    f"{phase_label}.branches priorities must be unique"
+                                )
+                            priorities.add(priority)
+                            branch_when = _validate_action_branch_conditions(
+                                branch["when"],
+                                label=f"{branch_label}.when",
+                                condition_ids=condition_ids,
+                            )
+                            if branch_when:
+                                conditional_priorities.append(priority)
+                            else:
+                                fallback_count += 1
+                                fallback_priority = priority
+                            normalized_branches.append({
+                                "branch_id": branch_id,
+                                "priority": priority,
+                                "when": branch_when,
+                                "child_action": _validate_action_child(
+                                    branch["child_action"],
+                                    label=f"{branch_label}.child_action",
+                                    authored_verbs=authored_verbs,
+                                    entity_ids=entity_ids,
+                                    step_ids=child_step_ids,
+                                ),
+                            })
+                        if fallback_count != 1:
+                            raise CompileError(
+                                f"{phase_label}.branches requires exactly one unconditional fallback"
+                            )
+                        if conditional_priorities and fallback_priority >= min(
+                            conditional_priorities
+                        ):
+                            raise CompileError(
+                                f"{phase_label}.branches fallback must have the lowest priority"
+                            )
+                        normalized_branches.sort(
+                            key=lambda item: (-item["priority"], item["branch_id"])
+                        )
+                        phase_record["branches"] = normalized_branches
+                    else:
+                        phase_record["branches"] = []
                 phases.append(phase_record)
-            if source_format == ACTION_BEHAVIOR_FORMAT and not child_step_ids:
+            if source_format == ACTION_BEHAVIOR_FORMAT_V5 and not child_step_ids:
                 raise CompileError(f"{label}.phases must declare at least one child_action")
+            if source_format == ACTION_BEHAVIOR_FORMAT and not behavior_has_branches:
+                raise CompileError(f"{label}.phases must declare at least one branch set")
+            if source_format == ACTION_BEHAVIOR_FORMAT and not child_step_ids:
+                raise CompileError(f"{label}.branches must declare at least one child_action")
         if behavior["concurrency"] != ACTION_BEHAVIOR_CONCURRENCY:
             raise CompileError(f"{label}.concurrency 目前只支援 {ACTION_BEHAVIOR_CONCURRENCY}")
         interrupt_on = behavior["interrupt_on"]

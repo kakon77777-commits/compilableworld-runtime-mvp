@@ -1,5 +1,5 @@
 {
-  "format": "compilableworld.action-behaviors/v0.5",
+  "format": "compilableworld.action-behaviors/v0.6",
   "behaviors": [
     {
       "behavior_id": "behavior.search.careful",
@@ -12,12 +12,39 @@
           "duration_ticks": 1,
           "when": [],
           "retry": null,
-          "child_action": {
-            "step_id": "survey.room",
-            "verb": "look",
-            "target": null,
-            "args": {}
-          }
+          "branches": [
+            {
+              "branch_id": "survey.alive",
+              "priority": 100,
+              "when": [
+                {
+                  "condition_id": "survey_actor_alive",
+                  "subject": "actor",
+                  "namespace": "status",
+                  "key": "alive",
+                  "operator": "equals",
+                  "value": true
+                }
+              ],
+              "child_action": {
+                "step_id": "survey.room",
+                "verb": "look",
+                "target": null,
+                "args": {}
+              }
+            },
+            {
+              "branch_id": "survey.fallback",
+              "priority": 0,
+              "when": [],
+              "child_action": {
+                "step_id": "survey.status",
+                "verb": "status",
+                "target": null,
+                "args": {}
+              }
+            }
+          ]
         },
         {
           "phase_id": "inspect",
@@ -38,7 +65,7 @@
             "interval_ticks": 1,
             "timeout_ticks": 2
           },
-          "child_action": null
+          "branches": []
         }
       ],
       "completion_module": "exploration.core",

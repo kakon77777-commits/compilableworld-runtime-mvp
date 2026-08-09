@@ -12,12 +12,15 @@ from pathlib import Path
 from typing import Any, Callable, Iterable, Protocol
 
 from .action_behavior import (
+    ACTION_BEHAVIOR_BRANCH_LIMIT,
+    ACTION_BEHAVIOR_BRANCH_PRIORITY_LIMIT,
     ACTION_BEHAVIOR_CHILD_ARG_FIELDS,
     ACTION_BEHAVIOR_CHILD_ARG_LIMIT,
     ACTION_BEHAVIOR_CHILD_MODULES,
     ACTION_BEHAVIOR_CHILD_REQUIRED_ARGS,
     ACTION_BEHAVIOR_CHILD_TARGET_VERBS,
     ACTION_BEHAVIOR_CONDITION_NAMESPACES,
+    ACTION_BEHAVIOR_CONDITION_LIMIT,
     ACTION_BEHAVIOR_CONDITION_OPERATORS,
     ACTION_BEHAVIOR_CONDITION_SUBJECTS,
     ACTION_BEHAVIOR_DURATION_LIMIT,
@@ -45,8 +48,9 @@ class KernelTransactionError(RuntimeErrorBase):
 SNAPSHOT_FORMAT_V1 = "compilableworld.snapshot/v0.1"
 SNAPSHOT_FORMAT_V2 = "compilableworld.snapshot/v0.2"
 SNAPSHOT_FORMAT_V3 = "compilableworld.snapshot/v0.3"
-SNAPSHOT_FORMAT = "compilableworld.snapshot/v0.4"
-SNAPSHOT_VERSION = 4
+SNAPSHOT_FORMAT_V4 = "compilableworld.snapshot/v0.4"
+SNAPSHOT_FORMAT = "compilableworld.snapshot/v0.5"
+SNAPSHOT_VERSION = 5
 
 
 class ConflictError(RuntimeErrorBase):
@@ -531,7 +535,9 @@ class WorldRuntime:
             delay = duration
         if delay > 0:
             entry = self.scheduler.schedule(action, delay)
-            self.action_runtime[action.action_id] = {"retries": {}, "completed_steps": []}
+            self.action_runtime[action.action_id] = {
+                "retries": {}, "completed_steps": [], "selected_branches": {},
+            }
             event = self._action_lifecycle_event("action.scheduled", action, behavior, due_tick=entry[0])
             try:
                 self.event_log.append(event)
@@ -720,6 +726,26 @@ class WorldRuntime:
                         phase["child_action"].get("step_id")
                         if isinstance(phase.get("child_action"), dict) else None
                     ),
+                    "branches": [
+                        {
+                            "branch_id": branch["branch_id"],
+                            "priority": branch["priority"],
+                            "condition_ids": [
+                                condition["condition_id"]
+                                for condition in branch.get("when", [])
+                                if isinstance(condition, dict)
+                                and isinstance(condition.get("condition_id"), str)
+                            ],
+                            "child_step_id": (
+                                branch["child_action"].get("step_id")
+                                if isinstance(branch.get("child_action"), dict) else None
+                            ),
+                        }
+                        for branch in phase.get("branches", [])
+                        if isinstance(branch, dict)
+                        and isinstance(branch.get("branch_id"), str)
+                        and isinstance(branch.get("priority"), int)
+                    ],
                 }
                 for phase in authored_phases if isinstance(phase, dict)
             ]
@@ -735,6 +761,9 @@ class WorldRuntime:
             retry_records = self.action_runtime.get(action.action_id, {}).get("retries", {})
             completed_steps = list(
                 self.action_runtime.get(action.action_id, {}).get("completed_steps", [])
+            )
+            selected_branches = dict(
+                self.action_runtime.get(action.action_id, {}).get("selected_branches", {})
             )
             if retry_records:
                 retry_phase_id = next(iter(retry_records))
@@ -788,8 +817,19 @@ class WorldRuntime:
                 "current_phase": current_phase,
                 "active_retries": active_retries,
                 "completed_child_steps": completed_steps,
+                "selected_branches": [
+                    {"phase_id": phase_id, "branch_id": branch_id}
+                    for phase_id, branch_id in selected_branches.items()
+                ],
                 "child_step_count": sum(
-                    phase.get("child_step_id") is not None for phase in phases
+                    (
+                        phase.get("child_step_id") is not None
+                        or any(
+                            branch.get("child_step_id") is not None
+                            for branch in phase.get("branches", [])
+                        )
+                    )
+                    for phase in phases
                 ),
             })
         return records
@@ -901,14 +941,107 @@ class WorldRuntime:
             payload=payload,
         )
 
+    def _action_branch_event(
+        self,
+        parent: ActionIR,
+        behavior: dict[str, Any],
+        phase: dict[str, Any],
+        branch: dict[str, Any],
+        next_phase: dict[str, Any],
+        tick: int,
+    ) -> EventIR:
+        child = branch.get("child_action")
+        return EventIR(
+            event_type="action.branch_selected",
+            source="kernel",
+            target=parent.actor_id,
+            causation_id=parent.action_id,
+            correlation_id=parent.correlation_id,
+            timestamp_tick=tick,
+            visibility="private",
+            payload={
+                "action_id": parent.action_id,
+                "behavior_id": behavior["behavior_id"],
+                "actor": parent.actor_id,
+                "verb": parent.verb,
+                "phase_id": phase["phase_id"],
+                "branch_id": branch["branch_id"],
+                "priority": branch["priority"],
+                "next_phase_id": next_phase["phase_id"],
+                "child_step_id": (
+                    child.get("step_id") if isinstance(child, dict) else None
+                ),
+            },
+        )
+
+    def _bounded_action_branches(self, value: Any) -> list[dict[str, Any]] | None:
+        if not isinstance(value, list) or not 2 <= len(value) <= ACTION_BEHAVIOR_BRANCH_LIMIT:
+            return None
+        branch_ids: set[str] = set()
+        priorities: set[int] = set()
+        fallback_priorities: list[int] = []
+        conditional_priorities: list[int] = []
+        for branch in value:
+            if not isinstance(branch, dict) or set(branch) != {
+                "branch_id", "priority", "when", "child_action",
+            }:
+                return None
+            branch_id = branch.get("branch_id")
+            priority = branch.get("priority")
+            conditions = branch.get("when")
+            if (
+                not isinstance(branch_id, str)
+                or not branch_id
+                or branch_id in branch_ids
+                or isinstance(priority, bool)
+                or not isinstance(priority, int)
+                or not 0 <= priority <= ACTION_BEHAVIOR_BRANCH_PRIORITY_LIMIT
+                or priority in priorities
+                or not isinstance(conditions, list)
+                or len(conditions) > ACTION_BEHAVIOR_CONDITION_LIMIT
+            ):
+                return None
+            branch_ids.add(branch_id)
+            priorities.add(priority)
+            for condition in conditions:
+                if (
+                    not isinstance(condition, dict)
+                    or set(condition) != {
+                        "condition_id", "subject", "namespace", "key", "operator", "value",
+                    }
+                    or not isinstance(condition.get("condition_id"), str)
+                    or not condition["condition_id"]
+                    or condition.get("subject") not in ACTION_BEHAVIOR_CONDITION_SUBJECTS
+                    or condition.get("namespace") not in ACTION_BEHAVIOR_CONDITION_NAMESPACES
+                    or not isinstance(condition.get("key"), str)
+                    or not condition["key"]
+                    or condition.get("operator") not in ACTION_BEHAVIOR_CONDITION_OPERATORS
+                    or not self._finite_condition_scalar(condition.get("value"))
+                ):
+                    return None
+            if conditions:
+                conditional_priorities.append(priority)
+            else:
+                fallback_priorities.append(priority)
+        if (
+            len(fallback_priorities) != 1
+            or (
+                conditional_priorities
+                and fallback_priorities[0] >= min(conditional_priorities)
+            )
+            or value != sorted(value, key=lambda item: (-item["priority"], item["branch_id"]))
+        ):
+            return None
+        return value
+
     def _execute_action_child(
         self,
         parent: ActionIR,
         behavior: dict[str, Any],
         phase: dict[str, Any],
+        raw: Any,
         tick: int,
     ) -> tuple[list[EventIR], bool, str, ActionIR | None]:
-        raw = phase.get("child_action")
         if raw is None:
             return [], True, "", None
         if not isinstance(raw, dict) or set(raw) != {
@@ -1070,7 +1203,8 @@ class WorldRuntime:
                     if outcome == "retry":
                         self.scheduler.restore((event.payload["due_tick"], removed[1], action))
                         retries = self.action_runtime.setdefault(
-                            action.action_id, {"retries": {}, "completed_steps": []}
+                            action.action_id,
+                            {"retries": {}, "completed_steps": [], "selected_branches": {}},
                         )["retries"]
                         retries[event.payload["phase_id"]] = {
                             "attempts": event.payload["attempt"],
@@ -1167,15 +1301,72 @@ class WorldRuntime:
                 next_phase = phases[phase_index + 1]
                 events: list[EventIR] = []
                 child_spec = phase.get("child_action")
+                runtime_record = self.action_runtime.setdefault(
+                    action.action_id,
+                    {"retries": {}, "completed_steps": [], "selected_branches": {}},
+                )
+                raw_branches = phase.get("branches") if "branches" in phase else []
+                if raw_branches:
+                    branches = self._bounded_action_branches(raw_branches)
+                    selected_branches = runtime_record.setdefault("selected_branches", {})
+                    selected_branch_id = selected_branches.get(phase["phase_id"])
+                    selected_branch = next(
+                        (
+                            branch for branch in branches or []
+                            if branch.get("branch_id") == selected_branch_id
+                        ),
+                        None,
+                    ) if isinstance(selected_branch_id, str) else None
+                    if selected_branch_id is None and branches is not None:
+                        selected_branch = next(
+                            (
+                                branch for branch in branches
+                                if all(
+                                    self._action_condition_matches(action, condition)
+                                    for condition in branch["when"]
+                                )
+                            ),
+                            None,
+                        )
+                        if selected_branch is not None:
+                            selected_branches[phase["phase_id"]] = selected_branch["branch_id"]
+                            events.append(self._action_branch_event(
+                                action, behavior, phase, selected_branch, next_phase, tick,
+                            ))
+                    if selected_branch is None:
+                        message = (
+                            f"Action {behavior['title']} has no valid branch at phase "
+                            f"{phase['title']}"
+                        )
+                        events.append(EventIR(
+                            event_type="action.failed",
+                            source="kernel",
+                            target=action.actor_id,
+                            causation_id=action.action_id,
+                            correlation_id=action.correlation_id,
+                            timestamp_tick=tick,
+                            visibility="private",
+                            payload={
+                                "action_id": action.action_id,
+                                "behavior_id": behavior["behavior_id"],
+                                "actor": action.actor_id,
+                                "verb": action.verb,
+                                "duration_ticks": duration,
+                                "phase_id": phase["phase_id"],
+                                "failure_code": "branch_unresolved",
+                                "reason": message,
+                            },
+                        ))
+                        decisions.append((events, entry, "failed", message))
+                        continue
+                    child_spec = selected_branch.get("child_action")
                 step_id = (
                     child_spec.get("step_id") if isinstance(child_spec, dict) else None
                 )
-                completed_steps = self.action_runtime.setdefault(
-                    action.action_id, {"retries": {}, "completed_steps": []}
-                ).setdefault("completed_steps", [])
+                completed_steps = runtime_record.setdefault("completed_steps", [])
                 if isinstance(step_id, str) and step_id not in completed_steps:
                     child_events, child_ok, child_message, child = self._execute_action_child(
-                        action, behavior, phase, tick,
+                        action, behavior, phase, child_spec, tick,
                     )
                     events.extend(child_events)
                     if not child_ok:
@@ -1426,7 +1617,9 @@ class WorldRuntime:
     ) -> dict[str, dict[str, Any]]:
         if payload is None and not require_all:
             return {
-                action_id: {"retries": {}, "completed_steps": []}
+                action_id: {
+                    "retries": {}, "completed_steps": [], "selected_branches": {},
+                }
                 for action_id in queued_actions
             }
         if not isinstance(payload, dict):
@@ -1440,7 +1633,11 @@ class WorldRuntime:
         for action_id, action in queued_actions.items():
             raw_record = payload.get(action_id, {"retries": {}})
             expected_fields = (
-                {"retries", "completed_steps"} if snapshot_version >= 4 else {"retries"}
+                {"retries", "completed_steps", "selected_branches"}
+                if snapshot_version >= 5
+                else {"retries", "completed_steps"}
+                if snapshot_version >= 4
+                else {"retries"}
             )
             if not isinstance(raw_record, dict) or set(raw_record) != expected_fields:
                 raise RuntimeErrorBase("Snapshot action_runtime record is invalid")
@@ -1456,15 +1653,10 @@ class WorldRuntime:
                 for phase in phases
                 if isinstance(phase, dict) and isinstance(phase.get("phase_id"), str)
             }
-            authored_steps = [
-                phase["child_action"]["step_id"]
-                for phase in phases
-                if isinstance(phase, dict)
-                and isinstance(phase.get("child_action"), dict)
-                and isinstance(phase["child_action"].get("step_id"), str)
-            ]
             cumulative_ticks = 0
             earliest_step_ticks: dict[str, int] = {}
+            earliest_branch_ticks: dict[str, int] = {}
+            branch_phase_ids: list[str] = []
             for phase in phases:
                 if not isinstance(phase, dict):
                     continue
@@ -1478,12 +1670,90 @@ class WorldRuntime:
                     earliest_step_ticks[child_action["step_id"]] = (
                         action.proposed_at_tick + cumulative_ticks
                     )
+                raw_branches = phase.get("branches")
+                if raw_branches:
+                    branches = self._bounded_action_branches(raw_branches)
+                    phase_id = phase.get("phase_id")
+                    if branches is None or not isinstance(phase_id, str):
+                        raise RuntimeErrorBase(
+                            "Snapshot action_runtime behavior branches are invalid"
+                        )
+                    branch_phase_ids.append(phase_id)
+                    earliest_branch_ticks[phase_id] = action.proposed_at_tick + cumulative_ticks
+                    for branch in branches:
+                        branch_child = branch.get("child_action")
+                        if isinstance(branch_child, dict) and isinstance(
+                            branch_child.get("step_id"), str
+                        ):
+                            earliest_step_ticks[branch_child["step_id"]] = (
+                                action.proposed_at_tick + cumulative_ticks
+                            )
+
+            raw_selected_branches = raw_record.get("selected_branches", {})
+            if not isinstance(raw_selected_branches, dict) or any(
+                not isinstance(phase_id, str) or not isinstance(branch_id, str)
+                for phase_id, branch_id in raw_selected_branches.items()
+            ):
+                raise RuntimeErrorBase(
+                    "Snapshot action_runtime.selected_branches must be an object"
+                )
+            selected_branches: dict[str, str] = {}
+            for phase_id, branch_id in raw_selected_branches.items():
+                phase = phase_by_id.get(phase_id)
+                branches = self._bounded_action_branches(
+                    phase.get("branches") if isinstance(phase, dict) else None
+                )
+                if (
+                    branches is None
+                    or branch_id not in {branch["branch_id"] for branch in branches}
+                    or earliest_branch_ticks.get(phase_id, snapshot_tick + 1) > snapshot_tick
+                ):
+                    raise RuntimeErrorBase(
+                        "Snapshot action_runtime branch selection is invalid"
+                    )
+                selected_branches[phase_id] = branch_id
+            selected_phase_ids = [
+                phase_id for phase_id in branch_phase_ids if phase_id in selected_branches
+            ]
+            if (
+                set(selected_branches) != set(selected_phase_ids)
+                or selected_phase_ids != branch_phase_ids[:len(selected_phase_ids)]
+            ):
+                raise RuntimeErrorBase(
+                    "Snapshot action_runtime branch selections are not an authored prefix"
+                )
+
+            authored_steps: list[str] = []
+            selected_child_steps: set[str] = set()
+            for phase in phases:
+                if not isinstance(phase, dict):
+                    continue
+                child_action = phase.get("child_action")
+                if isinstance(child_action, dict) and isinstance(
+                    child_action.get("step_id"), str
+                ):
+                    authored_steps.append(child_action["step_id"])
+                branches = self._bounded_action_branches(phase.get("branches"))
+                phase_id = phase.get("phase_id")
+                selected_branch_id = selected_branches.get(phase_id)
+                if branches is not None and selected_branch_id is not None:
+                    selected_branch = next(
+                        branch for branch in branches
+                        if branch["branch_id"] == selected_branch_id
+                    )
+                    selected_child = selected_branch.get("child_action")
+                    if isinstance(selected_child, dict) and isinstance(
+                        selected_child.get("step_id"), str
+                    ):
+                        authored_steps.append(selected_child["step_id"])
+                        selected_child_steps.add(selected_child["step_id"])
             raw_completed_steps = raw_record.get("completed_steps", [])
             if (
                 not isinstance(raw_completed_steps, list)
                 or any(not isinstance(step_id, str) for step_id in raw_completed_steps)
                 or len(raw_completed_steps) != len(set(raw_completed_steps))
                 or raw_completed_steps != authored_steps[:len(raw_completed_steps)]
+                or not selected_child_steps.issubset(set(raw_completed_steps))
                 or any(
                     earliest_step_ticks.get(step_id, snapshot_tick + 1) > snapshot_tick
                     for step_id in raw_completed_steps
@@ -1543,6 +1813,7 @@ class WorldRuntime:
             validated[action_id] = {
                 "retries": retries,
                 "completed_steps": list(raw_completed_steps),
+                "selected_branches": selected_branches,
             }
         return validated
 
@@ -1567,7 +1838,8 @@ class WorldRuntime:
             "scheduler": self.scheduler.export(),
             "action_runtime": {
                 action_id: deepcopy(self.action_runtime.get(
-                    action_id, {"retries": {}, "completed_steps": []}
+                    action_id,
+                    {"retries": {}, "completed_steps": [], "selected_branches": {}},
                 ))
                 for action_id in sorted(pending_ids)
             },
@@ -1581,7 +1853,8 @@ class WorldRuntime:
             raise RuntimeErrorBase("Snapshot 根資料格式無效")
         snapshot_format = payload.get("format")
         if snapshot_format not in {
-            SNAPSHOT_FORMAT_V1, SNAPSHOT_FORMAT_V2, SNAPSHOT_FORMAT_V3, SNAPSHOT_FORMAT,
+            SNAPSHOT_FORMAT_V1, SNAPSHOT_FORMAT_V2, SNAPSHOT_FORMAT_V3,
+            SNAPSHOT_FORMAT_V4, SNAPSHOT_FORMAT,
         }:
             raise RuntimeErrorBase("不支援的 Snapshot 格式")
         try:
@@ -1594,7 +1867,8 @@ class WorldRuntime:
             SNAPSHOT_FORMAT_V1: 1,
             SNAPSHOT_FORMAT_V2: 2,
             SNAPSHOT_FORMAT_V3: 3,
-            SNAPSHOT_FORMAT: 4,
+            SNAPSHOT_FORMAT_V4: 4,
+            SNAPSHOT_FORMAT: 5,
         }[snapshot_format]
         if snapshot_version != expected_snapshot_version:
             raise RuntimeErrorBase("Snapshot format 與 snapshot_version 不一致")
@@ -1719,8 +1993,60 @@ class WorldRuntime:
                 action.status = ActionStatus.SCHEDULED
                 pending_actions[action.action_id] = (due_tick, lifecycle_order, action)
                 pending_action_runtime[action.action_id] = {
-                    "retries": {}, "completed_steps": [],
+                    "retries": {}, "completed_steps": [], "selected_branches": {},
                 }
+            elif event.event_type == "action.branch_selected":
+                action_id = event.payload.get("action_id")
+                phase_id = event.payload.get("phase_id")
+                branch_id = event.payload.get("branch_id")
+                entry = pending_actions.get(action_id) if isinstance(action_id, str) else None
+                behavior = self._action_behavior(entry[2].verb) if entry is not None else None
+                phases = behavior.get("phases", []) if isinstance(behavior, dict) else []
+                phase_index = next(
+                    (
+                        index for index, phase in enumerate(phases[:-1])
+                        if isinstance(phase, dict) and phase.get("phase_id") == phase_id
+                    ),
+                    None,
+                )
+                phase = phases[phase_index] if isinstance(phase_index, int) else None
+                branches = self._bounded_action_branches(
+                    phase.get("branches") if isinstance(phase, dict) else None
+                )
+                branch = next(
+                    (
+                        item for item in branches or []
+                        if item.get("branch_id") == branch_id
+                    ),
+                    None,
+                )
+                child = branch.get("child_action") if isinstance(branch, dict) else None
+                selections = (
+                    pending_action_runtime[action_id]["selected_branches"]
+                    if isinstance(action_id, str) and action_id in pending_action_runtime
+                    else {}
+                )
+                if (
+                    entry is None
+                    or not isinstance(phase_id, str)
+                    or not isinstance(branch_id, str)
+                    or branch is None
+                    or phase_id in selections
+                    or event.payload.get("behavior_id") != behavior.get("behavior_id")
+                    or event.payload.get("actor") != entry[2].actor_id
+                    or event.payload.get("verb") != entry[2].verb
+                    or event.payload.get("priority") != branch["priority"]
+                    or event.payload.get("next_phase_id") != phases[phase_index + 1].get("phase_id")
+                    or event.payload.get("child_step_id") != (
+                        child.get("step_id") if isinstance(child, dict) else None
+                    )
+                ):
+                    raise RuntimeErrorBase(
+                        "EventLog action.branch_selected violates authored branch order"
+                    )
+                selections[phase_id] = branch_id
+                lifecycle_seen = True
+                lifecycle_tick = max(lifecycle_tick, event.timestamp_tick)
             elif event.event_type == "action.child_completed":
                 action_id = event.payload.get("parent_action_id")
                 step_id = event.payload.get("step_id")
@@ -1730,13 +2056,29 @@ class WorldRuntime:
                         "EventLog action.child_completed references no pending parent"
                     )
                 behavior = self._action_behavior(entry[2].verb)
-                authored_steps = [
-                    phase["child_action"]["step_id"]
-                    for phase in behavior.get("phases", [])
-                    if isinstance(phase, dict)
-                    and isinstance(phase.get("child_action"), dict)
-                    and isinstance(phase["child_action"].get("step_id"), str)
-                ] if isinstance(behavior, dict) else []
+                authored_steps: list[str] = []
+                if isinstance(behavior, dict):
+                    selections = pending_action_runtime[action_id]["selected_branches"]
+                    for phase in behavior.get("phases", []):
+                        if not isinstance(phase, dict):
+                            continue
+                        child_action = phase.get("child_action")
+                        if isinstance(child_action, dict) and isinstance(
+                            child_action.get("step_id"), str
+                        ):
+                            authored_steps.append(child_action["step_id"])
+                        branches = self._bounded_action_branches(phase.get("branches"))
+                        selected_branch_id = selections.get(phase.get("phase_id"))
+                        if branches is not None and selected_branch_id is not None:
+                            selected_branch = next(
+                                branch for branch in branches
+                                if branch["branch_id"] == selected_branch_id
+                            )
+                            selected_child = selected_branch.get("child_action")
+                            if isinstance(selected_child, dict) and isinstance(
+                                selected_child.get("step_id"), str
+                            ):
+                                authored_steps.append(selected_child["step_id"])
                 completed_steps = pending_action_runtime[action_id]["completed_steps"]
                 if (
                     len(completed_steps) >= len(authored_steps)

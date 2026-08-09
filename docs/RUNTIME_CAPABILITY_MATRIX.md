@@ -4,7 +4,7 @@
 - **Baseline source:** uploaded integrated local snapshot
 - **Runtime package version:** `0.1.1`
 - **Audit date:** 2026-08-09
-- **Verification:** `PYTHONPATH=src python -m unittest discover -s tests` — **305/305 passed**
+- **Verification:** `PYTHONPATH=src python -m pytest -q` — **310/310 passed**
 - **Purpose:** authoritative inventory for PIW-MCP integration planning
 
 > Status meanings: **Implemented** = code and tests exist; **Partial** = usable core exists but stated boundary remains; **Planned** = no production implementation found in this baseline.
@@ -52,7 +52,7 @@
 | Quests: event transitions | Implemented | action failure, movement, inventory, door, dialogue, combat, magic and terminal quest chaining share one bounded trigger contract |
 | Quests: branch/failure/priority | Implemented | deterministic priority, actor causation, event matching, requirements, graph reachability, terminal-state rejection, ambiguous dispatch rejection and exactly-once terminal reward; see `docs/WORLD_STATE_MACHINE_EXECUTION_CONTRACT_zh-TW.md` |
 | Scoped StateIR: World/Region/Scene/Entity/System | Implemented | versioned authoring schema, owner validation, isolated `fsm.*` cells, deterministic EventIR transitions, visibility projection, terminal chaining, Snapshot and Replay; owner scope is not implicit geographic event routing; see `docs/SCOPED_STATE_IR_EXECUTION_CONTRACT_zh-TW.md` |
-| Action-scope state machines | Implemented | v0.5 bounded sequential phases and non-recursive primitive child Actions, fail-closed actor/target State Cell AND gates, fixed-interval retry/deadline, atomic child Module StateDelta/EventIR plus `action.child_*`/progress/retry/failure lifecycle, v0.1–v0.4 compatibility, cancellation, interruption, Snapshot v0.4 and pending Replay; arbitrary/recursive Action Graph, branching, resume, compensation, parallel/join, free backoff/jitter and arbitrary guards remain pending; see `docs/ACTION_SCOPE_BEHAVIOR_EXECUTION_CONTRACT_zh-TW.md` |
+| Action-scope state machines | Implemented | v0.6 bounded sequential phases, sticky priority-selected conditional child branches with implicit linear rejoin, non-recursive primitive child Actions, fail-closed actor/target State Cell AND gates, fixed-interval retry/deadline, atomic `action.branch_selected` plus child Module StateDelta/EventIR and parent lifecycle, v0.1–v0.5 compatibility, cancellation, interruption, Snapshot v0.5 and pending Replay; arbitrary/recursive phase graph, nested branching, resume, compensation, parallel/explicit join, free backoff/jitter and arbitrary guards remain pending; see `docs/ACTION_SCOPE_BEHAVIOR_EXECUTION_CONTRACT_zh-TW.md` |
 | Runtime-generated items/entities | Partial | generated player exists; generic runtime entity spawning remains bounded |
 
 ## 3. Narrative, dialogue and player entry

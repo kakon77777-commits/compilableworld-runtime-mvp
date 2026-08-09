@@ -8,10 +8,10 @@
 | Item | Value |
 |---|---|
 | Local integrated runtime | `0.1.1` |
-| Verified tests | `305/305` |
+| Verified tests | `310/310` |
 | GitHub `master` observed head | `72334d7` (verified 2026-08-09) |
-| GitHub integration branch before bounded-child package | `agent/m12-runtime-mcp-integration` at `bbe375d` |
-| Remote synchronization status | Bounded retry/deadline v0.4 is pushed; primitive child Action v0.5 is the current reviewed integration-branch package |
+| GitHub integration branch before conditional-branch package | `agent/m12-runtime-mcp-integration` at `66aa4ed` |
+| Remote synchronization status | Conditional child branch v0.6 is the current integration-branch package |
 | Intended next release baseline | `v0.2.0-alpha.1` or equivalent |
 
 ## Current integrated local state
@@ -284,5 +284,37 @@ out_of_scope:
   - if/else branching, OR/NOT graphs, parallel or join
   - resume, rollback or compensation transactions
   - Studio visual authoring/write-back form
+  - AI direct StateStore writes
+```
+
+### CW-M12-ACTION-008 — Bounded conditional child branch
+
+```yaml
+owner_environment: codex
+status: completed-and-deployed-on-integration-branch
+outputs:
+  - schemas/action-behaviors.v0.6.schema.json
+  - v0.1 through v0.5 authoring compatibility paths
+  - compiler-normalized unique priority and mandatory fallback branch contract
+  - sticky action.branch_selected EventIR and implicit linear rejoin
+  - Snapshot v0.5 selected branch persistence and v0.1 through v0.4 migration
+  - branch-aware Replay, scoped StateIR, Studio projection and terminal notice
+  - tests/test_action_behavior.py
+acceptance:
+  - non-final phases may declare two to sixteen compile-time-known branches
+  - each branch set has unique priorities and exactly one lowest-priority fallback
+  - highest-priority matching bounded AND branch is selected deterministically
+  - selection and successful child step remain sticky across gate retry
+  - branch execution rejoins only the next authored linear phase
+  - EventLog failure restores StateStore, tick, queue, registry, branch and child progress
+  - Snapshot rejects unknown or non-prefix selections and Replay rejects payload tampering
+  - action.branch_selected can drive scoped StateIR without direct StateStore writes
+  - 310/310 tests pass
+out_of_scope:
+  - arbitrary or recursive phase graphs, nested branches and dynamic topology
+  - OR/NOT or free-form expressions
+  - parallel child execution, explicit join, loop and history state
+  - resume, rollback or compensation transactions
+  - Studio visual behavior authoring/direct write-back
   - AI direct StateStore writes
 ```

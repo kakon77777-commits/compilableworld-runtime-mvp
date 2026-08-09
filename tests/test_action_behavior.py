@@ -36,6 +36,14 @@ class ActionBehaviorTests(unittest.TestCase):
         selected["action_behaviors"][0]["phases"][1]["retry"] = None
         return selected
 
+    @staticmethod
+    def _survey_branch(package: dict, branch_id: str = "survey.alive") -> dict:
+        return next(
+            branch
+            for branch in package["action_behaviors"][0]["phases"][0]["branches"]
+            if branch["branch_id"] == branch_id
+        )
+
     def test_compiler_packages_bounded_search_behavior(self) -> None:
         self.assertEqual(len(self.package["action_behaviors"]), 1)
         behavior = self.package["action_behaviors"][0]
@@ -53,7 +61,11 @@ class ActionBehaviorTests(unittest.TestCase):
             {"max_attempts": 2, "interval_ticks": 1, "timeout_ticks": 2},
         )
         self.assertEqual(
-            behavior["phases"][0]["child_action"],
+            [branch["branch_id"] for branch in behavior["phases"][0]["branches"]],
+            ["survey.alive", "survey.fallback"],
+        )
+        self.assertEqual(
+            behavior["phases"][0]["branches"][0]["child_action"],
             {
                 "step_id": "survey.room",
                 "verb": "look",
@@ -62,10 +74,10 @@ class ActionBehaviorTests(unittest.TestCase):
                 "args": {},
             },
         )
-        self.assertIsNone(behavior["phases"][1]["child_action"])
+        self.assertEqual(behavior["phases"][1]["branches"], [])
         self.assertEqual(
             self.package["manifest"]["source_schemas"]["action_behaviors"],
-            "compilableworld.schema/action-behaviors/v0.5",
+            "compilableworld.schema/action-behaviors/v0.6",
         )
 
     def test_search_runs_scheduled_started_completed_lifecycle(self) -> None:
@@ -88,11 +100,16 @@ class ActionBehaviorTests(unittest.TestCase):
         ]
         self.assertEqual(
             [event.event_type for event in lifecycle],
-            ["action.scheduled", "action.progressed", "action.started", "action.completed"],
+            [
+                "action.scheduled", "action.branch_selected", "action.progressed",
+                "action.started", "action.completed",
+            ],
         )
         self.assertTrue(all(event.visibility == "private" for event in lifecycle))
         self.assertTrue(all(event.causation_id == action.action_id for event in lifecycle))
-        progressed = lifecycle[1]
+        branch = lifecycle[1]
+        self.assertEqual(branch.payload["branch_id"], "survey.alive")
+        progressed = lifecycle[2]
         self.assertEqual(progressed.timestamp_tick, 1)
         self.assertEqual(progressed.payload["phase_id"], "survey")
         self.assertEqual(progressed.payload["next_phase_id"], "inspect")
@@ -106,13 +123,14 @@ class ActionBehaviorTests(unittest.TestCase):
         self.assertEqual(
             [event.event_type for event in tick_one],
             [
+                "action.branch_selected",
                 "action.child_started", "state.committed", "room.observed",
                 "action.child_completed", "action.progressed",
             ],
         )
-        child_id = tick_one[0].payload["child_action_id"]
-        self.assertEqual(tick_one[2].causation_id, child_id)
-        self.assertEqual(tick_one[3].payload["parent_action_id"], action.action_id)
+        child_id = tick_one[1].payload["child_action_id"]
+        self.assertEqual(tick_one[3].causation_id, child_id)
+        self.assertEqual(tick_one[4].payload["parent_action_id"], action.action_id)
 
     def test_manual_cancel_is_owner_scoped_and_prevents_completion(self) -> None:
         action = ActionIR("player.neo", "search")
@@ -219,6 +237,7 @@ class ActionBehaviorTests(unittest.TestCase):
             [(event.event_type, event.timestamp_tick) for event in lifecycle],
             [
                 ("action.scheduled", 0),
+                ("action.branch_selected", 1),
                 ("action.progressed", 1),
                 ("action.started", 2),
                 ("action.completed", 2),
@@ -236,6 +255,20 @@ class ActionBehaviorTests(unittest.TestCase):
         self.assertEqual(replayed.pending_actions("player.neo")[0]["action_id"], action.action_id)
         self.assertEqual(replayed.pending_actions("player.neo")[0]["current_phase"]["phase_id"], "inspect")
         self.assertEqual(replayed.advance(1)[0].status, ActionStatus.COMPLETED)
+
+    def test_replay_rejects_tampered_branch_selection(self) -> None:
+        self.runtime.submit(ActionIR("player.neo", "search"))
+        self.runtime.advance(1)
+        events = deepcopy(self.runtime.event_log.events)
+        selected = next(
+            event for event in events if event.event_type == "action.branch_selected"
+        )
+        selected.payload["priority"] = 99
+
+        replayed = WorldRuntime(self.package)
+        install_builtin_modules(replayed)
+        with self.assertRaisesRegex(RuntimeErrorBase, "authored branch order"):
+            replayed.replay(events)
 
     def test_schedule_and_cancel_log_failures_restore_scheduler_atomically(self) -> None:
         action = ActionIR("player.neo", "search")
@@ -329,10 +362,17 @@ class ActionBehaviorTests(unittest.TestCase):
         self.assertEqual(
             lifecycle,
             [
-                "action.scheduled", "action.retry_scheduled", "action.progressed",
+                "action.scheduled", "action.branch_selected", "action.retry_scheduled",
+                "action.progressed",
                 "action.started", "action.completed",
             ],
         )
+        completed_steps = [
+            event.payload["step_id"] for event in self.runtime.event_log.events
+            if event.event_type == "action.child_completed"
+            and event.payload["parent_action_id"] == action.action_id
+        ]
+        self.assertEqual(completed_steps, ["survey.status"])
         self.assertNotIn(action.action_id, self.runtime.action_runtime)
 
     def test_child_step_runs_once_across_gate_retries(self) -> None:
@@ -349,18 +389,26 @@ class ActionBehaviorTests(unittest.TestCase):
             if event.event_type == "action.child_completed"
             and event.payload["parent_action_id"] == action.action_id
         ]
-        room_observed = [
+        health_observed = [
             event for event in self.runtime.event_log.events
-            if event.event_type == "room.observed"
+            if event.event_type == "health.observed"
             and event.correlation_id == action.correlation_id
         ]
+        branch_selected = [
+            event for event in self.runtime.event_log.events
+            if event.event_type == "action.branch_selected"
+            and event.payload["action_id"] == action.action_id
+        ]
         self.assertEqual(len(child_completed), 1)
-        self.assertEqual(len(room_observed), 1)
+        self.assertEqual(len(health_observed), 1)
+        self.assertEqual(len(branch_selected), 1)
+        self.assertEqual(branch_selected[0].payload["branch_id"], "survey.fallback")
+        self.assertEqual(child_completed[0].payload["step_id"], "survey.status")
         self.assertEqual(action.status, ActionStatus.FAILED)
 
     def test_state_changing_child_commits_before_parent_progress(self) -> None:
         package = deepcopy(self.package)
-        package["action_behaviors"][0]["phases"][0]["child_action"] = {
+        self._survey_branch(package)["child_action"] = {
             "step_id": "survey.take_key",
             "verb": "take",
             "module_id": "inventory.core",
@@ -385,7 +433,7 @@ class ActionBehaviorTests(unittest.TestCase):
 
     def test_rejected_child_stops_parent_without_compensation(self) -> None:
         package = deepcopy(self.package)
-        package["action_behaviors"][0]["phases"][0]["child_action"] = {
+        self._survey_branch(package)["child_action"] = {
             "step_id": "survey.take_marker",
             "verb": "take",
             "module_id": "inventory.core",
@@ -402,8 +450,11 @@ class ActionBehaviorTests(unittest.TestCase):
         self.assertEqual(runtime.scheduler.queued, 0)
         self.assertIsNone(runtime.state.get("player.neo", "exploration", "search_count"))
         self.assertEqual(
-            [event.event_type for event in runtime.event_log.events[-3:]],
-            ["action.child_started", "action.child_failed", "action.failed"],
+            [event.event_type for event in runtime.event_log.events[-4:]],
+            [
+                "action.branch_selected", "action.child_started",
+                "action.child_failed", "action.failed",
+            ],
         )
         self.assertEqual(
             runtime.event_log.events[-1].payload["failure_code"],
@@ -412,7 +463,7 @@ class ActionBehaviorTests(unittest.TestCase):
 
     def test_child_log_failure_rolls_back_state_registry_and_progress(self) -> None:
         package = deepcopy(self.package)
-        package["action_behaviors"][0]["phases"][0]["child_action"] = {
+        self._survey_branch(package)["child_action"] = {
             "step_id": "survey.take_key",
             "verb": "take",
             "module_id": "inventory.core",
@@ -440,6 +491,10 @@ class ActionBehaviorTests(unittest.TestCase):
             runtime.action_runtime[action.action_id]["completed_steps"],
             [],
         )
+        self.assertEqual(
+            runtime.action_runtime[action.action_id]["selected_branches"],
+            {},
+        )
         self.assertEqual(runtime.advance(1), [])
         self.assertEqual(
             runtime.state.get("item.old_key", "inventory", "carrier"),
@@ -449,6 +504,13 @@ class ActionBehaviorTests(unittest.TestCase):
             len([
                 event for event in runtime.event_log.events
                 if event.event_type == "action.child_completed"
+            ]),
+            1,
+        )
+        self.assertEqual(
+            len([
+                event for event in runtime.event_log.events
+                if event.event_type == "action.branch_selected"
             ]),
             1,
         )
@@ -525,7 +587,7 @@ class ActionBehaviorTests(unittest.TestCase):
         self.assertEqual(self.runtime.scheduler.entries()[0][0], 2)
         self.assertEqual(
             self.runtime.action_runtime[action.action_id],
-            {"retries": {}, "completed_steps": []},
+            {"retries": {}, "completed_steps": [], "selected_branches": {}},
         )
         self.assertEqual(action.status, ActionStatus.SCHEDULED)
 
@@ -546,12 +608,16 @@ class ActionBehaviorTests(unittest.TestCase):
         snapshot = Path(self.temp.name) / "retry.snapshot.json"
         self.runtime.save_snapshot(snapshot)
         saved = json.loads(snapshot.read_text(encoding="utf-8"))
-        self.assertEqual(saved["format"], "compilableworld.snapshot/v0.4")
-        self.assertEqual(saved["snapshot_version"], 4)
+        self.assertEqual(saved["format"], "compilableworld.snapshot/v0.5")
+        self.assertEqual(saved["snapshot_version"], 5)
         self.assertEqual(saved["action_runtime"][action.action_id]["retries"]["inspect"]["attempts"], 1)
         self.assertEqual(
             saved["action_runtime"][action.action_id]["completed_steps"],
-            ["survey.room"],
+            ["survey.status"],
+        )
+        self.assertEqual(
+            saved["action_runtime"][action.action_id]["selected_branches"],
+            {"survey": "survey.fallback"},
         )
 
         invalid_snapshot = Path(self.temp.name) / "invalid-retry.snapshot.json"
@@ -579,7 +645,11 @@ class ActionBehaviorTests(unittest.TestCase):
         self.assertEqual(replayed.action_runtime[action.action_id]["retries"]["inspect"]["attempts"], 1)
         self.assertEqual(
             replayed.action_runtime[action.action_id]["completed_steps"],
-            ["survey.room"],
+            ["survey.status"],
+        )
+        self.assertEqual(
+            replayed.action_runtime[action.action_id]["selected_branches"],
+            {"survey": "survey.fallback"},
         )
         self.assertEqual(replayed.advance(1), [])
         self.assertEqual(replayed.advance(1)[0].status, ActionStatus.COMPLETED)
@@ -593,6 +663,7 @@ class ActionBehaviorTests(unittest.TestCase):
         payload["format"] = "compilableworld.snapshot/v0.3"
         payload["snapshot_version"] = 3
         payload["action_runtime"][action.action_id].pop("completed_steps")
+        payload["action_runtime"][action.action_id].pop("selected_branches")
         snapshot.write_text(json.dumps(payload), encoding="utf-8")
 
         restored = WorldRuntime(self.package)
@@ -600,7 +671,7 @@ class ActionBehaviorTests(unittest.TestCase):
         restored.load_snapshot(snapshot)
         self.assertEqual(
             restored.action_runtime[action.action_id],
-            {"retries": {}, "completed_steps": []},
+            {"retries": {}, "completed_steps": [], "selected_branches": {}},
         )
 
     def test_snapshot_rejects_non_prefix_child_progress(self) -> None:
@@ -614,6 +685,40 @@ class ActionBehaviorTests(unittest.TestCase):
 
         with self.assertRaisesRegex(RuntimeErrorBase, "authored prefix"):
             WorldRuntime(self.package).load_snapshot(snapshot)
+
+    def test_snapshot_rejects_unknown_selected_branch(self) -> None:
+        action = ActionIR("player.neo", "search")
+        self.runtime.submit(action)
+        self.runtime.advance(1)
+        snapshot = Path(self.temp.name) / "invalid-branch.snapshot.json"
+        self.runtime.save_snapshot(snapshot)
+        payload = json.loads(snapshot.read_text(encoding="utf-8"))
+        payload["action_runtime"][action.action_id]["selected_branches"]["survey"] = (
+            "survey.unknown"
+        )
+        snapshot.write_text(json.dumps(payload), encoding="utf-8")
+
+        with self.assertRaisesRegex(RuntimeErrorBase, "branch selection"):
+            WorldRuntime(self.package).load_snapshot(snapshot)
+
+    def test_v04_snapshot_migrates_with_empty_branch_selection(self) -> None:
+        action = ActionIR("player.neo", "search")
+        self.runtime.submit(action)
+        snapshot = Path(self.temp.name) / "v04-action.snapshot.json"
+        self.runtime.save_snapshot(snapshot)
+        payload = json.loads(snapshot.read_text(encoding="utf-8"))
+        payload["format"] = "compilableworld.snapshot/v0.4"
+        payload["snapshot_version"] = 4
+        payload["action_runtime"][action.action_id].pop("selected_branches")
+        snapshot.write_text(json.dumps(payload), encoding="utf-8")
+
+        restored = WorldRuntime(self.package)
+        install_builtin_modules(restored)
+        restored.load_snapshot(snapshot)
+        self.assertEqual(
+            restored.action_runtime[action.action_id],
+            {"retries": {}, "completed_steps": [], "selected_branches": {}},
+        )
 
     def test_v02_snapshot_migrates_pending_action_with_empty_retry_state(self) -> None:
         action = ActionIR("player.neo", "search")
@@ -632,7 +737,7 @@ class ActionBehaviorTests(unittest.TestCase):
         self.assertEqual(restored.scheduler.queued, 1)
         self.assertEqual(
             restored.action_runtime[action.action_id],
-            {"retries": {}, "completed_steps": []},
+            {"retries": {}, "completed_steps": [], "selected_branches": {}},
         )
 
     def test_target_numeric_condition_and_strict_boolean_equality(self) -> None:
@@ -736,7 +841,10 @@ class ActionBehaviorTests(unittest.TestCase):
                 event.event_type for event in self.runtime.event_log.events
                 if event.payload.get("action_id") == action.action_id
             ],
-            ["action.scheduled", "action.progressed", "action.started", "action.failed"],
+            [
+                "action.scheduled", "action.branch_selected", "action.progressed",
+                "action.started", "action.failed",
+            ],
         )
 
     def test_compiler_rejects_unbounded_or_unauthorized_behaviors(self) -> None:
@@ -792,15 +900,17 @@ class ActionBehaviorTests(unittest.TestCase):
             manifest["modules"].remove("exploration.core")
 
         def final_phase_child(source: dict, manifest: dict) -> None:
-            source["behaviors"][0]["phases"][1]["child_action"] = deepcopy(
-                source["behaviors"][0]["phases"][0]["child_action"]
+            source["behaviors"][0]["phases"][1]["branches"] = deepcopy(
+                source["behaviors"][0]["phases"][0]["branches"]
             )
 
         def recursive_child(source: dict, manifest: dict) -> None:
-            source["behaviors"][0]["phases"][0]["child_action"]["verb"] = "search"
+            source["behaviors"][0]["phases"][0]["branches"][0]["child_action"][
+                "verb"
+            ] = "search"
 
         def unknown_child_target(source: dict, manifest: dict) -> None:
-            source["behaviors"][0]["phases"][0]["child_action"] = {
+            source["behaviors"][0]["phases"][0]["branches"][0]["child_action"] = {
                 "step_id": "survey.take_missing",
                 "verb": "take",
                 "target": {"source": "entity", "entity_id": "item.missing"},
@@ -808,12 +918,34 @@ class ActionBehaviorTests(unittest.TestCase):
             }
 
         def child_args_outside_whitelist(source: dict, manifest: dict) -> None:
-            source["behaviors"][0]["phases"][0]["child_action"]["args"] = {
+            source["behaviors"][0]["phases"][0]["branches"][0]["child_action"]["args"] = {
                 "script": "do anything"
             }
 
         def missing_child_module(source: dict, manifest: dict) -> None:
             manifest["modules"].remove("room.core")
+
+        def duplicate_branch_priority(source: dict, manifest: dict) -> None:
+            source["behaviors"][0]["phases"][0]["branches"][1]["priority"] = 100
+
+        def missing_branch_fallback(source: dict, manifest: dict) -> None:
+            fallback = source["behaviors"][0]["phases"][0]["branches"][1]
+            fallback["when"] = [deepcopy(
+                source["behaviors"][0]["phases"][0]["branches"][0]["when"][0]
+            )]
+            fallback["when"][0]["condition_id"] = "survey_fallback_condition"
+
+        def branch_fallback_not_lowest(source: dict, manifest: dict) -> None:
+            source["behaviors"][0]["phases"][0]["branches"][1]["priority"] = 200
+
+        def duplicate_branch_id(source: dict, manifest: dict) -> None:
+            source["behaviors"][0]["phases"][0]["branches"][1]["branch_id"] = (
+                "survey.alive"
+            )
+
+        def branches_without_child(source: dict, manifest: dict) -> None:
+            for branch in source["behaviors"][0]["phases"][0]["branches"]:
+                branch["child_action"] = None
 
         for label, change in {
             "duration_zero": duration_zero,
@@ -835,6 +967,11 @@ class ActionBehaviorTests(unittest.TestCase):
             "unknown_child_target": unknown_child_target,
             "child_args_outside_whitelist": child_args_outside_whitelist,
             "missing_child_module": missing_child_module,
+            "duplicate_branch_priority": duplicate_branch_priority,
+            "missing_branch_fallback": missing_branch_fallback,
+            "branch_fallback_not_lowest": branch_fallback_not_lowest,
+            "duplicate_branch_id": duplicate_branch_id,
+            "branches_without_child": branches_without_child,
         }.items():
             with self.subTest(label=label), tempfile.TemporaryDirectory() as temp:
                 world = Path(temp) / "world"
@@ -886,7 +1023,7 @@ class ActionBehaviorTests(unittest.TestCase):
         )
         self.assertEqual(
             package["schema_contracts"]["action_behaviors"],
-            "compilableworld.schema/action-behaviors/v0.5",
+            "compilableworld.schema/action-behaviors/v0.6",
         )
 
     def test_v02_sequential_authoring_remains_compilable(self) -> None:
@@ -900,7 +1037,7 @@ class ActionBehaviorTests(unittest.TestCase):
             for phase in source["behaviors"][0]["phases"]:
                 phase.pop("when")
                 phase.pop("retry")
-                phase.pop("child_action")
+                phase.pop("branches")
             manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
             manifest["source_schemas"]["action_behaviors"] = (
                 "compilableworld.schema/action-behaviors/v0.2"
@@ -921,7 +1058,7 @@ class ActionBehaviorTests(unittest.TestCase):
         )
         self.assertEqual(
             package["schema_contracts"]["action_behaviors"],
-            "compilableworld.schema/action-behaviors/v0.5",
+            "compilableworld.schema/action-behaviors/v0.6",
         )
 
     def test_v03_condition_authoring_remains_compilable_without_retry(self) -> None:
@@ -934,7 +1071,7 @@ class ActionBehaviorTests(unittest.TestCase):
             source["format"] = "compilableworld.action-behaviors/v0.3"
             for phase in source["behaviors"][0]["phases"]:
                 phase.pop("retry")
-                phase.pop("child_action")
+                phase.pop("branches")
             manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
             manifest["source_schemas"]["action_behaviors"] = (
                 "compilableworld.schema/action-behaviors/v0.3"
@@ -956,7 +1093,7 @@ class ActionBehaviorTests(unittest.TestCase):
         )
         self.assertEqual(
             package["schema_contracts"]["action_behaviors"],
-            "compilableworld.schema/action-behaviors/v0.5",
+            "compilableworld.schema/action-behaviors/v0.6",
         )
 
     def test_v04_retry_authoring_remains_compilable_without_child_steps(self) -> None:
@@ -968,7 +1105,7 @@ class ActionBehaviorTests(unittest.TestCase):
             source = json.loads(source_path.read_text(encoding="utf-8"))
             source["format"] = "compilableworld.action-behaviors/v0.4"
             for phase in source["behaviors"][0]["phases"]:
-                phase.pop("child_action")
+                phase.pop("branches")
             manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
             manifest["source_schemas"]["action_behaviors"] = (
                 "compilableworld.schema/action-behaviors/v0.4"
@@ -990,7 +1127,44 @@ class ActionBehaviorTests(unittest.TestCase):
         )
         self.assertEqual(
             package["schema_contracts"]["action_behaviors"],
-            "compilableworld.schema/action-behaviors/v0.5",
+            "compilableworld.schema/action-behaviors/v0.6",
+        )
+
+    def test_v05_child_authoring_remains_compilable_without_branches(self) -> None:
+        with tempfile.TemporaryDirectory() as temp:
+            world = Path(temp) / "world"
+            shutil.copytree(GRAY_CROWN, world)
+            source_path = world / "action_behaviors.json"
+            manifest_path = world / "manifest.json"
+            source = json.loads(source_path.read_text(encoding="utf-8"))
+            source["format"] = "compilableworld.action-behaviors/v0.5"
+            for phase in source["behaviors"][0]["phases"]:
+                branches = phase.pop("branches")
+                phase["child_action"] = (
+                    deepcopy(branches[0]["child_action"]) if branches else None
+                )
+            manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+            manifest["source_schemas"]["action_behaviors"] = (
+                "compilableworld.schema/action-behaviors/v0.5"
+            )
+            source_path.write_text(
+                json.dumps(source, ensure_ascii=False, indent=2) + "\n", encoding="utf-8"
+            )
+            manifest_path.write_text(
+                json.dumps(manifest, ensure_ascii=False, indent=2) + "\n", encoding="utf-8"
+            )
+            package = json.loads(
+                compile_world(world, Path(temp) / "build").read_text(encoding="utf-8")
+            )
+
+        self.assertEqual(
+            package["action_behaviors"][0]["phases"][0]["child_action"]["step_id"],
+            "survey.room",
+        )
+        self.assertNotIn("branches", package["action_behaviors"][0]["phases"][0])
+        self.assertEqual(
+            package["schema_contracts"]["action_behaviors"],
+            "compilableworld.schema/action-behaviors/v0.6",
         )
 
     def test_action_completed_event_can_drive_scoped_state_ir(self) -> None:
@@ -1152,6 +1326,46 @@ class ActionBehaviorTests(unittest.TestCase):
                 "completed",
             )
 
+    def test_branch_selection_can_drive_scoped_state_ir(self) -> None:
+        with tempfile.TemporaryDirectory() as temp:
+            world = Path(temp) / "world"
+            shutil.copytree(GRAY_CROWN, world)
+            machines_path = world / "state_machines.json"
+            source = json.loads(machines_path.read_text(encoding="utf-8"))
+            source["state_machines"].append({
+                "state_machine_id": "fsm.world.search_branch",
+                "title": "Search branch selected",
+                "owner_scope": "world",
+                "owner_id": "world",
+                "states": ["waiting", "completed"],
+                "initial_state": "waiting",
+                "persistence": "runtime",
+                "visibility": "public",
+                "authority": "state_machine.core",
+                "transitions": [{
+                    "transition_id": "fsm.world.search_branch.alive",
+                    "from": "waiting",
+                    "on": "action.branch_selected",
+                    "to": "completed",
+                    "event_match": {
+                        "behavior_id": "behavior.search.careful",
+                        "branch_id": "survey.alive",
+                        "priority": 100,
+                    },
+                }],
+            })
+            machines_path.write_text(
+                json.dumps(source, ensure_ascii=False, indent=2) + "\n", encoding="utf-8"
+            )
+            runtime = WorldRuntime.from_package(compile_world(world, Path(temp) / "build"))
+            install_builtin_modules(runtime)
+            runtime.submit(ActionIR("player.neo", "search"))
+            runtime.advance(1)
+            self.assertEqual(
+                runtime.state.get("gray_crown_demo", "fsm", "fsm.world.search_branch"),
+                "completed",
+            )
+
     def test_studio_projects_behavior_and_live_pending_progress(self) -> None:
         static = package_overview(self.package)
         self.assertEqual(static["action_behaviors"][0]["verb"], "search")
@@ -1168,16 +1382,17 @@ class ActionBehaviorTests(unittest.TestCase):
             2,
         )
         self.assertEqual(
-            static["action_behaviors"][0]["phases"][0]["child_action"]["step_id"],
+            static["action_behaviors"][0]["phases"][0]["branches"][0]["child_action"]["step_id"],
             "survey.room",
         )
         self.assertIn("action.completed", static["events"]["declared"])
         self.assertIn("action.progressed", static["events"]["declared"])
         self.assertIn("action.retry_scheduled", static["events"]["declared"])
+        self.assertIn("action.branch_selected", static["events"]["declared"])
         self.assertIn("action.child_completed", static["events"]["declared"])
         self.assertEqual(
             static["planes"]["sms"]["snapshot_format"],
-            "compilableworld.snapshot/v0.4",
+            "compilableworld.snapshot/v0.5",
         )
         action = ActionIR("player.neo", "search")
         self.runtime.submit(action)
@@ -1198,6 +1413,10 @@ class ActionBehaviorTests(unittest.TestCase):
         self.assertEqual(
             live["pending_actions"][0]["completed_child_steps"],
             ["survey.room"],
+        )
+        self.assertEqual(
+            live["pending_actions"][0]["selected_branches"],
+            [{"phase_id": "survey", "branch_id": "survey.alive"}],
         )
         self.assertEqual(live["pending_actions"][0]["child_step_count"], 1)
 

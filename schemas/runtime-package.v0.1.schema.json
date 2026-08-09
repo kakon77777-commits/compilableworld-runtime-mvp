@@ -58,7 +58,7 @@
       "additionalProperties": false,
       "required": ["action_behaviors", "functions", "scenarios", "state_machines", "runtime_package", "rooms", "exits", "entities", "items", "studio_world_ir", "studio_mapping"],
       "properties": {
-        "action_behaviors": { "const": "compilableworld.schema/action-behaviors/v0.5" },
+        "action_behaviors": { "const": "compilableworld.schema/action-behaviors/v0.6" },
         "functions": { "const": "compilableworld.schema/functions/v0.1" },
         "scenarios": { "const": "compilableworld.schema/scenarios/v0.1" },
         "state_machines": { "const": "compilableworld.schema/state-machines/v0.1" },
@@ -101,7 +101,8 @@
                 "compilableworld.schema/action-behaviors/v0.2",
                 "compilableworld.schema/action-behaviors/v0.3",
                 "compilableworld.schema/action-behaviors/v0.4",
-                "compilableworld.schema/action-behaviors/v0.5"
+                "compilableworld.schema/action-behaviors/v0.5",
+                "compilableworld.schema/action-behaviors/v0.6"
               ]
             },
             "rooms": { "const": "compilableworld.schema/csv/rooms/v0.1" },
@@ -202,6 +203,11 @@
             { "$ref": "#/$defs/actionBehaviorChild" },
             { "type": "null" }
           ]
+        },
+        "branches": {
+          "type": "array",
+          "maxItems": 16,
+          "items": { "$ref": "#/$defs/actionBehaviorBranch" }
         }
       }
     },
@@ -252,6 +258,26 @@
           "type": "object",
           "maxProperties": 16,
           "additionalProperties": { "type": ["string", "number", "boolean", "null"] }
+        }
+      }
+    },
+    "actionBehaviorBranch": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["branch_id", "priority", "when", "child_action"],
+      "properties": {
+        "branch_id": { "$ref": "#/$defs/id" },
+        "priority": { "type": "integer", "minimum": 0, "maximum": 1000000 },
+        "when": {
+          "type": "array",
+          "maxItems": 16,
+          "items": { "$ref": "#/$defs/actionBehaviorCondition" }
+        },
+        "child_action": {
+          "oneOf": [
+            { "$ref": "#/$defs/actionBehaviorChild" },
+            { "type": "null" }
+          ]
         }
       }
     },

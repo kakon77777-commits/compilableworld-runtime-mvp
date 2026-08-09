@@ -1,0 +1,165 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "compilableworld.schema/action-behaviors/v0.6",
+  "title": "CompilableWorld bounded conditional child branches v0.6",
+  "description": "Ordered phases with sticky priority-selected child branches and an implicit linear rejoin.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["format", "behaviors"],
+  "properties": {
+    "format": { "const": "compilableworld.action-behaviors/v0.6" },
+    "behaviors": {
+      "type": "array",
+      "maxItems": 1024,
+      "items": { "$ref": "#/$defs/behavior" }
+    }
+  },
+  "$defs": {
+    "id": { "type": "string", "pattern": "^[a-z][a-z0-9_.-]*$" },
+    "finiteScalar": { "type": ["string", "number", "boolean", "null"] },
+    "condition": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["condition_id", "subject", "namespace", "key", "operator", "value"],
+      "properties": {
+        "condition_id": { "$ref": "#/$defs/id" },
+        "subject": { "enum": ["actor", "target"] },
+        "namespace": {
+          "enum": [
+            "combat", "door", "exploration", "fsm", "health", "inventory",
+            "magic", "position", "quest", "status", "wallet"
+          ]
+        },
+        "key": { "$ref": "#/$defs/id" },
+        "operator": {
+          "enum": [
+            "equals", "not_equals", "less_than", "less_or_equal",
+            "greater_than", "greater_or_equal"
+          ]
+        },
+        "value": { "$ref": "#/$defs/finiteScalar" }
+      }
+    },
+    "retry": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["max_attempts", "interval_ticks", "timeout_ticks"],
+      "properties": {
+        "max_attempts": { "type": "integer", "minimum": 1, "maximum": 16 },
+        "interval_ticks": { "type": "integer", "minimum": 1, "maximum": 1000000 },
+        "timeout_ticks": { "type": "integer", "minimum": 1, "maximum": 1000000 }
+      }
+    },
+    "childTarget": {
+      "oneOf": [
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["source"],
+          "properties": { "source": { "const": "parent_target" } }
+        },
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["source", "entity_id"],
+          "properties": {
+            "source": { "const": "entity" },
+            "entity_id": { "$ref": "#/$defs/id" }
+          }
+        },
+        { "type": "null" }
+      ]
+    },
+    "childAction": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["step_id", "verb", "target", "args"],
+      "properties": {
+        "step_id": { "$ref": "#/$defs/id" },
+        "verb": {
+          "enum": [
+            "attack", "cast", "drop", "give", "inventory", "look", "move",
+            "open", "quests", "say", "status", "take", "talk", "unlock"
+          ]
+        },
+        "target": { "$ref": "#/$defs/childTarget" },
+        "args": {
+          "type": "object",
+          "maxProperties": 16,
+          "additionalProperties": { "$ref": "#/$defs/finiteScalar" }
+        }
+      }
+    },
+    "branch": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["branch_id", "priority", "when", "child_action"],
+      "properties": {
+        "branch_id": { "$ref": "#/$defs/id" },
+        "priority": { "type": "integer", "minimum": 0, "maximum": 1000000 },
+        "when": {
+          "type": "array",
+          "maxItems": 16,
+          "items": { "$ref": "#/$defs/condition" }
+        },
+        "child_action": {
+          "oneOf": [{ "$ref": "#/$defs/childAction" }, { "type": "null" }]
+        }
+      }
+    },
+    "phase": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["phase_id", "title", "duration_ticks", "when", "retry", "branches"],
+      "properties": {
+        "phase_id": { "$ref": "#/$defs/id" },
+        "title": { "type": "string", "minLength": 1 },
+        "duration_ticks": { "type": "integer", "minimum": 1, "maximum": 1000000 },
+        "when": {
+          "type": "array",
+          "maxItems": 16,
+          "items": { "$ref": "#/$defs/condition" }
+        },
+        "retry": {
+          "oneOf": [{ "$ref": "#/$defs/retry" }, { "type": "null" }]
+        },
+        "branches": {
+          "type": "array",
+          "maxItems": 16,
+          "items": { "$ref": "#/$defs/branch" }
+        }
+      }
+    },
+    "behavior": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "behavior_id", "title", "verb", "phases",
+        "completion_module", "concurrency", "interrupt_on"
+      ],
+      "properties": {
+        "behavior_id": { "$ref": "#/$defs/id" },
+        "title": { "type": "string", "minLength": 1 },
+        "verb": { "$ref": "#/$defs/id" },
+        "phases": {
+          "type": "array",
+          "minItems": 2,
+          "maxItems": 64,
+          "items": { "$ref": "#/$defs/phase" }
+        },
+        "completion_module": { "$ref": "#/$defs/id" },
+        "concurrency": { "const": "one_per_actor" },
+        "interrupt_on": {
+          "type": "array",
+          "maxItems": 16,
+          "uniqueItems": true,
+          "items": {
+            "enum": [
+              "combat.actor_defeated", "combat.damage_applied", "movement.actor_moved"
+            ]
+          }
+        }
+      }
+    }
+  }
+}

@@ -43,6 +43,7 @@
                     "action.child_started",
                     "action.child_completed",
                     "action.child_failed",
+                    "action.branch_selected",
                     "action.scheduled",
                     "action.started",
                     "action.progressed",

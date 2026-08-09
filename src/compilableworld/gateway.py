@@ -93,8 +93,17 @@ class TerminalGateway:
         self.runtime.events.subscribe("quest.failed", self._on_quest_failed)
         self.runtime.events.subscribe("action.progressed", self._on_action_progressed)
         self.runtime.events.subscribe("action.retry_scheduled", self._on_action_retry_scheduled)
+        self.runtime.events.subscribe("action.branch_selected", self._on_action_branch_selected)
         self.runtime.events.subscribe("action.child_completed", self._on_action_child_completed)
         self.runtime.events.subscribe("action.child_failed", self._on_action_child_failed)
+
+    def _on_action_branch_selected(self, event) -> None:
+        if event.target != self.actor_id:
+            return
+        print(
+            f">> 分支已選擇：{event.payload['branch_id']} "
+            f"(phase={event.payload['phase_id']}, priority={event.payload['priority']})"
+        )
 
     def _on_action_child_completed(self, event) -> None:
         if event.target != self.actor_id:
