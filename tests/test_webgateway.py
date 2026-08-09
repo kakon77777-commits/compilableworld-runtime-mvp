@@ -68,11 +68,20 @@ class WebGatewayTests(unittest.TestCase):
         self.assertTrue(all(item["canon_status"] == "suggestion" for item in result["templates"]))
 
     def test_studio_overview_endpoint_is_read_only_runtime_projection(self) -> None:
+        self.runtime.package["studio"] = {
+            "semantic_records_are_metadata_only": True,
+            "semantic_records_format": "compilableworld.studio-semantic-records/v0.1",
+            "semantic_records": {"quest.web": {"instructions": [{"id": "instruction.web"}]}},
+        }
         result = self._get("/api/studio/overview")
         self.assertEqual(result["format"], "compilableworld.studio-overview/v0.1")
         self.assertEqual(result["planes"]["fms"]["world_id"], "mingyun_zhiyu_peace_city_slice")
         self.assertIn("quest.core", result["planes"]["tms"]["declared_modules"])
         self.assertIn("runtime", result)
+        self.assertEqual(
+            result["semantic_records"]["state_machines"]["quest.web"]["instructions"][0]["id"],
+            "instruction.web",
+        )
 
     def test_studio_function_catalog_and_preview_endpoint(self) -> None:
         catalog = self._get("/api/studio/functions")

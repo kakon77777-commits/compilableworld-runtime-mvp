@@ -3,6 +3,7 @@ from __future__ import annotations
 import csv
 import hashlib
 import json
+import math
 import re
 from collections import deque
 from pathlib import Path
@@ -11,6 +12,13 @@ from typing import Any
 from .functions import FunctionDefinitionError, FunctionRegistry, validate_function_source
 from .player_generation import template_records
 from .schema_registry import SchemaContractError, csv_schema_columns, schema_contracts
+from .state_machine import (
+    STATE_MACHINE_EVENT_MATCH_LIMIT,
+    STATE_MACHINE_PRIORITY_LIMIT,
+    STATE_MACHINE_REQUIREMENT_LIMIT,
+    STATE_MACHINE_REWARD_CURRENCY_LIMIT,
+    STATE_MACHINE_TRIGGER_EVENT_FIELDS,
+)
 
 
 ID_RE = re.compile(r"^[a-z][a-z0-9_.-]*$")
@@ -19,11 +27,7 @@ STATE_CONDITION_READ_NAMESPACES = {
     "position", "inventory", "door", "health", "status", "quest",
     "wallet", "fsm", "combat", "magic",
 }
-QUEST_TRIGGER_EVENT_FIELDS = {
-    "inventory.item_given": {"item", "actor", "recipient"},
-    "movement.actor_moved": {"from", "to", "direction"},
-    "dialogue.responded": {"speaker_id", "speaker_name", "topic", "resolved_topic", "dialogue_id", "text"},
-}
+QUEST_TRIGGER_EVENT_FIELDS = STATE_MACHINE_TRIGGER_EVENT_FIELDS
 
 
 class CompileError(ValueError):
@@ -429,7 +433,7 @@ def _validate_quests(
             if "requirements" in quest or "reward" in quest:
                 raise CompileError(f"任務 {quest_id} 使用 transitions 時，requirements 與 reward 必須寫在各 transition 內")
             compiled["transitions"] = _validate_quest_transitions(
-                quest["transitions"], label, room_ids=room_ids,
+                quest["transitions"], label, initial_state=initial_state, room_ids=room_ids,
                 item_ids=item_ids, entity_types=entity_types,
             )
         else:
@@ -448,6 +452,7 @@ def _validate_quest_transitions(
     transitions: Any,
     label: str,
     *,
+    initial_state: str,
     room_ids: set[str],
     item_ids: set[str],
     entity_types: dict[str, str],
@@ -486,8 +491,14 @@ def _validate_quest_transitions(
             raise CompileError(f"{transition_label} 不可從終態 {from_state} 再轉移")
         if not isinstance(event_type, str) or event_type not in QUEST_TRIGGER_EVENT_FIELDS:
             raise CompileError(f"{transition_label}.on 不在 QuestModule 支援的 EventIR 白名單中")
-        if isinstance(priority, bool) or not isinstance(priority, int) or priority < 0:
-            raise CompileError(f"{transition_label}.priority 必須是非負整數")
+        if (
+            isinstance(priority, bool)
+            or not isinstance(priority, int)
+            or not 0 <= priority <= STATE_MACHINE_PRIORITY_LIMIT
+        ):
+            raise CompileError(
+                f"{transition_label}.priority 必須是 0 到 {STATE_MACHINE_PRIORITY_LIMIT} 的整數"
+            )
         dispatch = (from_state, event_type, priority)
         if dispatch in dispatches:
             raise CompileError(f"{label}.transitions 的 from/on/priority 不可重複，否則會有未解決分支衝突: {dispatch}")
@@ -496,6 +507,10 @@ def _validate_quest_transitions(
         event_match = transition.get("event_match", {})
         if not isinstance(event_match, dict):
             raise CompileError(f"{transition_label}.event_match 必須是物件")
+        if len(event_match) > STATE_MACHINE_EVENT_MATCH_LIMIT:
+            raise CompileError(
+                f"{transition_label}.event_match 不可超過 {STATE_MACHINE_EVENT_MATCH_LIMIT} 個欄位"
+            )
         unknown_match = set(event_match) - QUEST_TRIGGER_EVENT_FIELDS[event_type]
         if unknown_match:
             raise CompileError(f"{transition_label}.event_match 含不屬於 {event_type} 的欄位: {sorted(unknown_match)}")
@@ -522,7 +537,38 @@ def _validate_quest_transitions(
         if reward is not None:
             normalized_transition["reward"] = _validate_reward(reward, transition_label)
         normalized.append(normalized_transition)
+    _validate_transition_reachability(initial_state, normalized, label)
     return normalized
+
+
+def _validate_transition_reachability(
+    initial_state: str, transitions: list[dict[str, Any]], label: str,
+) -> None:
+    """Reject structurally unreachable authored branches.
+
+    Conditions are intentionally ignored here: this proves graph reachability,
+    not that a particular world playthrough can satisfy every branch.  A
+    transition whose source can never be reached from the declared initial
+    state is almost always stale authoring data and must not rely on source
+    order or a future direct state mutation to become executable.
+    """
+    reachable = {initial_state}
+    changed = True
+    while changed:
+        changed = False
+        for transition in transitions:
+            if transition["from"] in reachable and transition["to"] not in reachable:
+                reachable.add(transition["to"])
+                changed = True
+    unreachable = [
+        transition["transition_id"]
+        for transition in transitions
+        if transition["from"] not in reachable
+    ]
+    if unreachable:
+        raise CompileError(
+            f"{label}.transitions 含從 initial_state 不可達的分支: {sorted(unreachable)}"
+        )
 
 
 def _validate_requirements(
@@ -535,6 +581,10 @@ def _validate_requirements(
 ) -> list[str]:
     if not isinstance(requirements, list):
         raise CompileError(f"{label}.requirements 必須是陣列")
+    if len(requirements) > STATE_MACHINE_REQUIREMENT_LIMIT:
+        raise CompileError(
+            f"{label}.requirements 不可超過 {STATE_MACHINE_REQUIREMENT_LIMIT} 條"
+        )
     normalized: list[str] = []
     for index, requirement in enumerate(requirements):
         requirement_label = f"{label}.requirements[{index}]"
@@ -557,9 +607,21 @@ def _validate_requirements(
 
 
 def _validate_reward(reward: Any, label: str) -> dict[str, Any]:
-    if not isinstance(reward, dict) or isinstance(reward.get("currency", 0), bool) or not isinstance(reward.get("currency", 0), int):
-        raise CompileError(f"{label}.reward.currency 必須是整數")
-    return dict(reward)
+    if not isinstance(reward, dict):
+        raise CompileError(f"{label}.reward 必須是物件")
+    unknown = set(reward) - {"currency"}
+    if unknown:
+        raise CompileError(f"{label}.reward 只支援 currency: {sorted(unknown)}")
+    currency = reward.get("currency", 0)
+    if (
+        isinstance(currency, bool)
+        or not isinstance(currency, int)
+        or not 0 <= currency <= STATE_MACHINE_REWARD_CURRENCY_LIMIT
+    ):
+        raise CompileError(
+            f"{label}.reward.currency 必須是 0 到 {STATE_MACHINE_REWARD_CURRENCY_LIMIT} 的整數"
+        )
+    return {"currency": currency}
 
 
 def _validate_narrative(narrative: Any, room_ids: set[str]) -> dict[str, list[dict[str, Any]]]:
@@ -826,7 +888,11 @@ def _validate_state_conditions(
 
 
 def _json_scalar(value: Any) -> bool:
-    return value is None or isinstance(value, (str, int, float, bool))
+    return (
+        value is None
+        or isinstance(value, (str, int, bool))
+        or (isinstance(value, float) and math.isfinite(value))
+    )
 
 
 def _json_value(value: Any) -> bool:

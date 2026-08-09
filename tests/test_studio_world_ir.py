@@ -26,17 +26,20 @@ class StudioWorldIRTests(unittest.TestCase):
         self.assertEqual(world_ir["source_format"], "eveglyph-world-yaml/v0.1")
         self.assertFalse(world_ir["compile_ready"])
         self.assertEqual(world_ir["summary"], {"documents": 6, "entities": 8, "state_machines": 3})
-        self.assertEqual(world_ir["diagnostics"]["errors"], 2)
+        self.assertEqual(world_ir["diagnostics"]["errors"], 4)
         self.assertEqual(
             {issue["code"] for issue in world_ir["diagnostics"]["issues"]},
-            {"missing_id", "duplicate_id", "conflicting_transition", "unreachable_state"},
+            {
+                "missing_id", "duplicate_id", "conflicting_transition",
+                "ambiguous_priority_transition", "unreachable_state",
+            },
         )
         plan = world_ir["migration_plan"]
         self.assertEqual(plan["status"], "blocked")
         self.assertEqual(plan["format"], "compilableworld.studio-migration-plan/v0.1")
         self.assertEqual(
             {decision["code"] for decision in plan["required_decisions"]},
-            {"entity_room_binding", "runtime_event_mapping", "guard_semantics"},
+            {"entity_room_binding", "runtime_event_mapping", "guard_semantics", "transition_conflict"},
         )
         innkeeper = next(
             item for item in world_ir["entities"]
@@ -102,6 +105,10 @@ class StudioWorldIRTests(unittest.TestCase):
               - from: dormant
                 to: active
                 on: dialogue.responded
+                event_match:
+                  dialogue_id: dialogue.semantic.offer
+                requirements: [reach:room.inn.main]
+                priority: 7
             """,
             "studio-draft.yaml",
         )
@@ -111,6 +118,11 @@ class StudioWorldIRTests(unittest.TestCase):
         self.assertEqual(machine["events"][0]["id"], "dialogue.responded")
         self.assertEqual(machine["instructions"][0]["examples"], ["Where did the caravan go?"])
         self.assertEqual(machine["responses"][0]["text"], "The clerk watches you carefully.")
+        self.assertEqual(machine["transitions"][0]["event_match"], {"dialogue_id": "dialogue.semantic.offer"})
+        self.assertEqual(machine["transitions"][0]["requirements"], ["reach:room.inn.main"])
+        self.assertEqual(machine["transitions"][0]["priority"], 7)
+        self.assertNotIn("event_match", machine["transitions"][0]["metadata"])
+        self.assertNotIn("requirements", machine["transitions"][0]["metadata"])
 
     def test_text_import_rejects_unbounded_random(self) -> None:
         world_ir = import_eveglyph_text(
@@ -129,6 +141,113 @@ class StudioWorldIRTests(unittest.TestCase):
             "bad-random.yaml",
         )
         self.assertIn("random_range_limit_exceeded", {item["code"] for item in world_ir["diagnostics"]["issues"]})
+
+    def test_text_import_rejects_unbounded_requirement_forms(self) -> None:
+        world_ir = import_eveglyph_text(
+            """
+            kind: state_machine
+            id: quest.bad_requirement
+            initial: dormant
+            states: [dormant, active]
+            transitions:
+              - from: dormant
+                to: active
+                on: dialogue.responded
+                requirements: [has_magic:spell.fireball]
+            """,
+            "bad-requirement.yaml",
+        )
+        self.assertIn(
+            "unsupported_requirement",
+            {item["code"] for item in world_ir["diagnostics"]["issues"]},
+        )
+
+    def test_text_import_rejects_non_scalar_event_match(self) -> None:
+        world_ir = import_eveglyph_text(
+            """
+            kind: state_machine
+            id: quest.bad_event_match
+            initial: dormant
+            states: [dormant, active]
+            transitions:
+              - from: dormant
+                to: active
+                on: dialogue.responded
+                event_match:
+                  topic: [nested]
+            """,
+            "bad-event-match.yaml",
+        )
+        self.assertIn(
+            "invalid_event_match_value",
+            {item["code"] for item in world_ir["diagnostics"]["issues"]},
+        )
+
+    def test_text_import_rejects_invalid_priority_and_nonterminal_reward(self) -> None:
+        world_ir = import_eveglyph_text(
+            """
+            kind: state_machine
+            id: quest.bad_transition_values
+            initial: dormant
+            states: [dormant, active]
+            transitions:
+              - from: dormant
+                to: active
+                on: dialogue.responded
+                priority: -1
+                reward:
+                  currency: 12
+            """,
+            "bad-transition-values.yaml",
+        )
+        codes = {item["code"] for item in world_ir["diagnostics"]["issues"]}
+        self.assertIn("invalid_priority", codes)
+        self.assertIn("reward_requires_completed", codes)
+
+    def test_text_import_fails_closed_on_ambiguous_same_priority_targets(self) -> None:
+        world_ir = import_eveglyph_text(
+            """
+            kind: state_machine
+            id: quest.ambiguous_priority
+            initial: dormant
+            states: [dormant, active, failed]
+            transitions:
+              - from: dormant
+                to: active
+                on: dialogue.responded
+                priority: 4
+              - from: dormant
+                to: failed
+                on: dialogue.responded
+                priority: 4
+            """,
+            "ambiguous-priority.yaml",
+        )
+        issues = world_ir["diagnostics"]["issues"]
+        self.assertIn("ambiguous_priority_transition", {item["code"] for item in issues})
+        self.assertEqual(world_ir["diagnostics"]["errors"], 1)
+        self.assertEqual(world_ir["migration_plan"]["required_decisions"][0]["code"], "transition_conflict")
+
+    def test_text_import_rejects_terminal_outgoing_transition(self) -> None:
+        world_ir = import_eveglyph_text(
+            """
+            kind: state_machine
+            id: quest.reopened
+            initial: completed
+            states: [completed, reopened]
+            transitions:
+              - from: completed
+                to: reopened
+                on: dialogue.responded
+            """,
+            "terminal-transition.yaml",
+        )
+
+        self.assertIn(
+            "terminal_transition",
+            {item["code"] for item in world_ir["diagnostics"]["issues"]},
+        )
+        self.assertFalse(world_ir["compile_ready"])
 
 
 if __name__ == "__main__":

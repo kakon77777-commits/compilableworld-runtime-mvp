@@ -41,8 +41,42 @@ class SchemaContractTests(unittest.TestCase):
         self.assertEqual(package["schema_contracts"], schema_contracts())
         self.assertEqual(overview["schema_contracts"], schema_contracts())
         self.assertEqual(
-            package["manifest"]["source_schemas"],
-            {key: schema_contracts()[key] for key in ("rooms", "exits", "entities", "items", "functions", "scenarios")},
+           package["manifest"]["source_schemas"],
+           {key: schema_contracts()[key] for key in ("rooms", "exits", "entities", "items", "functions", "scenarios")},
+       )
+
+    def test_studio_schemas_declare_bounded_requirements(self) -> None:
+        world_ir_schema = json.loads(
+            (ROOT / "schemas" / "studio-world-ir.v0.1.schema.json").read_text(encoding="utf-8")
+        )
+        transition = world_ir_schema["$defs"]["transition"]
+        self.assertIn("requirements", transition["required"])
+        self.assertIn("event_match", transition["required"])
+        self.assertIn("priority", transition["required"])
+        self.assertEqual(transition["properties"]["event_match"]["maxProperties"], 16)
+        self.assertEqual(transition["properties"]["requirements"]["maxItems"], 32)
+        self.assertEqual(transition["properties"]["priority"]["maximum"], 1000000)
+        self.assertIn("reach:", transition["properties"]["requirements"]["items"]["pattern"])
+        self.assertIn("deliver:", transition["properties"]["requirements"]["items"]["pattern"])
+
+        mapping_schema = json.loads(
+            (ROOT / "schemas" / "studio-mapping.v0.1.schema.json").read_text(encoding="utf-8")
+        )
+        event_mapping = mapping_schema["properties"]["state_machines"]["additionalProperties"]["properties"]["event_mappings"]["additionalProperties"]
+        self.assertEqual(event_mapping["properties"]["event_match"]["maxProperties"], 16)
+        self.assertEqual(event_mapping["properties"]["requirements"]["maxItems"], 32)
+        self.assertEqual(event_mapping["properties"]["priority"]["maximum"], 1000000)
+        self.assertIn("door.unlocked", event_mapping["properties"]["event_type"]["enum"])
+        self.assertIn("combat.actor_defeated", event_mapping["properties"]["event_type"]["enum"])
+        self.assertIn("quest.completed", event_mapping["properties"]["event_type"]["enum"])
+
+        runtime_package_schema = json.loads(
+            (ROOT / "schemas" / "runtime-package.v0.1.schema.json").read_text(encoding="utf-8")
+        )
+        studio = runtime_package_schema["properties"]["studio"]
+        self.assertEqual(
+            studio["properties"]["semantic_records_format"]["const"],
+            "compilableworld.studio-semantic-records/v0.1",
         )
 
     def test_csv_header_contract_rejects_unknown_columns(self) -> None:

@@ -3,8 +3,8 @@
 - **Document version:** v0.1
 - **Baseline source:** uploaded integrated local snapshot
 - **Runtime package version:** `0.1.1`
-- **Audit date:** 2026-07-16
-- **Verification:** `PYTHONPATH=src python -m unittest discover -s tests` — **228/228 passed**
+- **Audit date:** 2026-08-09
+- **Verification:** `PYTHONPATH=src python -m unittest discover -s tests` — **257/257 passed**
 - **Purpose:** authoritative inventory for PIW-MCP integration planning
 
 > Status meanings: **Implemented** = code and tests exist; **Partial** = usable core exists but stated boundary remains; **Planned** = no production implementation found in this baseline.
@@ -49,8 +49,8 @@
 | Ranged/mental combat paths | Planned | Formula source exists but wiring is not present |
 | Multi-exchange channeling/interruption | Planned | Explicitly deferred |
 | Quests: simple requirements/rewards | Implemented | Reach and delivery completion |
-| Quests: event transitions | Implemented | Dialogue, movement and inventory events |
-| Quests: branch/failure/priority | Implemented | deterministic priority and ambiguous dispatch rejection |
+| Quests: event transitions | Implemented | action failure, movement, inventory, door, dialogue, combat, magic and terminal quest chaining share one bounded trigger contract |
+| Quests: branch/failure/priority | Implemented | deterministic priority, actor causation, event matching, requirements, graph reachability, terminal-state rejection, ambiguous dispatch rejection and exactly-once terminal reward; see `docs/WORLD_STATE_MACHINE_EXECUTION_CONTRACT_zh-TW.md` |
 | Runtime-generated items/entities | Partial | generated player exists; generic runtime entity spawning remains bounded |
 
 ## 3. Narrative, dialogue and player entry
@@ -97,7 +97,7 @@
 | Bounded random import | Implemented | unbounded random rejected |
 | Migration plan | Implemented | explicit missing bindings and diagnostics |
 | Mapping suggestion | Implemented | preserves explicit values; unknowns remain unresolved |
-| Mapping validation | Implemented | fail-closed guard policy |
+| Mapping validation | Implemented | fail-closed World IR diagnostics, transition conflicts, and guard policy |
 | Reviewed overlay compilation | Implemented | base source is not mutated |
 | Full visual editing/write-back | Partial | current APIs are intentionally read-only/controlled |
 

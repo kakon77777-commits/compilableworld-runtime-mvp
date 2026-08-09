@@ -9,6 +9,7 @@ returns FMS/SMS/TMS/DMS-friendly projections for humans, agents, and tools.
 from __future__ import annotations
 
 from collections import Counter, defaultdict, deque
+from copy import deepcopy
 from dataclasses import asdict
 from typing import TYPE_CHECKING, Any
 
@@ -22,6 +23,7 @@ if TYPE_CHECKING:
 STUDIO_OVERVIEW_FORMAT = "compilableworld.studio-overview/v0.1"
 STUDIO_FUNCTION_CATALOG_FORMAT = "compilableworld.function-catalog/v0.1"
 STUDIO_FUNCTION_PREVIEW_FORMAT = "compilableworld.function-preview/v0.1"
+STUDIO_SEMANTIC_RECORDS_FORMAT = "compilableworld.studio-semantic-records/v0.1"
 STUDIO_SCHEMA_CATALOG_FORMAT = SCHEMA_CATALOG_FORMAT
 
 
@@ -156,6 +158,18 @@ def _function_records(package: dict[str, Any]) -> list[dict[str, Any]]:
     return sorted(records, key=lambda item: str(item.get("function_id", "")))
 
 
+def _semantic_records_overview(package: dict[str, Any]) -> dict[str, Any]:
+    """Project package semantic metadata without exposing a mutation path."""
+    studio = package.get("studio") if isinstance(package.get("studio"), dict) else {}
+    metadata_only = studio.get("semantic_records_are_metadata_only") is True
+    records = studio.get("semantic_records")
+    return {
+        "format": studio.get("semantic_records_format", STUDIO_SEMANTIC_RECORDS_FORMAT),
+        "metadata_only": metadata_only,
+        "state_machines": deepcopy(records) if metadata_only and isinstance(records, dict) else {},
+    }
+
+
 def package_overview(package: dict[str, Any]) -> dict[str, Any]:
     """Project a Runtime Package into a read-only Studio overview."""
     if not isinstance(package, dict):
@@ -222,6 +236,7 @@ def package_overview(package: dict[str, Any]) -> dict[str, Any]:
             "records": function_records,
         },
         "quests": quests,
+        "semantic_records": _semantic_records_overview(package),
         "player_templates": {
             "count": len(package.get("player_templates", []))
             if isinstance(package.get("player_templates"), list) else 0,
@@ -291,6 +306,7 @@ def runtime_overview(runtime: "WorldRuntime") -> dict[str, Any]:
 
 __all__ = [
     "STUDIO_FUNCTION_CATALOG_FORMAT", "STUDIO_FUNCTION_PREVIEW_FORMAT",
-    "STUDIO_OVERVIEW_FORMAT", "STUDIO_SCHEMA_CATALOG_FORMAT", "function_catalog",
+    "STUDIO_OVERVIEW_FORMAT", "STUDIO_SCHEMA_CATALOG_FORMAT", "STUDIO_SEMANTIC_RECORDS_FORMAT",
+    "function_catalog",
     "function_preview", "package_overview", "runtime_overview", "schema_catalog",
 ]

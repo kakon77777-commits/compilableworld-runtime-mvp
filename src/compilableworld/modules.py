@@ -12,6 +12,7 @@ from .combat_formulas import (
 from .dialogue import select_dialogue
 from .kernel import WorldRuntime
 from .models import ActionIR, EventIR, ModuleContract, StateDelta, TransitionResult
+from .state_machine import resolve_state_machine_actor
 from .narrative import render_room_description
 
 
@@ -513,8 +514,8 @@ class QuestModule(BaseModule):
     def _on_progress_event(self, event: EventIR) -> None:
         runtime = self._runtime
         assert runtime is not None
-        actor_id = event.payload.get("actor") or event.target
-        if not actor_id or not runtime.registry.contains(actor_id):
+        actor_id = resolve_state_machine_actor(runtime, event)
+        if actor_id is None:
             return
         for quest in runtime.package.get("quests", []):
             if quest.get("transitions"):

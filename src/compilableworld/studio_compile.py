@@ -21,6 +21,9 @@ from .studio_mapping import validate_studio_mapping
 
 
 STUDIO_COMPILE_FORMAT = "compilableworld.studio-compile/v0.1"
+_SEMANTIC_RECORD_KEYS = ("variables", "events", "instructions", "responses")
+_SEMANTIC_RECORD_LIMIT = 128
+_SEMANTIC_METADATA_BYTES_LIMIT = 4_000_000
 
 
 class StudioCompileError(CompileError):
@@ -74,6 +77,40 @@ def _as_component_text(value: Any) -> str:
     if isinstance(value, list):
         return "|".join(str(item) for item in value if str(item).strip())
     return str(value or "")
+
+
+def _semantic_metadata(world_ir: dict[str, Any]) -> dict[str, dict[str, list[dict[str, Any]]]]:
+    """Project authored semantic records into a bounded, non-executable package field."""
+    projected: dict[str, dict[str, list[dict[str, Any]]]] = {}
+    machines = world_ir.get("state_machines") if isinstance(world_ir.get("state_machines"), list) else []
+    for machine in machines:
+        machine_id = machine.get("state_machine_id") if isinstance(machine, dict) else None
+        if not isinstance(machine_id, str) or not machine_id.strip():
+            raise StudioCompileError("semantic records require a state machine id")
+        record_bundle: dict[str, list[dict[str, Any]]] = {}
+        for key in _SEMANTIC_RECORD_KEYS:
+            records = machine.get(key, [])
+            if records is None:
+                records = []
+            if not isinstance(records, list):
+                raise StudioCompileError(f"semantic records must be arrays: {machine_id}.{key}")
+            if len(records) > _SEMANTIC_RECORD_LIMIT:
+                raise StudioCompileError(
+                    f"semantic records exceed {_SEMANTIC_RECORD_LIMIT} entries: {machine_id}.{key}"
+                )
+            if any(not isinstance(record, dict) for record in records):
+                raise StudioCompileError(f"semantic records must contain objects: {machine_id}.{key}")
+            record_bundle[key] = [dict(record) for record in records]
+        try:
+            encoded = json.dumps(record_bundle, ensure_ascii=False, separators=(",", ":"))
+        except (TypeError, ValueError) as exc:
+            raise StudioCompileError(f"semantic records are not JSON-serializable: {machine_id}") from exc
+        if len(encoded.encode("utf-8")) > _SEMANTIC_METADATA_BYTES_LIMIT:
+            raise StudioCompileError(
+                f"semantic records exceed {_SEMANTIC_METADATA_BYTES_LIMIT} UTF-8 bytes: {machine_id}"
+            )
+        projected[machine_id] = record_bundle
+    return projected
 
 
 def _overlay_entities(root: Path, manifest: dict[str, Any], world_ir: dict[str, Any], mapping: dict[str, Any]) -> None:
@@ -172,17 +209,27 @@ def _overlay_quests(root: Path, manifest: dict[str, Any], world_ir: dict[str, An
             event_mapping = event_mappings.get(transition_id) if isinstance(transition_id, str) else None
             if not isinstance(event_mapping, dict):
                 raise StudioCompileError(f"missing event mapping: {machine_id}.{transition_id}")
-            event_match = event_mapping.get("event_match", {})
+            event_match = event_mapping.get("event_match", transition.get("event_match", {}))
             if not isinstance(event_match, dict):
                 raise StudioCompileError(f"event_match must be an object: {machine_id}.{transition_id}")
+            requirements = event_mapping.get("requirements", transition.get("requirements", []))
+            if not isinstance(requirements, list):
+                raise StudioCompileError(f"requirements must be an array: {machine_id}.{transition_id}")
+            priority = event_mapping.get("priority", transition.get("priority", 0))
+            if isinstance(priority, bool) or not isinstance(priority, int):
+                raise StudioCompileError(f"priority must be an integer: {machine_id}.{transition_id}")
+            reward = event_mapping.get("reward", transition.get("reward"))
             transitions.append({
                 "transition_id": transition_id,
                 "from": transition.get("from"),
                 "on": event_mapping.get("event_type"),
                 "to": transition.get("to"),
                 "event_match": dict(event_match),
-                "priority": 0,
+                "requirements": list(requirements),
+                "priority": priority,
             })
+            if reward is not None:
+                transitions[-1]["reward"] = reward
         quests.append({
             "quest_id": machine_id,
             "title": machine_id,
@@ -231,6 +278,7 @@ def compile_studio_world_ir(
             raise StudioCompileError("base manifest.json must be an object")
         _overlay_entities(staged, manifest, world_ir, mapping)
         _overlay_quests(staged, manifest, world_ir, mapping)
+        semantic_records = _semantic_metadata(world_ir)
         metadata = {
             "format": STUDIO_COMPILE_FORMAT,
             "world_ir_format": world_ir["format"],
@@ -239,6 +287,8 @@ def compile_studio_world_ir(
             "mapped_entities": len(world_ir.get("entities", [])),
             "mapped_state_machines": len(world_ir.get("state_machines", [])),
             "semantic_records_are_metadata_only": True,
+            "semantic_records_format": "compilableworld.studio-semantic-records/v0.1",
+            "semantic_records": semantic_records,
         }
         return compile_world(staged, output, package_metadata=metadata)
 

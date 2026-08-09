@@ -57,6 +57,37 @@ class StudioOverviewTests(unittest.TestCase):
         self.assertIn("unreachable_state", codes)
         self.assertIn("orphan", next(iter(overview["quests"]))["states"])
 
+    def test_package_overview_projects_semantic_records_as_read_only_metadata(self) -> None:
+        package = {
+            "format": "compilableworld.runtime-package/v0.1",
+            "manifest": {"world_id": "demo", "world_version": "0.1.0", "schema_version": "0.1.0", "namespace": "demo", "modules": []},
+            "world": {},
+            "entities": [],
+            "initial_state": [],
+            "quests": [],
+            "studio": {
+                "semantic_records_are_metadata_only": True,
+                "semantic_records_format": "compilableworld.studio-semantic-records/v0.1",
+                "semantic_records": {
+                    "quest.demo": {
+                        "responses": [{"id": "response.demo", "text": "A reviewed response."}],
+                    },
+                },
+            },
+        }
+        overview = package_overview(package)
+
+        self.assertTrue(overview["semantic_records"]["metadata_only"])
+        self.assertEqual(
+            overview["semantic_records"]["state_machines"]["quest.demo"]["responses"][0]["id"],
+            "response.demo",
+        )
+        overview["semantic_records"]["state_machines"]["quest.demo"]["responses"][0]["id"] = "changed"
+        self.assertEqual(
+            package["studio"]["semantic_records"]["quest.demo"]["responses"][0]["id"],
+            "response.demo",
+        )
+
     def test_runtime_overview_contains_module_contracts_and_trace_tail(self) -> None:
         with tempfile.TemporaryDirectory() as temp:
             runtime = WorldRuntime.from_package(compile_world(EXAMPLE, temp))

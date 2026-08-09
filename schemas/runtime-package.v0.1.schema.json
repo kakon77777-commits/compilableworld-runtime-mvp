@@ -24,7 +24,24 @@
     "functions": { "type": "object" },
     "player_templates": { "type": "array", "items": { "type": "object" } },
     "initial_state": { "type": "array", "items": { "$ref": "#/$defs/stateCell" } },
-    "studio": { "type": "object" },
+    "studio": {
+      "type": "object",
+      "properties": {
+        "semantic_records_are_metadata_only": { "const": true },
+        "semantic_records_format": { "const": "compilableworld.studio-semantic-records/v0.1" },
+        "semantic_records": {
+          "type": "object",
+          "additionalProperties": {
+            "type": "object",
+            "additionalProperties": {
+              "type": "array",
+              "items": { "type": "object" }
+            }
+          }
+        }
+      },
+      "additionalProperties": true
+    },
     "schema_contracts": {
       "type": "object",
       "additionalProperties": false,

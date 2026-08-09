@@ -10,16 +10,18 @@
 
 - `docs/whitepapers/09-compilableworld-studio-mssp-rdr-visual-world-ide-v0.1.md`：正式主線保存的 Studio 架構規格。
 - `examples/studio_village_inn/`：EveGlyph 可視化 World IR 的 Entity／State Machine／故意損壞案例。它是 Studio authoring seed，尚未偽裝成 Python Runtime Package。
-- `src/compilableworld/studio_world_ir.py`：零第三方依賴的 EveGlyph YAML subset importer，輸出診斷保留的共用 Studio World IR JSON，並保留 state machine 的 variables／events／instructions／responses 與受控 random 描述。
+- `src/compilableworld/studio_world_ir.py`：零第三方依賴的 EveGlyph YAML subset importer，輸出診斷保留的共用 Studio World IR JSON，並保留 state machine 的 variables／events／instructions／responses、受控 random 描述、bounded event_match 與 bounded requirements。
 - `src/compilableworld/studio.py`：零第三方依賴的 headless projection，輸出 FMS／SMS／TMS／DMS、Quest graph、靜態 diagnostics 與 Runtime Trace tail。
 - `scenarios.json`：正式的 ScenarioIR Given／When／Then 來源，編譯後由 `scenario-run` 以正常 Runtime 管線重播。
 - `functions.json`：正式的 FunctionIR 純公式來源；只允許受限 numeric expression tree，編譯後由 `runtime.functions` 評估。
 
 ## 契約
 
-`package_overview(package)` 與 `/api/studio/overview` 都是唯讀投影。它們不能修改 Authoring Layer、Compiled Package 或 Runtime State；任何世界變更仍必須回到來源資料、Compiler 與測試流程。
+`package_overview(package)` 與 `/api/studio/overview` 都是唯讀投影，並會在 `semantic_records.metadata_only: true` 下提供 `package.studio.semantic_records`。它們不能修改 Authoring Layer、Compiled Package 或 Runtime State；任何世界變更仍必須回到來源資料、Compiler 與測試流程。
 
 目前 EveGlyph 的 `kind: entity`、`kind: entity_list`、`kind: state_machine` YAML 文件仍是 Studio 編輯格式；現在已有正式的 `studio-world-ir/v0.1` migration artifact，但它刻意不直接編譯成 Runtime Package。`cw-runtime studio-import` 會保留來源文件、正規化 entities/state machines（含語義 records）、診斷與 `compile_ready: false`；房間／出口映射與 Runtime QuestModule event mapping 仍需明確 authoring diff，不能由 importer 猜測。
+
+通過 `studio-compile` 後，語義 records 只進 `package.studio.semantic_records`，並標示 `semantic_records_are_metadata_only: true`，不會被 Runtime Kernel 執行。
 
 EveGlyph 的 Studio 面板也可以把目前 draft POST 到 Runtime 的唯讀 `/api/studio/import`。這個端點只解析與產生 World IR／diagnostics／mapping suggestion，不取得 Runtime State 寫入權；Runtime URL 沿用 Runtime 面板設定，預設為 `http://127.0.0.1:8765`。EveGlyph 可編輯 mapping JSON，再 POST 到 `/api/studio/validate-mapping` 取得 `mapping_complete`／`runtime_ready` report；這仍不會直接編譯或安裝 Runtime Package。
 
@@ -57,11 +59,19 @@ PYTHONPATH=src python -m compilableworld studio-import \
 
 `--plan-out` 會另外輸出 `compilableworld.studio-migration-plan/v0.1` mapping 草稿，列出已明寫的候選位置、缺失的 room binding、未映射 EventIR、guard 語意與待填 template。`--allow-invalid` 只代表保留含故意損壞案例的診斷輸出；它不會把 invalid 文件標成可執行。未提供此旗標時，只要有 error diagnostic，CLI 會回傳失敗。這個 JSON World IR 是 Studio／Agent review 的交換物，不會寫入 Runtime State，也不會跳過既有 Compiler。
 
-填完 `studio-mapping/v0.1` 後，用 `studio-validate-mapping` 驗證所有 entity room、state-machine transition EventIR 與 guard policy 是否已明確填寫。驗證器只產生 report，不修改 World IR 或 Runtime State；`mapping_complete` 代表欄位完整，`runtime_ready` 另會排除尚未具備可執行語意的 `external_review`／`drop_with_approval` guard policy。
+填完 `studio-mapping/v0.1` 後，用 `studio-validate-mapping` 驗證所有 entity room、state-machine transition EventIR 與 guard policy 是否已明確填寫。驗證器只產生 report，不修改 World IR 或 Runtime State；若 World IR 已有 validation error，或同一 `from/on/priority` 會導向不同 target，mapping 會直接 fail-closed。`mapping_complete` 代表來源與欄位都完整，`runtime_ready` 另會排除尚未具備可執行語意的 `external_review`／`drop_with_approval` guard policy。
 
 若要先建立工作檔，可執行 `studio-suggest-mapping`。它只會沿用來源明確寫出的 room 與已知 EventIR，其餘欄位保留 `null`，並把含自由 guard 的 state machine 標成 `external_review`；這是 review draft，不是可直接執行的 Runtime mapping。
 
 只有 mapping report 的 `runtime_ready: true` 才能進入 `studio-compile`。它需要一個完整的 base Runtime Authoring Layer，將明確映射的 entities/items 與 `target: quest`、無自由 guard 的 state machines 暫存 overlay 後交給既有 Compiler；base source 不會被修改，語義 records 仍以 package metadata／review artifact 保存，不會被偷偷當成可執行 Python 規則：
+
+每個 semantic record bundle 最多 128 筆、合計最多 4,000,000 UTF-8 bytes。
+
+Studio transition 的 `requirements` 只接受 `reach:room_id` 或 `deliver:item_id:target_id`，最多 32 條；mapping 必須完整保留來源條件，最後再由正常 Compiler 驗證 room／item／target 是否存在。
+
+Studio transition 的 `priority` 限定為 0 到 1,000,000 的整數；`reward` 只允許轉入 `completed` 的 currency-only 報酬，currency 限定為 0 到 1,000,000,000。mapping 需完整保留這兩個欄位。
+
+Studio transition 的 `event_match` 最多 16 個欄位，值只能是 JSON scalar，且 mapping 後會依目標 EventIR 的 payload 白名單再次檢查；不符合時停在 review artifact，不會進入 Runtime package。
 
 ```bash
 PYTHONPATH=src python -m compilableworld studio-compile \

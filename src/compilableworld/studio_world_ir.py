@@ -17,16 +17,29 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
+from .state_machine import (
+    STATE_MACHINE_EVENT_MATCH_LIMIT,
+    STATE_MACHINE_PRIORITY_LIMIT,
+    STATE_MACHINE_REQUIREMENT_LIMIT,
+    STATE_MACHINE_REWARD_CURRENCY_LIMIT,
+    STATE_MACHINE_TRIGGER_EVENT_FIELDS,
+)
+
 
 STUDIO_WORLD_IR_FORMAT = "compilableworld.studio-world-ir/v0.1"
 EVEGLYPH_YAML_FORMAT = "eveglyph-world-yaml/v0.1"
 _KEY_RE = re.compile(r"^[A-Za-z_][A-Za-z0-9_.-]*$")
 _ID_RE = re.compile(r"^[a-z][a-z0-9_.-]*$")
-_RUNTIME_EVENT_TYPES = {"inventory.item_given", "movement.actor_moved", "dialogue.responded"}
+_RUNTIME_EVENT_TYPES = set(STATE_MACHINE_TRIGGER_EVENT_FIELDS)
 _SEMANTIC_KEYS = ("variables", "events", "instructions", "responses")
 _RANDOM_KINDS = {"boolean", "integer", "number", "choice"}
 _RANDOM_CHOICE_LIMIT = 32
 _RANDOM_RANGE_LIMIT = 1_000_000
+_REQUIREMENT_LIMIT = STATE_MACHINE_REQUIREMENT_LIMIT
+_REQUIREMENT_ARITY = {"reach": 2, "deliver": 3}
+_EVENT_MATCH_LIMIT = STATE_MACHINE_EVENT_MATCH_LIMIT
+_PRIORITY_LIMIT = STATE_MACHINE_PRIORITY_LIMIT
+_REWARD_CURRENCY_LIMIT = STATE_MACHINE_REWARD_CURRENCY_LIMIT
 
 
 class StudioWorldIRError(ValueError):
@@ -42,6 +55,111 @@ class _YamlLine:
 
 def _issue(severity: str, code: str, message: str, path: str) -> dict[str, str]:
     return {"severity": severity, "code": code, "message": message, "path": path}
+
+
+def validate_studio_requirements(
+    requirements: Any,
+    path: str,
+    issues: list[dict[str, str]],
+) -> list[str]:
+    """Validate the small executable requirement grammar shared with Runtime.
+
+    Studio may preserve rich prose and free-form guards as metadata, but a
+    requirement is executable only when it is one of the bounded v0.1 forms:
+    ``reach:room_id`` or ``deliver:item_id:target_id``.  The compiler performs
+    the later base-world reference check (room/item existence).
+    """
+    if requirements is None:
+        return []
+    if not isinstance(requirements, list):
+        issues.append(_issue("error", "invalid_requirements", "requirements must be a string array", path))
+        return []
+    if len(requirements) > _REQUIREMENT_LIMIT:
+        issues.append(_issue("error", "requirement_limit_exceeded", f"requirements exceed {_REQUIREMENT_LIMIT} entries", path))
+    normalized: list[str] = []
+    for index, requirement in enumerate(requirements[:_REQUIREMENT_LIMIT]):
+        requirement_path = f"{path}[{index}]"
+        if not isinstance(requirement, str) or not requirement.strip():
+            issues.append(_issue("error", "invalid_requirement", "requirement must be a non-empty string", requirement_path))
+            continue
+        parts = requirement.strip().split(":")
+        kind = parts[0]
+        expected_arity = _REQUIREMENT_ARITY.get(kind)
+        if expected_arity is None or len(parts) != expected_arity:
+            issues.append(_issue(
+                "error",
+                "unsupported_requirement",
+                "requirement must be reach:room_id or deliver:item_id:target_id",
+                requirement_path,
+            ))
+            continue
+        if any(not _ID_RE.fullmatch(part) for part in parts[1:]):
+            issues.append(_issue("error", "invalid_requirement_id", "requirement ids must use the Runtime id format", requirement_path))
+            continue
+        normalized.append(":".join(parts))
+    return normalized
+
+
+def validate_studio_event_match(
+    event_match: Any,
+    path: str,
+    issues: list[dict[str, str]],
+) -> dict[str, Any]:
+    """Validate a bounded EventIR payload equality filter."""
+    if not isinstance(event_match, dict):
+        issues.append(_issue("error", "invalid_event_match", "event_match must be an object", path))
+        return {}
+    if len(event_match) > _EVENT_MATCH_LIMIT:
+        issues.append(_issue("error", "event_match_limit_exceeded", f"event_match exceeds {_EVENT_MATCH_LIMIT} fields", path))
+    normalized: dict[str, Any] = {}
+    for key, value in list(event_match.items())[:_EVENT_MATCH_LIMIT]:
+        key_path = f"{path}.{key}"
+        if not isinstance(key, str) or not _KEY_RE.fullmatch(key):
+            issues.append(_issue("error", "invalid_event_match_key", "event_match keys must use the Studio key format", key_path))
+            continue
+        if isinstance(value, float) and not math.isfinite(value):
+            issues.append(_issue("error", "invalid_event_match_value", "event_match values must be finite JSON scalars", key_path))
+            continue
+        if value is not None and not isinstance(value, (str, int, float, bool)):
+            issues.append(_issue("error", "invalid_event_match_value", "event_match values must be JSON scalars", key_path))
+            continue
+        normalized[key] = value
+    return normalized
+
+
+def validate_studio_priority(
+    priority: Any,
+    path: str,
+    issues: list[dict[str, str]],
+) -> int:
+    """Validate the bounded non-negative branch priority used by QuestModule."""
+    if isinstance(priority, bool) or not isinstance(priority, int) or not 0 <= priority <= _PRIORITY_LIMIT:
+        issues.append(_issue("error", "invalid_priority", f"priority must be an integer from 0 to {_PRIORITY_LIMIT}", path))
+        return 0
+    return priority
+
+
+def validate_studio_reward(
+    reward: Any,
+    target_state: Any,
+    path: str,
+    issues: list[dict[str, str]],
+) -> dict[str, Any] | None:
+    """Validate the Studio currency-only reward contract."""
+    if reward is None:
+        return None
+    if target_state != "completed":
+        issues.append(_issue("error", "reward_requires_completed", "reward is only executable on a transition to completed", path))
+    if not isinstance(reward, dict):
+        issues.append(_issue("error", "invalid_reward", "reward must be an object", path))
+        return None
+    unknown = set(reward) - {"currency"}
+    if unknown:
+        issues.append(_issue("error", "invalid_reward_field", f"only currency reward is supported: {sorted(unknown)}", path))
+    currency = reward.get("currency", 0)
+    if isinstance(currency, bool) or not isinstance(currency, int) or not 0 <= currency <= _REWARD_CURRENCY_LIMIT:
+        issues.append(_issue("error", "invalid_reward_currency", f"reward.currency must be an integer from 0 to {_REWARD_CURRENCY_LIMIT}", f"{path}.currency"))
+    return {"currency": currency} if isinstance(currency, int) and not isinstance(currency, bool) else {}
 
 
 def _find_colon(text: str) -> int:
@@ -369,6 +487,7 @@ def _normalize_state_machine(doc: dict[str, Any], source_path: str, issues: list
 
     normalized_transitions: list[dict[str, Any]] = []
     dispatches: dict[tuple[Any, Any], int] = {}
+    priority_dispatches: set[tuple[str, str, int]] = set()
     adjacency: dict[str, set[str]] = {}
     for index, transition in enumerate(transitions):
         path = f"{source_path}.transitions[{index}]"
@@ -384,6 +503,13 @@ def _normalize_state_machine(doc: dict[str, Any], source_path: str, issues: list
             issues.append(_issue("error", "transition_to_undefined", f"to state is undefined: {to_state}", f"{path}.to"))
         if not event:
             issues.append(_issue("error", "missing_transition_event", "transition is missing on", f"{path}.on"))
+        if from_state in {"completed", "failed"}:
+            issues.append(_issue(
+                "error",
+                "terminal_transition",
+                f"terminal state cannot have an outgoing transition: {from_state}",
+                f"{path}.from",
+            ))
         dispatch = (from_state, event)
         if from_state and event:
             if dispatch in dispatches:
@@ -398,15 +524,40 @@ def _normalize_state_machine(doc: dict[str, Any], source_path: str, issues: list
         if not isinstance(guards, list) or any(not isinstance(guard, str) for guard in guards):
             issues.append(_issue("error", "invalid_guards", "guards must be a string array", f"{path}.guards"))
             guards = []
-        metadata = {key: value for key, value in transition.items() if key not in {"from", "to", "on", "guards", "transition_id"}}
+        event_match = validate_studio_event_match(transition.get("event_match", {}), f"{path}.event_match", issues)
+        requirements = validate_studio_requirements(transition.get("requirements", []), f"{path}.requirements", issues)
+        priority = validate_studio_priority(transition.get("priority", 0), f"{path}.priority", issues)
+        reward = validate_studio_reward(transition.get("reward"), to_state, f"{path}.reward", issues)
+        if (
+            isinstance(from_state, str)
+            and isinstance(event, str)
+            and isinstance(to_state, str)
+            and isinstance(priority, int)
+            and not isinstance(priority, bool)
+        ):
+            priority_key = (from_state, event, priority)
+            if priority_key in priority_dispatches:
+                issues.append(_issue(
+                    "error",
+                    "ambiguous_priority_transition",
+                    "same from/on/priority cannot be repeated; assign distinct priorities",
+                    path,
+                ))
+            priority_dispatches.add(priority_key)
+        metadata = {key: value for key, value in transition.items() if key not in {"from", "to", "on", "guards", "event_match", "requirements", "priority", "reward", "transition_id"}}
         normalized_transitions.append({
             "transition_id": transition.get("transition_id") or f"{machine_id}.transition.{index + 1}",
             "from": from_state,
             "to": to_state,
             "on": event,
             "guards": list(guards),
+            "event_match": event_match,
+            "requirements": requirements,
+            "priority": priority,
             "metadata": metadata,
         })
+        if reward is not None:
+            normalized_transitions[-1]["reward"] = reward
 
     reachable: set[str] = set()
     if isinstance(initial, str) and initial in states:
@@ -420,7 +571,7 @@ def _normalize_state_machine(doc: dict[str, Any], source_path: str, issues: list
                     queue.append(target)
     for state in states:
         if state not in reachable:
-            issues.append(_issue("warning", "unreachable_state", f"state is unreachable: {state}", f"{source_path}.states.{state}"))
+            issues.append(_issue("error", "unreachable_state", f"state is unreachable: {state}", f"{source_path}.states.{state}"))
     semantic = _normalize_semantic_records(doc, source_path, issues)
     return {
         "state_machine_id": machine_id,
@@ -478,8 +629,10 @@ def _migration_plan(entities: list[dict[str, Any]], state_machines: list[dict[st
     state_machine_bindings: list[dict[str, Any]] = []
     unmapped_events: list[str] = []
     guarded_transitions: list[str] = []
+    ambiguous_transitions: list[str] = []
     for machine in state_machines:
         transitions: list[dict[str, Any]] = []
+        priority_dispatches: set[tuple[str, str, int]] = set()
         for transition in machine.get("transitions", []):
             source_event = transition.get("on")
             event_status = "candidate" if source_event in _RUNTIME_EVENT_TYPES else "needs_review"
@@ -488,11 +641,26 @@ def _migration_plan(entities: list[dict[str, Any]], state_machines: list[dict[st
             guards = transition.get("guards", [])
             if guards:
                 guarded_transitions.append(f"{machine.get('state_machine_id')}::{transition.get('transition_id')}")
+            from_state = transition.get("from")
+            source_event = transition.get("on")
+            to_state = transition.get("to")
+            priority = transition.get("priority", 0)
+            if all(isinstance(value, str) for value in (from_state, source_event, to_state)) and isinstance(priority, int) and not isinstance(priority, bool):
+                priority_key = (from_state, source_event, priority)
+                if priority_key in priority_dispatches:
+                    ambiguous_transitions.append(f"{machine.get('state_machine_id')}::{transition.get('transition_id')}")
+                priority_dispatches.add(priority_key)
             transitions.append({
                 "transition_id": transition.get("transition_id"),
+                "from": transition.get("from"),
+                "to": transition.get("to"),
                 "source_event": source_event,
                 "proposed_runtime_event": source_event if event_status == "candidate" else None,
                 "guards": list(guards),
+                "event_match": dict(transition.get("event_match", {})),
+                "requirements": list(transition.get("requirements", [])),
+                "priority": transition.get("priority", 0),
+                "reward": transition.get("reward"),
                 "status": "needs_review" if event_status == "needs_review" or guards else "candidate",
             })
         state_machine_bindings.append({
@@ -525,6 +693,13 @@ def _migration_plan(entities: list[dict[str, Any]], state_machines: list[dict[st
             "binding_keys": guarded_transitions,
             "message": "Declare how each guard reads Runtime State; free-form guard strings are not compiled as Python.",
         })
+    if ambiguous_transitions:
+        required_decisions.append({
+            "code": "transition_conflict",
+            "count": len(ambiguous_transitions),
+            "binding_keys": ambiguous_transitions,
+            "message": "Assign distinct priorities to transitions sharing the same from/on dispatch before Runtime compilation.",
+        })
     return {
         "format": "compilableworld.studio-migration-plan/v0.1",
         "status": "blocked" if required_decisions else "reviewable",
@@ -541,7 +716,13 @@ def _migration_plan(entities: list[dict[str, Any]], state_machines: list[dict[st
             "state_machines": {
                 binding["state_machine_id"]: {
                     "event_mappings": {
-                        transition["transition_id"]: {"event_type": transition["proposed_runtime_event"]}
+                        transition["transition_id"]: {
+                            "event_type": transition["proposed_runtime_event"],
+                            "event_match": dict(transition.get("event_match", {})),
+                            "requirements": list(transition.get("requirements", [])),
+                            "priority": transition.get("priority", 0),
+                            **({"reward": transition["reward"]} if transition.get("reward") is not None else {}),
+                        }
                         for transition in binding["transitions"]
                     },
                     "guard_policy": None,

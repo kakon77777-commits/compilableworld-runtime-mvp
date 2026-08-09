@@ -37,7 +37,7 @@ PYTHONPATH=src python3 -m compilableworld serve build/mingyun_zhiyu_peace_city/w
 PYTHONPATH=src python3 -m compilableworld studio-overview build/mingyun_zhiyu_peace_city/world.package.json
 ```
 
-Web Gateway 對應 `/api/studio/overview`。它只投影 FMS 世界元資料、TMS 模組、Entity／State／Quest 圖、DMS 靜態診斷與最近 Runtime Trace，不提供任何直接寫入 StateStore 的路徑。
+Web Gateway 對應 `/api/studio/overview`。它只投影 FMS 世界元資料、TMS 模組、Entity／State／Quest 圖、semantic records metadata、DMS 靜態診斷與最近 Runtime Trace，不提供任何直接寫入 StateStore 的路徑。
 
 ## 玩家角色生成
 
@@ -107,8 +107,8 @@ Function Registry 同時提供有上限的 LRU memoization（預設 2048 筆）�
 - `runtime-package.v0.1.schema.json`：Compiler 輸出的 Runtime Package。
 - `rooms.v0.1.csv.schema.json`、`exits.v0.1.csv.schema.json`：地圖房間與出口表格。
 - `entities.v0.1.csv.schema.json`、`items.v0.1.csv.schema.json`：實體與物品表格。
-- `studio-world-ir.v0.1.schema.json`：EveGlyph YAML 到共用 Studio World IR 的 migration。
-- `studio-mapping.v0.1.schema.json`：人工確認 World IR 到 Runtime 房間、表格、EventIR 與 guard 的映射。
+- `studio-world-ir.v0.1.schema.json`：EveGlyph YAML 到共用 Studio World IR 的 migration，含 bounded event_match 與 requirements。
+- `studio-mapping.v0.1.schema.json`：人工確認 World IR 到 Runtime 房間、表格、EventIR、priority、reward、requirements 與 guard 的映射。
 
 Compiler 會確認這些契約檔的 `$id`，並檢查 CSV header 是否符合必要／可選欄位，再把契約 ID 寫入 `world.package.json` 的 `schema_contracts` 與 manifest 的 `source_schemas`。這些 Schema 負責結構、欄位與版本；重複 ID、跨檔案引用、狀態可達性與事件 payload 等語意規則仍由 Compiler 驗證。Studio 可透過唯讀的 `GET /api/studio/schemas` 取得 catalog，讓 EveGlyph 不需要猜測檔名或版本。
 
@@ -124,7 +124,7 @@ PYTHONPATH=src python -m compilableworld studio-import \
   --allow-invalid
 ```
 
-輸出格式是 `compilableworld.studio-world-ir/v0.1`，會正規化 Entity／State Machine 並保留來源路徑與 validator diagnostics。`migration-plan.json` 會列出可沿用的明確 `location`、缺失的 room binding、未映射 EventIR、guard 語意與空白 mapping template。由於 EveGlyph seed 不一定提供房間位置、出口拓撲或 Runtime QuestModule event mapping，輸出明確標示 `compile_ready: false`；它是共用 migration artifact，不是偷偷生成的 Runtime Package。
+輸出格式是 `compilableworld.studio-world-ir/v0.1`，會正規化 Entity／State Machine 並保留來源路徑、validator diagnostics 與 bounded requirements。`migration-plan.json` 會列出可沿用的明確 `location`、缺失的 room binding、未映射 EventIR、guard 語意與空白 mapping template。由於 EveGlyph seed 不一定提供房間位置、出口拓撲或 Runtime QuestModule event mapping，輸出明確標示 `compile_ready: false`；它是共用 migration artifact，不是偷偷生成的 Runtime Package。
 
 也可以先產生一份只含明確候選、未知欄位保留 `null` 的 mapping 草稿：
 
@@ -144,7 +144,7 @@ PYTHONPATH=src python -m compilableworld studio-validate-mapping \
   build/studio_village_inn/studio-mapping.json
 ```
 
-驗證只回報 `mapping_complete`／`runtime_ready` 與診斷，不會修改 World IR 或 Runtime State；含 `external_review` 等尚未具備 Runtime 語意的 guard policy 時，mapping 可以完整，但 `runtime_ready` 仍會是 `false`。
+驗證只回報 `mapping_complete`／`runtime_ready` 與診斷，不會修改 World IR 或 Runtime State；World IR 本身有 validation error、同一 `from/on/priority` 選出不同 target，或含 `external_review` 等尚未具備 Runtime 語意的 guard policy 時，流程會 fail-closed。只有欄位完整且沒有來源錯誤時，`mapping_complete` 才會是 `true`；guard policy 仍會讓 `runtime_ready` 保持 `false`。
 
 ## 範例世界
 
@@ -216,7 +216,7 @@ Python 版本用於凍結語言無關契約與快速驗證。後續 Rust 重寫�
 
 ### 可編譯任務轉移
 
-原有任務可維持簡單的 `requirements`／`reward` 格式；新的多階段任務則改用 `transitions`，每條邊含 `transition_id`、`from`、`on`、`to`，並可附加 `event_match`、`requirements`、完成報酬與非負 `priority`。目前允許的觸發 EventIR 是 `inventory.item_given`、`movement.actor_moved`、`dialogue.responded`，其 payload 欄位會在編譯期驗證。
+原有任務可維持簡單的 `requirements`／`reward` 格式；新的多階段任務則改用 `transitions`，每條邊含 `transition_id`、`from`、`on`、`to`，並可附加 `event_match`、`requirements`、完成報酬與 bounded `priority`。觸發白名單已涵蓋 action failure、移動、物品、門、對話、戰鬥、魔法與 terminal quest chaining；每種 EventIR 可比對的 payload 欄位都由共用契約限制，並在 Studio mapping 與正常 Compiler 兩層 fail-closed 驗證。完整順序與邊界見 `docs/WORLD_STATE_MACHINE_EXECUTION_CONTRACT_zh-TW.md`。
 
 Runtime 收到事件後只會為該 actor 的目前狀態選邊；較高 `priority` 勝出，同一 `from/on/priority` 則在編譯期直接拒絕，避免用作者列表順序偷偷裁決衝突。進入 `completed` 會發出 `quest.completed`，進入 `failed` 會發出 `quest.failed`，每次轉移都會先發出可追溯的 `quest.transitioned`。這些寫入都走 `WorldRuntime.commit_reaction()` 的原子 Delta+Event 路徑。
 
