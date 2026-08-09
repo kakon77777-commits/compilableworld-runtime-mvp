@@ -80,6 +80,7 @@ Contains or references:
 - world metadata
 - entities, rooms, exits, items
 - quests and transitions
+- World/Region/Scene/Entity/System scoped StateIR
 - dialogues and narrative overlays
 - Function IR
 - Scenario IR
@@ -97,8 +98,9 @@ Checked-in schemas:
 5. `exits.v0.1.csv.schema.json`
 6. `entities.v0.1.csv.schema.json`
 7. `items.v0.1.csv.schema.json`
-8. `studio-world-ir.v0.1.schema.json`
-9. `studio-mapping.v0.1.schema.json`
+8. `state-machines.v0.1.schema.json`
+9. `studio-world-ir.v0.1.schema.json`
+10. `studio-mapping.v0.1.schema.json`
 
 Compiler-owned semantic validation remains authoritative for:
 

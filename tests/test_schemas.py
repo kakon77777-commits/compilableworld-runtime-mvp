@@ -24,7 +24,10 @@ class SchemaContractTests(unittest.TestCase):
         self.assertTrue(catalog["read_only"])
         self.assertEqual(
             set(contracts),
-            {"functions", "scenarios", "runtime_package", "rooms", "exits", "entities", "items", "studio_world_ir", "studio_mapping"},
+            {
+                "functions", "scenarios", "runtime_package", "rooms", "exits",
+                "entities", "items", "state_machines", "studio_world_ir", "studio_mapping",
+            },
         )
         for record in catalog["schemas"]:
             document = json.loads((ROOT / "schemas" / record["filename"]).read_text(encoding="utf-8"))
@@ -69,6 +72,22 @@ class SchemaContractTests(unittest.TestCase):
         self.assertIn("door.unlocked", event_mapping["properties"]["event_type"]["enum"])
         self.assertIn("combat.actor_defeated", event_mapping["properties"]["event_type"]["enum"])
         self.assertIn("quest.completed", event_mapping["properties"]["event_type"]["enum"])
+        self.assertIn("fsm.completed", event_mapping["properties"]["event_type"]["enum"])
+
+        state_machine_schema = json.loads(
+            (ROOT / "schemas" / "state-machines.v0.1.schema.json").read_text(encoding="utf-8")
+        )
+        machine = state_machine_schema["$defs"]["stateMachine"]
+        transition = state_machine_schema["$defs"]["transition"]
+        self.assertEqual(state_machine_schema["properties"]["state_machines"]["maxItems"], 1024)
+        self.assertEqual(machine["properties"]["states"]["maxItems"], 256)
+        self.assertEqual(
+            set(machine["properties"]["owner_scope"]["enum"]),
+            {"world", "region", "scene", "entity", "system"},
+        )
+        self.assertEqual(transition["properties"]["event_match"]["maxProperties"], 16)
+        self.assertNotIn("guard", transition["properties"])
+        self.assertNotIn("effects", transition["properties"])
 
         runtime_package_schema = json.loads(
             (ROOT / "schemas" / "runtime-package.v0.1.schema.json").read_text(encoding="utf-8")
@@ -78,6 +97,9 @@ class SchemaContractTests(unittest.TestCase):
             studio["properties"]["semantic_records_format"]["const"],
             "compilableworld.studio-semantic-records/v0.1",
         )
+        self.assertIn("state_machines", runtime_package_schema["required"])
+        self.assertIn("state_machines", runtime_package_schema["properties"]["schema_contracts"]["required"])
+        self.assertEqual(runtime_package_schema["properties"]["state_machines"]["maxItems"], 1024)
 
     def test_csv_header_contract_rejects_unknown_columns(self) -> None:
         with tempfile.TemporaryDirectory() as temp:

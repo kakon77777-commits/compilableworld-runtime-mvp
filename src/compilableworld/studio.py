@@ -141,6 +141,56 @@ def _quest_overview(quest: Any, index: int) -> dict[str, Any]:
     }
 
 
+def _scoped_state_machine_overview(machine: Any, index: int) -> dict[str, Any]:
+    """Project compiled StateIR without creating a Runtime mutation path."""
+    path = f"state_machines[{index}]"
+    if not isinstance(machine, dict):
+        return {
+            "state_machine_id": f"(invalid-{index})",
+            "owner_scope": None,
+            "owner_id": None,
+            "states": [],
+            "transitions": [],
+            "issues": [_issue("error", "invalid_state_machine", "StateIR 必須是物件", path)],
+        }
+    required = {
+        "state_machine_id", "owner_scope", "owner_id", "states",
+        "initial_state", "visibility", "authority", "transitions",
+    }
+    issues: list[dict[str, str]] = []
+    missing = required - set(machine)
+    if missing:
+        issues.append(_issue(
+            "error", "invalid_state_machine",
+            f"StateIR 缺少欄位: {sorted(missing)}", path,
+        ))
+    transitions = machine.get("transitions") if isinstance(machine.get("transitions"), list) else []
+    return {
+        "state_machine_id": machine.get("state_machine_id", f"(unnamed-{index})"),
+        "title": machine.get("title", ""),
+        "owner_scope": machine.get("owner_scope"),
+        "owner_id": machine.get("owner_id"),
+        "states": list(machine.get("states", [])) if isinstance(machine.get("states"), list) else [],
+        "initial_state": machine.get("initial_state"),
+        "persistence": machine.get("persistence"),
+        "visibility": machine.get("visibility"),
+        "authority": machine.get("authority"),
+        "transition_count": len(transitions),
+        "transitions": [
+            {
+                "transition_id": transition.get("transition_id"),
+                "from": transition.get("from"),
+                "on": transition.get("on"),
+                "to": transition.get("to"),
+                "event_match": dict(transition.get("event_match", {})),
+                "priority": transition.get("priority", 0),
+            }
+            for transition in transitions if isinstance(transition, dict)
+        ],
+        "issues": issues,
+    }
+
+
 def _function_records(package: dict[str, Any]) -> list[dict[str, Any]]:
     entries = package.get("functions", {}).get("functions", []) if isinstance(package.get("functions"), dict) else []
     records = []
@@ -182,7 +232,15 @@ def package_overview(package: dict[str, Any]) -> dict[str, Any]:
     modules = [module for module in manifest.get("modules", []) if isinstance(module, str)]
     function_records = _function_records(package)
     quests = [_quest_overview(quest, index) for index, quest in enumerate(package.get("quests", []))]
-    issues = [issue for quest in quests for issue in quest["issues"]]
+    state_machines = [
+        _scoped_state_machine_overview(machine, index)
+        for index, machine in enumerate(package.get("state_machines", []))
+    ]
+    issues = [
+        issue
+        for record in [*quests, *state_machines]
+        for issue in record["issues"]
+    ]
 
     entity_type_counts = Counter(str(entity.get("entity_type", "unknown")) for entity in entities)
     state_namespace_counts = Counter(str(cell.get("namespace", "unknown")) for cell in initial_state)
@@ -192,6 +250,12 @@ def package_overview(package: dict[str, Any]) -> dict[str, Any]:
         for transition in quest.get("transitions", [])
         if isinstance(transition.get("on"), str)
     }
+    event_types.update(
+        transition.get("on")
+        for machine in state_machines
+        for transition in machine.get("transitions", [])
+        if isinstance(transition.get("on"), str)
+    )
     if package.get("dialogues", {}).get("dialogues"):
         event_types.add("dialogue.responded")
 
@@ -236,6 +300,7 @@ def package_overview(package: dict[str, Any]) -> dict[str, Any]:
             "records": function_records,
         },
         "quests": quests,
+        "state_machines": state_machines,
         "semantic_records": _semantic_records_overview(package),
         "player_templates": {
             "count": len(package.get("player_templates", []))
@@ -293,6 +358,14 @@ def function_preview(runtime: "WorldRuntime", function_id: str, values: dict[str
 def runtime_overview(runtime: "WorldRuntime") -> dict[str, Any]:
     """Add DMS/runtime trace data to :func:`package_overview`."""
     overview = package_overview(runtime.package)
+    for machine in overview["state_machines"]:
+        owner_id = machine.get("owner_id")
+        machine_id = machine.get("state_machine_id")
+        if isinstance(owner_id, str) and isinstance(machine_id, str):
+            machine["current_state"] = runtime.state.get(
+                owner_id, "fsm", machine_id, machine.get("initial_state"),
+            )
+            machine["state_version"] = runtime.state.version(owner_id, "fsm", machine_id)
     overview["runtime"] = {
         "diagnostics": runtime.diagnostics(),
         "modules": {

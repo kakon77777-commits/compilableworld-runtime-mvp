@@ -13,11 +13,16 @@ from .functions import FunctionDefinitionError, FunctionRegistry, validate_funct
 from .player_generation import template_records
 from .schema_registry import SchemaContractError, csv_schema_columns, schema_contracts
 from .state_machine import (
+    STATE_MACHINE_DEFINITION_LIMIT,
     STATE_MACHINE_EVENT_MATCH_LIMIT,
+    STATE_MACHINE_OWNER_SCOPES,
     STATE_MACHINE_PRIORITY_LIMIT,
     STATE_MACHINE_REQUIREMENT_LIMIT,
     STATE_MACHINE_REWARD_CURRENCY_LIMIT,
+    STATE_MACHINE_STATE_LIMIT,
+    STATE_MACHINE_TRANSITION_LIMIT,
     STATE_MACHINE_TRIGGER_EVENT_FIELDS,
+    STATE_MACHINE_VISIBILITIES,
 )
 
 
@@ -153,6 +158,8 @@ def compile_world(
         resolved["scenarios"] = _safe_source(root, str(sources["scenarios"]))
     if "functions" in sources:
         resolved["functions"] = _safe_source(root, str(sources["functions"]))
+    if "state_machines" in sources:
+        resolved["state_machines"] = _safe_source(root, str(sources["state_machines"]))
     world = _load_json(resolved["world"])
     rooms = _load_csv(resolved["rooms"], "rooms")
     exits = _load_csv(resolved["exits"], "exits")
@@ -163,6 +170,10 @@ def compile_world(
     dialogues = _load_json(resolved["dialogues"]) if "dialogues" in resolved else {"dialogues": []}
     scenarios = _load_json(resolved["scenarios"]) if "scenarios" in resolved else {"scenarios": []}
     functions = _load_json(resolved["functions"]) if "functions" in resolved else {"functions": []}
+    state_machines_source = (
+        _load_json(resolved["state_machines"])
+        if "state_machines" in resolved else {"format": "compilableworld.state-machines/v0.1", "state_machines": []}
+    )
     try:
         player_templates = (
             template_records({"player_templates": _load_json(resolved["player_templates"])})
@@ -183,6 +194,7 @@ def compile_world(
         _required(row, ["item_id", "name", "room", "portable"], "items.csv")
 
     room_ids = _unique(rooms, "room_id", "rooms.csv")
+    region_ids = {row["region"] for row in rooms}
     exit_ids = _unique(exits, "exit_id", "exits.csv")
     entity_ids = _unique(entities, "entity_id", "entities.csv")
     item_ids = _unique(items, "item_id", "items.csv")
@@ -190,6 +202,13 @@ def compile_world(
     overlap = entity_ids & item_ids
     if overlap:
         raise CompileError(f"entity/item ID 衝突: {sorted(overlap)}")
+    state_machines = _validate_scoped_state_machines(
+        state_machines_source,
+        world_id=manifest["world_id"],
+        region_ids=region_ids,
+        room_ids=room_ids,
+        entity_ids=entity_ids | item_ids,
+    )
     quests = _validate_quests(
         quests, room_ids=room_ids, item_ids=item_ids,
         entity_types={row["entity_id"]: row["entity_type"] for row in entities},
@@ -226,7 +245,7 @@ def compile_world(
 
     source_schema_ids = {
         key: contract_ids[key]
-        for key in ("rooms", "exits", "entities", "items", "functions", "scenarios")
+        for key in ("rooms", "exits", "entities", "items", "functions", "scenarios", "state_machines")
         if key in sources
     }
 
@@ -305,9 +324,20 @@ def compile_world(
                 _state(door, "door", "key_id", row.get("key_id", "").strip() or None),
             ])
 
-    for owner, state_name in world.get("world_state_machines", {}).items():
+    legacy_world_state_machines = world.get("world_state_machines", {})
+    if not isinstance(legacy_world_state_machines, dict):
+        raise CompileError("world.world_state_machines 必須是物件")
+    for owner, state_name in legacy_world_state_machines.items():
+        if not isinstance(owner, str) or (owner != "world" and not ID_RE.match(owner)):
+            raise CompileError(f"world.world_state_machines owner 不合法: {owner}")
+        if not isinstance(state_name, str) or not ID_RE.match(state_name):
+            raise CompileError(f"world.world_state_machines state 不合法: {state_name}")
         state_owner = manifest["world_id"] if owner == "world" else owner
         initial_state.append(_state(state_owner, "fsm", "state", state_name))
+    for machine in state_machines:
+        initial_state.append(_state(
+            machine["owner_id"], "fsm", machine["state_machine_id"], machine["initial_state"]
+        ))
     if default_player:
         initial_state.append(_state(default_player, "wallet", "currency", 0))
         for quest in quests:
@@ -322,6 +352,8 @@ def compile_world(
     for module_id in modules:
         if not isinstance(module_id, str) or not ID_RE.match(module_id):
             raise CompileError(f"不合法 module ID: {module_id}")
+    if state_machines and "state_machine.core" not in modules:
+        raise CompileError("state_machines source 需要 manifest.modules 宣告 state_machine.core")
     package = {
         "format": "compilableworld.runtime-package/v0.1",
         "manifest": {
@@ -334,6 +366,7 @@ def compile_world(
         "rooms": rooms,
         "exits": exits,
         "entities": compiled_entities,
+        "state_machines": state_machines,
         "quests": quests,
         "narrative": narrative,
         "dialogues": dialogues,
@@ -365,6 +398,7 @@ def compile_world(
         "exits": len(exits), "entities": len(compiled_entities), "states": len(initial_state),
         "modules": modules, "dialogues": len(dialogues["dialogues"]),
         "scenarios": len(scenarios["scenarios"]), "functions": len(functions["functions"]),
+        "state_machines": len(state_machines),
         "package_sha256": _sha256(package_path),
     }
     (out / "build-report.json").write_text(json.dumps(report, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
@@ -390,6 +424,252 @@ def _state(owner: str, namespace: str, key: str, value: Any) -> dict[str, Any]:
 
 def _bool(value: str) -> bool:
     return str(value).strip().lower() in {"1", "true", "yes", "y"}
+
+
+def _validate_scoped_state_machines(
+    source: Any,
+    *,
+    world_id: str,
+    region_ids: set[str],
+    room_ids: set[str],
+    entity_ids: set[str],
+) -> list[dict[str, Any]]:
+    """Validate versioned World/Region/Scene/Entity/System StateIR.
+
+    These machines are intentionally narrower than quests: a transition may
+    select a bounded EventIR payload and priority, but it has no free-form
+    guard, reward, arbitrary effect, or direct StateStore path.  Its only
+    effect is changing its own ``owner::fsm::state_machine_id`` cell.
+    """
+    if not isinstance(source, dict):
+        raise CompileError("state_machines.json 必須是物件")
+    unknown_root = set(source) - {"format", "state_machines"}
+    if unknown_root:
+        raise CompileError(f"state_machines.json 含未知欄位: {sorted(unknown_root)}")
+    if source.get("format") != "compilableworld.state-machines/v0.1":
+        raise CompileError("state_machines.json format 不支援")
+    machines = source.get("state_machines")
+    if not isinstance(machines, list):
+        raise CompileError("state_machines.json.state_machines 必須是陣列")
+    if len(machines) > STATE_MACHINE_DEFINITION_LIMIT:
+        raise CompileError(
+            f"state_machines.json 不可超過 {STATE_MACHINE_DEFINITION_LIMIT} 台狀態機"
+        )
+
+    normalized: list[dict[str, Any]] = []
+    machine_ids: set[str] = set()
+    state_paths: set[tuple[str, str]] = set()
+    allowed = {
+        "state_machine_id", "title", "owner_scope", "owner_id", "states",
+        "initial_state", "persistence", "visibility", "authority", "transitions",
+    }
+    required = set(allowed)
+    for index, machine in enumerate(machines):
+        label = f"state_machines.json.state_machines[{index}]"
+        if not isinstance(machine, dict):
+            raise CompileError(f"{label} 必須是物件")
+        unknown = set(machine) - allowed
+        if unknown:
+            raise CompileError(f"{label} 含未知欄位: {sorted(unknown)}")
+        missing = required - set(machine)
+        if missing:
+            raise CompileError(f"{label} 缺少必填欄位: {sorted(missing)}")
+
+        machine_id = machine["state_machine_id"]
+        if not isinstance(machine_id, str) or not ID_RE.match(machine_id) or machine_id == "state":
+            raise CompileError(f"{label}.state_machine_id 不合法或與 legacy fsm.state 衝突")
+        if machine_id in machine_ids:
+            raise CompileError(f"state_machines.json 含重複 state_machine_id: {machine_id}")
+        machine_ids.add(machine_id)
+
+        title = machine["title"]
+        if not isinstance(title, str) or not title.strip():
+            raise CompileError(f"{label}.title 必須是非空字串")
+        owner_scope = machine["owner_scope"]
+        source_owner_id = machine["owner_id"]
+        if owner_scope not in STATE_MACHINE_OWNER_SCOPES:
+            raise CompileError(f"{label}.owner_scope 不支援: {owner_scope}")
+        if not isinstance(source_owner_id, str) or not ID_RE.match(source_owner_id):
+            raise CompileError(f"{label}.owner_id 不合法")
+        owner_id = _resolve_state_machine_owner(
+            owner_scope, source_owner_id, label,
+            world_id=world_id, region_ids=region_ids,
+            room_ids=room_ids, entity_ids=entity_ids,
+        )
+        state_path = (owner_id, machine_id)
+        if state_path in state_paths:
+            raise CompileError(f"{label} 與其他狀態機使用重複 StateStore path: {state_path}")
+        state_paths.add(state_path)
+
+        states = machine["states"]
+        if (
+            not isinstance(states, list)
+            or not 2 <= len(states) <= STATE_MACHINE_STATE_LIMIT
+            or any(not isinstance(state, str) or not ID_RE.match(state) for state in states)
+            or len(states) != len(set(states))
+        ):
+            raise CompileError(
+                f"{label}.states 必須是 2 到 {STATE_MACHINE_STATE_LIMIT} 個不重複合法 ID"
+            )
+        initial_state = machine["initial_state"]
+        if initial_state not in states:
+            raise CompileError(f"{label}.initial_state 不在 states 中")
+        if machine["persistence"] != "runtime":
+            raise CompileError(f"{label}.persistence v0.1 只支援 runtime")
+        visibility = machine["visibility"]
+        if visibility not in STATE_MACHINE_VISIBILITIES:
+            raise CompileError(f"{label}.visibility 不支援: {visibility}")
+        if machine["authority"] != "state_machine.core":
+            raise CompileError(f"{label}.authority 必須是 state_machine.core")
+
+        transitions = _validate_scoped_transitions(
+            machine["transitions"], label, states=set(states), initial_state=initial_state,
+        )
+        normalized.append({
+            "state_machine_id": machine_id,
+            "title": title.strip(),
+            "owner_scope": owner_scope,
+            "owner_id": owner_id,
+            "states": list(states),
+            "initial_state": initial_state,
+            "persistence": "runtime",
+            "visibility": visibility,
+            "authority": "state_machine.core",
+            "transitions": transitions,
+        })
+    return normalized
+
+
+def _resolve_state_machine_owner(
+    owner_scope: str,
+    owner_id: str,
+    label: str,
+    *,
+    world_id: str,
+    region_ids: set[str],
+    room_ids: set[str],
+    entity_ids: set[str],
+) -> str:
+    if owner_scope == "world":
+        if owner_id not in {"world", world_id}:
+            raise CompileError(f"{label}.owner_id 的 world scope 必須是 world 或 {world_id}")
+        return world_id
+    if owner_scope == "region":
+        if not owner_id.startswith("region.") or owner_id not in region_ids:
+            raise CompileError(f"{label}.owner_id 引用不存在 region: {owner_id}")
+        return owner_id
+    if owner_scope == "scene":
+        if owner_id not in room_ids:
+            raise CompileError(f"{label}.owner_id 引用不存在 scene/room: {owner_id}")
+        return owner_id
+    if owner_scope == "entity":
+        if owner_id not in entity_ids:
+            raise CompileError(f"{label}.owner_id 引用不存在 entity: {owner_id}")
+        return owner_id
+    if not owner_id.startswith("system."):
+        raise CompileError(f"{label}.owner_id 的 system scope 必須以 system. 開頭")
+    return owner_id
+
+
+def _validate_scoped_transitions(
+    transitions: Any,
+    label: str,
+    *,
+    states: set[str],
+    initial_state: str,
+) -> list[dict[str, Any]]:
+    if (
+        not isinstance(transitions, list)
+        or not 1 <= len(transitions) <= STATE_MACHINE_TRANSITION_LIMIT
+    ):
+        raise CompileError(
+            f"{label}.transitions 必須是 1 到 {STATE_MACHINE_TRANSITION_LIMIT} 條 transition"
+        )
+    normalized: list[dict[str, Any]] = []
+    transition_ids: set[str] = set()
+    dispatches: set[tuple[str, str, int]] = set()
+    allowed = {"transition_id", "from", "on", "to", "event_match", "priority"}
+    required = {"transition_id", "from", "on", "to"}
+    for index, transition in enumerate(transitions):
+        transition_label = f"{label}.transitions[{index}]"
+        if not isinstance(transition, dict):
+            raise CompileError(f"{transition_label} 必須是物件")
+        unknown = set(transition) - allowed
+        if unknown:
+            raise CompileError(f"{transition_label} 含未知欄位: {sorted(unknown)}")
+        missing = required - set(transition)
+        if missing:
+            raise CompileError(f"{transition_label} 缺少必填欄位: {sorted(missing)}")
+
+        transition_id = transition["transition_id"]
+        from_state = transition["from"]
+        event_type = transition["on"]
+        to_state = transition["to"]
+        priority = transition.get("priority", 0)
+        if not isinstance(transition_id, str) or not ID_RE.match(transition_id):
+            raise CompileError(f"{transition_label}.transition_id 不合法")
+        if transition_id in transition_ids:
+            raise CompileError(f"{label}.transitions 含重複 transition_id: {transition_id}")
+        transition_ids.add(transition_id)
+        if from_state not in states or to_state not in states or from_state == to_state:
+            raise CompileError(f"{transition_label}.from/to 不在 states 中或未改變狀態")
+        if from_state in {"completed", "failed"}:
+            raise CompileError(f"{transition_label} 不可從終態 {from_state} 再轉移")
+        if event_type not in STATE_MACHINE_TRIGGER_EVENT_FIELDS:
+            raise CompileError(f"{transition_label}.on 不在 StateMachineModule EventIR 白名單中")
+        if (
+            isinstance(priority, bool)
+            or not isinstance(priority, int)
+            or not 0 <= priority <= STATE_MACHINE_PRIORITY_LIMIT
+        ):
+            raise CompileError(
+                f"{transition_label}.priority 必須是 0 到 {STATE_MACHINE_PRIORITY_LIMIT} 的整數"
+            )
+        dispatch = (from_state, event_type, priority)
+        if dispatch in dispatches:
+            raise CompileError(
+                f"{label}.transitions 的 from/on/priority 不可重複: {dispatch}"
+            )
+        dispatches.add(dispatch)
+
+        event_match = transition.get("event_match", {})
+        if not isinstance(event_match, dict):
+            raise CompileError(f"{transition_label}.event_match 必須是物件")
+        if len(event_match) > STATE_MACHINE_EVENT_MATCH_LIMIT:
+            raise CompileError(
+                f"{transition_label}.event_match 不可超過 {STATE_MACHINE_EVENT_MATCH_LIMIT} 個欄位"
+            )
+        unknown_match = set(event_match) - STATE_MACHINE_TRIGGER_EVENT_FIELDS[event_type]
+        if unknown_match:
+            raise CompileError(
+                f"{transition_label}.event_match 含不屬於 {event_type} 的欄位: {sorted(unknown_match)}"
+            )
+        if any(not _json_scalar(value) for value in event_match.values()):
+            raise CompileError(f"{transition_label}.event_match 值必須是 finite JSON 純量")
+        normalized.append({
+            "transition_id": transition_id,
+            "from": from_state,
+            "on": event_type,
+            "to": to_state,
+            "event_match": dict(event_match),
+            "priority": priority,
+        })
+
+    _validate_transition_reachability(initial_state, normalized, label)
+    reachable = {initial_state}
+    changed = True
+    while changed:
+        changed = False
+        for transition in normalized:
+            if transition["from"] in reachable and transition["to"] not in reachable:
+                reachable.add(transition["to"])
+                changed = True
+    unreachable_states = states - reachable
+    if unreachable_states:
+        raise CompileError(
+            f"{label}.states 含從 initial_state 不可達狀態: {sorted(unreachable_states)}"
+        )
+    return normalized
 
 
 def _validate_quests(

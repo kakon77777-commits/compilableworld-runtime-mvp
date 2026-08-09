@@ -8,10 +8,10 @@
 | Item | Value |
 |---|---|
 | Local integrated runtime | `0.1.1` |
-| Verified tests | `257/257` |
+| Verified tests | `265/265` |
 | GitHub `master` observed head | `72334d7` (verified 2026-08-09) |
-| GitHub integration branch before this package | `agent/m12-runtime-mcp-integration` at `acc1841` |
-| Remote synchronization status | Integration branch was synchronized before this world-state-machine package; this package is deployed by its own commit/push |
+| GitHub integration branch before scoped StateIR package | `agent/m12-runtime-mcp-integration` at `c4b4cd0` |
+| Remote synchronization status | Scoped StateIR package is committed and pushed as one reviewed integration-branch change |
 | Intended next release baseline | `v0.2.0-alpha.1` or equivalent |
 
 ## Current integrated local state
@@ -102,6 +102,35 @@ acceptance:
   - 257/257 tests pass
 out_of_scope:
   - free-form guard execution
+  - Runtime sampling of Studio bounded random metadata
+  - AI direct StateStore writes
+```
+
+### CW-M12-HSM-002 — Scoped executable StateIR
+
+```yaml
+owner_environment: codex
+status: completed-and-deployed-on-integration-branch
+outputs:
+  - schemas/state-machines.v0.1.schema.json
+  - src/compilableworld/compiler.py
+  - src/compilableworld/modules.py
+  - src/compilableworld/studio.py
+  - examples/gray_crown/state_machines.json
+  - docs/SCOPED_STATE_IR_EXECUTION_CONTRACT_zh-TW.md
+  - tests/test_scoped_state_machine.py
+acceptance:
+  - World, Region, Scene, Entity and System owners compile to isolated fsm cells
+  - deterministic EventIR equality matching and priority selection
+  - fsm terminal events chain into another FSM or actor quest with full causation
+  - public, private and audit visibility fail closed from authored visibility
+  - legacy owner::fsm::state seeds remain compatible
+  - Snapshot, Replay, Studio projection and reaction rollback verified
+  - 265/265 tests pass
+out_of_scope:
+  - implicit geographic event routing
+  - Action-scope composite state machines
+  - free-form guards, arbitrary effects or rewards
   - Runtime sampling of Studio bounded random metadata
   - AI direct StateStore writes
 ```

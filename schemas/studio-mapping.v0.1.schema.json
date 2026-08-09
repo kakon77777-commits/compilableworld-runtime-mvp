@@ -47,6 +47,8 @@
                     "dialogue.spoken",
                     "door.opened",
                     "door.unlocked",
+                    "fsm.completed",
+                    "fsm.failed",
                     "inventory.item_added",
                     "inventory.item_given",
                     "inventory.item_removed",

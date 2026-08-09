@@ -102,7 +102,10 @@ class WebGatewayTests(unittest.TestCase):
         self.assertTrue(result["read_only"])
         self.assertEqual(
             {record["key"] for record in result["schemas"]},
-            {"functions", "scenarios", "runtime_package", "rooms", "exits", "entities", "items", "studio_world_ir", "studio_mapping"},
+            {
+                "functions", "scenarios", "runtime_package", "rooms", "exits",
+                "entities", "items", "state_machines", "studio_world_ir", "studio_mapping",
+            },
         )
 
     def test_studio_import_endpoint_is_read_only_and_preserves_semantics(self) -> None:

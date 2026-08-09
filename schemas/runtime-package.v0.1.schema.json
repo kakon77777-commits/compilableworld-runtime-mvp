@@ -6,7 +6,7 @@
   "type": "object",
   "additionalProperties": false,
   "required": [
-    "format", "manifest", "world", "rooms", "exits", "entities", "quests",
+    "format", "manifest", "world", "rooms", "exits", "entities", "state_machines", "quests",
     "narrative", "dialogues", "scenarios", "functions", "player_templates",
     "initial_state", "schema_contracts", "source_checksums"
   ],
@@ -17,6 +17,11 @@
     "rooms": { "type": "array", "items": { "type": "object" } },
     "exits": { "type": "array", "items": { "type": "object" } },
     "entities": { "type": "array", "items": { "$ref": "#/$defs/entity" } },
+    "state_machines": {
+      "type": "array",
+      "maxItems": 1024,
+      "items": { "$ref": "#/$defs/stateMachine" }
+    },
     "quests": { "type": "array", "items": { "type": "object" } },
     "narrative": { "type": "object" },
     "dialogues": { "type": "object" },
@@ -45,10 +50,11 @@
     "schema_contracts": {
       "type": "object",
       "additionalProperties": false,
-      "required": ["functions", "scenarios", "runtime_package", "rooms", "exits", "entities", "items", "studio_world_ir", "studio_mapping"],
+      "required": ["functions", "scenarios", "state_machines", "runtime_package", "rooms", "exits", "entities", "items", "studio_world_ir", "studio_mapping"],
       "properties": {
         "functions": { "const": "compilableworld.schema/functions/v0.1" },
         "scenarios": { "const": "compilableworld.schema/scenarios/v0.1" },
+        "state_machines": { "const": "compilableworld.schema/state-machines/v0.1" },
         "runtime_package": { "const": "compilableworld.schema/runtime-package/v0.1" },
         "rooms": { "const": "compilableworld.schema/csv/rooms/v0.1" },
         "exits": { "const": "compilableworld.schema/csv/exits/v0.1" },
@@ -87,7 +93,8 @@
             "entities": { "const": "compilableworld.schema/csv/entities/v0.1" },
             "items": { "const": "compilableworld.schema/csv/items/v0.1" },
             "functions": { "const": "compilableworld.schema/functions/v0.1" },
-            "scenarios": { "const": "compilableworld.schema/scenarios/v0.1" }
+            "scenarios": { "const": "compilableworld.schema/scenarios/v0.1" },
+            "state_machines": { "const": "compilableworld.schema/state-machines/v0.1" }
           }
         },
         "modules": {
@@ -119,6 +126,55 @@
         "key": { "$ref": "#/$defs/id" },
         "value": {},
         "version": { "type": "integer", "minimum": 0 }
+      }
+    },
+    "stateMachineTransition": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["transition_id", "from", "on", "to", "event_match", "priority"],
+      "properties": {
+        "transition_id": { "$ref": "#/$defs/id" },
+        "from": { "$ref": "#/$defs/id" },
+        "on": { "$ref": "#/$defs/id" },
+        "to": { "$ref": "#/$defs/id" },
+        "event_match": {
+          "type": "object",
+          "maxProperties": 16,
+          "propertyNames": { "pattern": "^[A-Za-z_][A-Za-z0-9_.-]*$" },
+          "additionalProperties": { "type": ["string", "number", "boolean", "null"] }
+        },
+        "priority": { "type": "integer", "minimum": 0, "maximum": 1000000 }
+      }
+    },
+    "stateMachine": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "state_machine_id", "title", "owner_scope", "owner_id", "states",
+        "initial_state", "persistence", "visibility", "authority", "transitions"
+      ],
+      "properties": {
+        "state_machine_id": { "$ref": "#/$defs/id" },
+        "title": { "type": "string", "minLength": 1 },
+        "owner_scope": { "enum": ["world", "region", "scene", "entity", "system"] },
+        "owner_id": { "$ref": "#/$defs/id" },
+        "states": {
+          "type": "array",
+          "minItems": 2,
+          "maxItems": 256,
+          "uniqueItems": true,
+          "items": { "$ref": "#/$defs/id" }
+        },
+        "initial_state": { "$ref": "#/$defs/id" },
+        "persistence": { "const": "runtime" },
+        "visibility": { "enum": ["public", "observable", "inferred", "private", "system_only"] },
+        "authority": { "const": "state_machine.core" },
+        "transitions": {
+          "type": "array",
+          "minItems": 1,
+          "maxItems": 4096,
+          "items": { "$ref": "#/$defs/stateMachineTransition" }
+        }
       }
     }
   }

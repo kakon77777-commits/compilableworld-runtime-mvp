@@ -29,6 +29,12 @@ _SCHEMAS: dict[str, dict[str, str]] = {
         "version": "v0.1",
         "kind": "json",
     },
+    "state_machines": {
+        "schema_id": "compilableworld.schema/state-machines/v0.1",
+        "filename": "state-machines.v0.1.schema.json",
+        "version": "v0.1",
+        "kind": "json",
+    },
     "runtime_package": {
         "schema_id": "compilableworld.schema/runtime-package/v0.1",
         "filename": "runtime-package.v0.1.schema.json",

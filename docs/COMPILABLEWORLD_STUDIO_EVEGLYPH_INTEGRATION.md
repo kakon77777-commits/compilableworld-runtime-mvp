@@ -12,6 +12,7 @@
 - `examples/studio_village_inn/`：EveGlyph 可視化 World IR 的 Entity／State Machine／故意損壞案例。它是 Studio authoring seed，尚未偽裝成 Python Runtime Package。
 - `src/compilableworld/studio_world_ir.py`：零第三方依賴的 EveGlyph YAML subset importer，輸出診斷保留的共用 Studio World IR JSON，並保留 state machine 的 variables／events／instructions／responses、受控 random 描述、bounded event_match 與 bounded requirements。
 - `src/compilableworld/studio.py`：零第三方依賴的 headless projection，輸出 FMS／SMS／TMS／DMS、Quest graph、靜態 diagnostics 與 Runtime Trace tail。
+- `state_machines.json`：版本化的 World／Region／Scene／Entity／System StateIR；Studio overview 可唯讀顯示 owner、狀態圖、初始狀態與目前 Runtime state/version。
 - `scenarios.json`：正式的 ScenarioIR Given／When／Then 來源，編譯後由 `scenario-run` 以正常 Runtime 管線重播。
 - `functions.json`：正式的 FunctionIR 純公式來源；只允許受限 numeric expression tree，編譯後由 `runtime.functions` 評估。
 
@@ -33,13 +34,14 @@ EveGlyph 的 Runtime 面板使用兩個唯讀端點：`GET /api/studio/functions
 
 ## Authoring Schema catalog
 
-正式主線現在把九個核心交換邊界外化成 [`schemas/`](../schemas/) 下的 JSON／CSV Schema：
+正式主線現在把十個核心交換邊界外化成 [`schemas/`](../schemas/) 下的 JSON／CSV Schema：
 
 - `functions.v0.1.schema.json`：FunctionIR 純數值公式來源。
 - `scenarios.v0.1.schema.json`：ScenarioIR Given／When／Then 來源。
 - `runtime-package.v0.1.schema.json`：Compiler 到 Runtime／Studio 的套件契約。
 - `rooms.v0.1.csv.schema.json`、`exits.v0.1.csv.schema.json`：地圖表格欄位契約。
 - `entities.v0.1.csv.schema.json`、`items.v0.1.csv.schema.json`：實體／物品表格欄位契約。
+- `state-machines.v0.1.schema.json`：五種 owner scope 的可執行 StateIR 與 bounded transition 契約。
 - `studio-world-ir.v0.1.schema.json`：EveGlyph YAML 到共用 Studio World IR 的 migration 契約。
 - `studio-mapping.v0.1.schema.json`：人工確認 World IR 到 Runtime 的 room、table、EventIR 與 guard 映射契約。
 

@@ -100,13 +100,14 @@ Function Registry 同時提供有上限的 LRU memoization（預設 2048 筆）�
 
 ### Authoring Schema 契約
 
-目前九個核心交換邊界已有版本化 Schema 檔，放在 [`schemas/`](schemas/)：
+目前十個核心交換邊界已有版本化 Schema 檔，放在 [`schemas/`](schemas/)：
 
 - `functions.v0.1.schema.json`：FunctionIR 純公式來源。
 - `scenarios.v0.1.schema.json`：ScenarioIR 的 Given／When／Then 來源。
 - `runtime-package.v0.1.schema.json`：Compiler 輸出的 Runtime Package。
 - `rooms.v0.1.csv.schema.json`、`exits.v0.1.csv.schema.json`：地圖房間與出口表格。
 - `entities.v0.1.csv.schema.json`、`items.v0.1.csv.schema.json`：實體與物品表格。
+- `state-machines.v0.1.schema.json`：World／Region／Scene／Entity／System owner scope 的可執行 StateIR。
 - `studio-world-ir.v0.1.schema.json`：EveGlyph YAML 到共用 Studio World IR 的 migration，含 bounded event_match 與 requirements。
 - `studio-mapping.v0.1.schema.json`：人工確認 World IR 到 Runtime 房間、表格、EventIR、priority、reward、requirements 與 guard 的映射。
 
@@ -220,6 +221,12 @@ Python 版本用於凍結語言無關契約與快速驗證。後續 Rust 重寫�
 
 Runtime 收到事件後只會為該 actor 的目前狀態選邊；較高 `priority` 勝出，同一 `from/on/priority` 則在編譯期直接拒絕，避免用作者列表順序偷偷裁決衝突。進入 `completed` 會發出 `quest.completed`，進入 `failed` 會發出 `quest.failed`，每次轉移都會先發出可追溯的 `quest.transitioned`。這些寫入都走 `WorldRuntime.commit_reaction()` 的原子 Delta+Event 路徑。
 
+### Scoped StateIR 世界狀態機
+
+`state_machines.json` 現在可宣告 World／Region／Scene／Entity／System 五種 owner scope。Compiler 會驗證 owner 引用、狀態可達性、終態、事件 payload 白名單、priority 衝突與 `state_machine.core` authority；Runtime 只允許每台機器寫入自己的 `owner::fsm::<state_machine_id>`，並透過 `fsm.transitioned`、`fsm.completed`、`fsm.failed` 與其他模組串接。World、Region、Scene、Entity、System 可同時響應一個正式 EventIR，terminal FSM 也可沿有界 causation 鏈驅動另一台 FSM 或 actor quest。Snapshot、EventLog 與 Replay 保留全部 scoped state。
+
+owner scope 在 v0.1 表示狀態所有權與可見性，不會自動把事件限制在某個地區或房間；需要地域路由時，authoring 必須用事件型別與 `event_match` 明確表達。自由文字 guard、任意 effects/reward、Runtime random sampling 與 Action-scope 複合行為仍不在此契約內。完整規格見 `docs/SCOPED_STATE_IR_EXECUTION_CONTRACT_zh-TW.md`。
+
 ### Snapshot 與排程恢復
 
 `save_snapshot` 使用 `compilableworld.snapshot/v0.2`，除了 Runtime State、動態玩家與生成 profile，也保存目前 tick 和尚未執行的排程 Action。載入時會驗證 Snapshot 格式、版本、世界 ID 與世界版本；舊的 `v0.1` Snapshot 仍會以空排程佇列自動遷移，因此不會把不存在的排程行為假裝恢復。
@@ -249,10 +256,10 @@ PYTHONPATH=src python3 -m compilableworld play build/gray_crown/world.package.js
 - Scheduler 支援延遲 Action，但 CLI 尚未暴露複合行為編輯器。
 - 房間有可選的 `narrative.json` 條件式文字投影；NPC 有可選的 `dialogues.json` 單回合、狀態感知對話，兩者都由 CLI 與 Web 共用。已能由對話事件接取任務，但尚未實作多輪對話 session、玩家可見的選項卡、語義理解與 AI 生成敘事。`visible_entities` 仍會標示實體是否存活（終端機顯示「（已死亡）」，網頁介面同步）。
 - Quest 模組保留原有的兩種事件驅動 requirement（`deliver:<item>:<target>`、`reach:<room>`）與貨幣報酬，並新增顯式的多階段／分支／失敗 transition。未知 requirement、未知事件欄位、終態再轉移與同優先權分支衝突都會在編譯期 fail closed。尚未支援：複合布林條件、時間／排程觸發、回復／撤銷轉移、道具型報酬與執行期生成新實體。
-- 世界、區域與場景的初始階層狀態已編入 State Store；跨層事件轉移規則留待 v0.2。
+- World／Region／Scene／Entity／System 的 scoped StateIR 已可透過 EventIR 跨層轉移；Action-scope 複合行為、地理感知的自動事件路由與自由 guard 仍留待後續契約。
 - Intent Parser 是確定性參考實作；AI Adapter 必須輸出同一 `ActionIR` 並接受 Kernel 驗證。
 - Module Contract 的寫入範圍已由 Kernel 強制檢查；讀取範圍與 Action authority 的強制隔離留待 v0.2。
-- 核心 JSON／CSV Schema 已外部化為 `schemas/` 下的九份 v0.1 契約；CSV header、EveGlyph World IR migration 與人工 mapping validation 已接入，跨檔案引用與其他語意規則仍由 Compiler 驗證。
+- 核心 JSON／CSV Schema 已外部化為 `schemas/` 下的十份 v0.1 契約；CSV header、scoped StateIR、EveGlyph World IR migration 與人工 mapping validation 已接入，跨檔案引用與其他語意規則仍由 Compiler 驗證。
 - Replay 重放已提交 Delta；跨版本重放仍需 migration registry。
 - 戰鬥有兩條判定路徑，同一場戰鬥不會混用：(1) **簡易路徑**——命中率 85%、傷害區間 3-7、`combatant` component 存活反擊機率 75%（區間 1-3），取材自對真實 LPC MUD（mhsj）戰鬥系統的研究，見 `docs/whitepapers/`；(2) **公式路徑**——當雙方都在 `entities.csv` 填了完整五維屬性（`str/con/mag/agi/dex` + 選填 `phase_tier`）時自動啟用，直接還原 `worlds/mingyun_zhiyu/data/drafts/combat_resolution_system.json`（Neo 已審閱核准）的比率制命中/傷害/突破門檻公式**與交鋒（Exchange）先攻回合制**——一次 `attack` 指令＝一次交鋒，`IV=AGI+0.5×DEX` 決定雙方各自的行動次數（`clamp(round(IV_己方/IV_對方),1,4)`），較快一方的行動全部先解算完才輪到較慢一方（來源文件是敘事上的交錯描寫，這裡簡化成「先攻方全部行動完再輪下一方」，非逐拍交錯，有明確記錄不是隱藏簡化）。見 `src/compilableworld/combat_formulas.py`，`tests/test_combat_formulas.py` 用該文件自己的 worked example（露芙緹雅 vs 格洛森、IV比值3.2→3次行動）逐位數比對回歸測試。`examples/mingyun_zhiyu_peace_city` 的 `player.newcomer`（地板值屬性，tier0）與 `npc.woerkan`（真實 canon 數值，tier1）雙方都已授權屬性，實際觸發公式路徑；`creature.sewer_rat`／`npc.guard` 等舊有戰鬥實體刻意留在簡易路徑——公式常數（HP=CON×8、傷害×0.1縮放）是為數百點屬性的正式 canon 角色校準的，硬套在地板值內容上會異常緩慢/肉質過厚（實際算過，不是猜測）。五維屬性欄位為全有全無（部分填寫會編譯失敗），且與舊版 `health` 欄位互斥（HP 改由 CON 推導）。
 - 規則魔法施法系統（同一份 `combat_resolution_system.json` 的 `rule_magic_casting_system`）已實作 MP/FP 資源池（由 MAG/DEX 在編譯期自動推導，五維屬性齊全的實體都會有）與 `cast <法術名>` 指令，目前接了兩個法術：`護盾術`（5 符號，MP40/FP25，temp_HP=施法者MAG×2，優先於真實生命值承受傷害，且與其他狀態一樣持續 3 次交鋒——耗盡或到期兩者先到者為準）、`疾風步`（3 符號，MP24/FP15，IV×1.5 持續 3 次交鋒；symbol_count=3 是本專案自己從 `combo_home` 標籤數推斷的，來源文件沒有給這個法術的具體數字，跟 `護盾術` 是文件自己給的範例不同）。異常狀態現在是一個真正通用、會隨交鋒衰減的機制（`combat.status_effects`，見 `combat_formulas.py` 的 `refresh_status`／`decay_status_effects`），不是只為了護盾寫死的一次性欄位——`疾風步` 直接證明這點：它改的是先攻回合制的行動次數，不是傷害或血量。**刻意未實作**：多交鋒引導詠唱（`cast_time_exchanges>1` 的高階法術，需要在交鋒之間插入「引導中斷判定」，目前交鋒已實作但引導/中斷邏輯還沒有——本輪也刻意簡化成「施法本身不消耗交鋒」，跟來源文件嚴格定義有落差，已記錄）；完整的異常狀態框架其餘 9 種（麻痺/破綻/凍傷/束縛/靜默等，目前只做了 shield_buff／haste_疾風 兩種，通用的衰減/刷新機制已就位，加新狀態的邊際成本應該不高）；近戰以外招式（`ranged_precision_physical`／`mental_spiritual` 這兩種攻擊類型公式已在來源文件定義好，尚未接線）。這些是該檔案裡份量最大的剩餘部分，留待未來階段。
