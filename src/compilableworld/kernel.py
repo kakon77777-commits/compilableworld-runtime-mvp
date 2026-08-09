@@ -10,6 +10,7 @@ from dataclasses import asdict
 from pathlib import Path
 from typing import Any, Callable, Iterable, Protocol
 
+from .action_behavior import ACTION_BEHAVIOR_INTERRUPT_EVENTS
 from .models import (
     ActionIR, ActionReceipt, ActionStatus, Entity, EventIR, ModuleContract,
     StateCell, StateDelta, TransitionResult, new_id,
@@ -233,10 +234,28 @@ class Scheduler:
         self._counter = 0
         self._queue: list[tuple[int, int, ActionIR]] = []
 
-    def schedule(self, action: ActionIR, delay: int) -> None:
+    def schedule(self, action: ActionIR, delay: int) -> tuple[int, int, ActionIR]:
         self._counter += 1
         action.status = ActionStatus.SCHEDULED
-        heapq.heappush(self._queue, (self.tick + max(0, delay), self._counter, action))
+        entry = (self.tick + max(0, delay), self._counter, action)
+        heapq.heappush(self._queue, entry)
+        return entry
+
+    def remove(self, action_id: str) -> tuple[int, int, ActionIR] | None:
+        for index, entry in enumerate(self._queue):
+            if entry[2].action_id != action_id:
+                continue
+            removed = self._queue.pop(index)
+            heapq.heapify(self._queue)
+            return removed
+        return None
+
+    def restore(self, entry: tuple[int, int, ActionIR]) -> None:
+        self._counter = max(self._counter, entry[1])
+        heapq.heappush(self._queue, entry)
+
+    def entries(self) -> list[tuple[int, int, ActionIR]]:
+        return sorted(self._queue, key=lambda item: (item[0], item[1]))
 
     def advance(self, ticks: int = 1) -> list[ActionIR]:
         self.tick += max(0, ticks)
@@ -309,10 +328,25 @@ class WorldRuntime:
         self.dynamic_entities: set[str] = set()
         self.player_profiles: dict[str, dict[str, Any]] = {}
         self.active_player_id: str | None = None
+        self._action_interrupts_bound = False
         for raw in package["entities"]:
             self.registry.add(Entity(**raw))
         for raw in package["initial_state"]:
             self.state.seed(raw["owner"], raw["namespace"], raw["key"], raw["value"], raw.get("version", 0))
+
+    def bind_action_interrupts(self) -> None:
+        """Register Kernel lifecycle reactions after optional raw observers."""
+        if self._action_interrupts_bound:
+            return
+        interrupt_events = {
+            event_type
+            for behavior in self.package.get("action_behaviors", [])
+            for event_type in behavior.get("interrupt_on", [])
+            if event_type in ACTION_BEHAVIOR_INTERRUPT_EVENTS
+        }
+        for event_type in sorted(interrupt_events):
+            self.events.subscribe(event_type, self._on_action_interrupt_event)
+        self._action_interrupts_bound = True
 
     @classmethod
     def from_package(cls, path: str | Path, event_log_path: str | Path | None = None) -> "WorldRuntime":
@@ -455,12 +489,54 @@ class WorldRuntime:
         self.actions[action.action_id] = action
         if not self.registry.contains(action.actor_id):
             return self._fail(action, f"未知 actor: {action.actor_id}")
+        try:
+            module = self.module_for(action.verb)
+        except RuntimeErrorBase as exc:
+            return self._fail(action, str(exc))
+        behavior = self._action_behavior(action.verb)
+        if behavior and module.contract.module_id != behavior["completion_module"]:
+            return self._fail(
+                action,
+                f"行為 {action.verb} 的 completion_module 契約不符: "
+                f"{module.contract.module_id} != {behavior['completion_module']}",
+            )
+        if behavior:
+            duration = behavior["duration_ticks"]
+            if delay not in {0, duration}:
+                return self._fail(action, f"行為 {action.verb} 的 duration 固定為 {duration} tick")
+            if any(
+                queued.actor_id == action.actor_id and self._action_behavior(queued.verb) is not None
+                for _, _, queued in self.scheduler.entries()
+            ):
+                return self._fail(action, "同一 actor 同時間只能執行一個 authored long action")
+            delay = duration
         if delay > 0:
-            self.scheduler.schedule(action, delay)
-            return ActionReceipt(action.action_id, action.status, f"已排程於 {delay} tick 後執行")
+            entry = self.scheduler.schedule(action, delay)
+            event = self._action_lifecycle_event("action.scheduled", action, behavior, due_tick=entry[0])
+            try:
+                self.event_log.append(event)
+            except KernelTransactionError:
+                self.scheduler.remove(action.action_id)
+                self.actions.pop(action.action_id, None)
+                action.status = ActionStatus.PARSED
+                raise
+            self.events.publish(event)
+            self.metrics["actions_scheduled"] += 1
+            self.metrics[f"event:{event.event_type}"] += 1
+            title = behavior["title"] if behavior else action.verb
+            return ActionReceipt(
+                action.action_id, action.status,
+                f"{title} 已排程，將於 {delay} tick 後完成（action_id={action.action_id}）",
+                [event.event_id],
+            )
         return self._execute(action)
 
     def _execute(self, action: ActionIR) -> ActionReceipt:
+        scheduled_behavior = self._action_behavior(action.verb) if action.status == ActionStatus.SCHEDULED else None
+        started_event = (
+            self._action_lifecycle_event("action.started", action, scheduled_behavior)
+            if scheduled_behavior else None
+        )
         state_before = deepcopy(self.state.export())
         try:
             module = self.module_for(action.verb)
@@ -468,7 +544,7 @@ class WorldRuntime:
             action.status = ActionStatus.EXECUTING
             result = module.evaluate(action, self)
             if not result.accepted:
-                return self._fail(action, result.message)
+                return self._fail(action, result.message, lifecycle_started=scheduled_behavior is not None)
             applied = self.state.commit(result.deltas, module.contract.write)
             commit_event = EventIR(
                 event_type="state.committed", source=module.contract.module_id,
@@ -476,7 +552,16 @@ class WorldRuntime:
                 correlation_id=action.correlation_id, timestamp_tick=self.scheduler.tick,
                 visibility="audit", payload={"applied": applied},
             )
-            emitted = [commit_event, *result.events]
+            completed_event = (
+                self._action_lifecycle_event("action.completed", action, scheduled_behavior)
+                if scheduled_behavior else None
+            )
+            emitted = [
+                *([started_event] if started_event else []),
+                commit_event,
+                *result.events,
+                *([completed_event] if completed_event else []),
+            ]
             for event in emitted:
                 event.causation_id = event.causation_id or action.action_id
                 event.correlation_id = event.correlation_id or action.correlation_id
@@ -489,7 +574,7 @@ class WorldRuntime:
             raise
         except RuntimeErrorBase as exc:
             self.state.import_state(state_before)
-            return self._fail(action, str(exc))
+            return self._fail(action, str(exc), lifecycle_started=scheduled_behavior is not None)
         action.status = ActionStatus.COMPLETED
         self.metrics["actions_completed"] += 1
         for event in emitted:
@@ -500,18 +585,177 @@ class WorldRuntime:
             [event.event_id for event in emitted], [item["path"] for item in applied],
         )
 
-    def _fail(self, action: ActionIR, message: str) -> ActionReceipt:
+    def _fail(
+        self, action: ActionIR, message: str, *, lifecycle_started: bool = False,
+    ) -> ActionReceipt:
         action.status = ActionStatus.FAILED
         self.metrics["actions_failed"] += 1
+        behavior = self._action_behavior(action.verb)
+        started = (
+            self._action_lifecycle_event("action.started", action, behavior)
+            if lifecycle_started and behavior else None
+        )
+        payload = {"verb": action.verb, "reason": message}
+        if behavior:
+            payload.update({
+                "action_id": action.action_id,
+                "behavior_id": behavior["behavior_id"],
+                "actor": action.actor_id,
+            })
         event = EventIR(
             event_type="action.failed", source="kernel", target=action.actor_id,
             causation_id=action.action_id, correlation_id=action.correlation_id,
             timestamp_tick=self.scheduler.tick, visibility="private",
-            payload={"verb": action.verb, "reason": message},
+            payload=payload,
         )
-        self.event_log.append(event)
+        emitted = [*([started] if started else []), event]
+        self.event_log.append_batch(emitted)
+        for emitted_event in emitted:
+            self.events.publish(emitted_event)
+            self.metrics[f"event:{emitted_event.event_type}"] += 1
+        return ActionReceipt(
+            action.action_id, action.status, message,
+            [emitted_event.event_id for emitted_event in emitted],
+        )
+
+    def _action_behavior(self, verb: str) -> dict[str, Any] | None:
+        return next(
+            (
+                behavior for behavior in self.package.get("action_behaviors", [])
+                if behavior.get("verb") == verb
+            ),
+            None,
+        )
+
+    def _action_lifecycle_event(
+        self,
+        event_type: str,
+        action: ActionIR,
+        behavior: dict[str, Any] | None,
+        *,
+        due_tick: int | None = None,
+        reason: str | None = None,
+        causation_id: str | None = None,
+    ) -> EventIR:
+        duration = behavior["duration_ticks"] if behavior else max(
+            0, (due_tick or self.scheduler.tick) - action.proposed_at_tick,
+        )
+        payload: dict[str, Any] = {
+            "action_id": action.action_id,
+            "behavior_id": behavior["behavior_id"] if behavior else None,
+            "actor": action.actor_id,
+            "verb": action.verb,
+            "duration_ticks": duration,
+        }
+        if due_tick is not None:
+            payload["due_tick"] = due_tick
+        if event_type == "action.scheduled":
+            payload["action"] = action.to_dict()
+        if reason is not None:
+            payload["reason"] = reason
+        return EventIR(
+            event_type=event_type,
+            source="kernel",
+            target=action.actor_id,
+            causation_id=causation_id or action.action_id,
+            correlation_id=action.correlation_id,
+            timestamp_tick=self.scheduler.tick,
+            visibility="private",
+            payload=payload,
+        )
+
+    def pending_actions(self, actor_id: str | None = None) -> list[dict[str, Any]]:
+        records: list[dict[str, Any]] = []
+        for due_tick, _, action in self.scheduler.entries():
+            if actor_id is not None and action.actor_id != actor_id:
+                continue
+            behavior = self._action_behavior(action.verb)
+            duration = behavior["duration_ticks"] if behavior else max(
+                0, due_tick - action.proposed_at_tick,
+            )
+            started_tick = due_tick - duration
+            progress = min(duration, max(0, self.scheduler.tick - started_tick))
+            records.append({
+                "action_id": action.action_id,
+                "actor_id": action.actor_id,
+                "verb": action.verb,
+                "behavior_id": behavior["behavior_id"] if behavior else None,
+                "title": behavior["title"] if behavior else action.verb,
+                "status": action.status.value,
+                "started_tick": started_tick,
+                "due_tick": due_tick,
+                "duration_ticks": duration,
+                "progress_ticks": progress,
+                "remaining_ticks": max(0, due_tick - self.scheduler.tick),
+                "interrupt_on": list(behavior["interrupt_on"]) if behavior else [],
+            })
+        return records
+
+    def cancel_action(self, actor_id: str, action_id: str) -> ActionReceipt:
+        if not self.registry.contains(actor_id):
+            raise RuntimeErrorBase(f"未知 actor: {actor_id}")
+        entry = next(
+            (entry for entry in self.scheduler.entries() if entry[2].action_id == action_id),
+            None,
+        )
+        if entry is None:
+            raise RuntimeErrorBase(f"找不到待執行 action: {action_id}")
+        if entry[2].actor_id != actor_id:
+            raise RuntimeErrorBase("不可取消其他 actor 的 action")
+        return self._terminate_scheduled_action(entry, ActionStatus.CANCELLED, "由 actor 取消")
+
+    def _on_action_interrupt_event(self, event: EventIR) -> None:
+        actor_id = event.target
+        if not isinstance(actor_id, str):
+            return
+        for entry in self.scheduler.entries():
+            action = entry[2]
+            behavior = self._action_behavior(action.verb)
+            if (
+                action.actor_id == actor_id
+                and behavior is not None
+                and event.event_type in behavior["interrupt_on"]
+            ):
+                self._terminate_scheduled_action(
+                    entry,
+                    ActionStatus.INTERRUPTED,
+                    f"被 {event.event_type} 中斷",
+                    cause_event=event,
+                )
+
+    def _terminate_scheduled_action(
+        self,
+        entry: tuple[int, int, ActionIR],
+        status: ActionStatus,
+        reason: str,
+        *,
+        cause_event: EventIR | None = None,
+    ) -> ActionReceipt:
+        due_tick, _, action = entry
+        removed = self.scheduler.remove(action.action_id)
+        if removed is None:
+            raise RuntimeErrorBase(f"待執行 action 已不存在: {action.action_id}")
+        previous_status = action.status
+        action.status = status
+        event_type = "action.cancelled" if status == ActionStatus.CANCELLED else "action.interrupted"
+        event = self._action_lifecycle_event(
+            event_type,
+            action,
+            self._action_behavior(action.verb),
+            due_tick=due_tick,
+            reason=reason,
+            causation_id=cause_event.event_id if cause_event else action.action_id,
+        )
+        try:
+            self.event_log.append(event)
+        except KernelTransactionError:
+            action.status = previous_status
+            self.scheduler.restore(removed)
+            raise
         self.events.publish(event)
-        return ActionReceipt(action.action_id, action.status, message, [event.event_id])
+        self.metrics[f"actions_{status.value}"] += 1
+        self.metrics[f"event:{event.event_type}"] += 1
+        return ActionReceipt(action.action_id, action.status, reason, [event.event_id])
 
     def advance(self, ticks: int = 1) -> list[ActionReceipt]:
         return [self._execute(action) for action in self.scheduler.advance(ticks)]
@@ -636,14 +880,46 @@ class WorldRuntime:
         self.actions = next_actions
 
     def replay(self, events: Iterable[EventIR]) -> None:
+        pending_actions: dict[str, tuple[int, int, ActionIR]] = {}
+        lifecycle_seen = False
+        lifecycle_tick = 0
+        lifecycle_order = 0
         for event in events:
-            if event.event_type != "state.committed":
-                continue
-            for item in event.payload.get("applied", []):
-                self.state.seed(
-                    item["owner"], item["namespace"], item["key"],
-                    item["value"], item["version"],
-                )
+            if event.event_type == "state.committed":
+                for item in event.payload.get("applied", []):
+                    self.state.seed(
+                        item["owner"], item["namespace"], item["key"],
+                        item["value"], item["version"],
+                    )
+            if event.event_type == "action.scheduled":
+                lifecycle_seen = True
+                lifecycle_tick = max(lifecycle_tick, event.timestamp_tick)
+                try:
+                    action = ActionIR.from_dict(event.payload["action"])
+                    due_tick = int(event.payload["due_tick"])
+                except (KeyError, TypeError, ValueError) as exc:
+                    raise RuntimeErrorBase("EventLog action.scheduled 無法重播") from exc
+                if due_tick < event.timestamp_tick:
+                    raise RuntimeErrorBase("EventLog action.scheduled due_tick 早於排程時間")
+                lifecycle_order += 1
+                action.status = ActionStatus.SCHEDULED
+                pending_actions[action.action_id] = (due_tick, lifecycle_order, action)
+            elif event.event_type in {
+                "action.completed", "action.cancelled", "action.interrupted", "action.failed",
+            }:
+                action_id = event.payload.get("action_id")
+                if isinstance(action_id, str):
+                    lifecycle_seen = True
+                    lifecycle_tick = max(lifecycle_tick, event.timestamp_tick)
+                    pending_actions.pop(action_id, None)
+        if lifecycle_seen:
+            self.scheduler.tick = lifecycle_tick
+            self.scheduler._counter = lifecycle_order
+            self.scheduler._queue = list(pending_actions.values())
+            heapq.heapify(self.scheduler._queue)
+            self.actions = {
+                action.action_id: action for _, _, action in pending_actions.values()
+            }
 
     def diagnostics(self) -> dict[str, Any]:
         return {

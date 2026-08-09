@@ -19,6 +19,7 @@ class ActionStatus(str, Enum):
     COMPLETED = "completed"
     FAILED = "failed"
     INTERRUPTED = "interrupted"
+    CANCELLED = "cancelled"
 
 
 @dataclass(slots=True)

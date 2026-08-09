@@ -17,6 +17,12 @@ SCHEMA_CATALOG_FORMAT = "compilableworld.schema-catalog/v0.1"
 
 _SCHEMA_ROOT = Path(__file__).resolve().parents[2] / "schemas"
 _SCHEMAS: dict[str, dict[str, str]] = {
+    "action_behaviors": {
+        "schema_id": "compilableworld.schema/action-behaviors/v0.1",
+        "filename": "action-behaviors.v0.1.schema.json",
+        "version": "v0.1",
+        "kind": "json",
+    },
     "functions": {
         "schema_id": "compilableworld.schema/functions/v0.1",
         "filename": "functions.v0.1.schema.json",

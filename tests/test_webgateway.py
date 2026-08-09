@@ -103,7 +103,7 @@ class WebGatewayTests(unittest.TestCase):
         self.assertEqual(
             {record["key"] for record in result["schemas"]},
             {
-                "functions", "scenarios", "runtime_package", "rooms", "exits",
+                "action_behaviors", "functions", "scenarios", "runtime_package", "rooms", "exits",
                 "entities", "items", "state_machines", "studio_world_ir", "studio_mapping",
             },
         )

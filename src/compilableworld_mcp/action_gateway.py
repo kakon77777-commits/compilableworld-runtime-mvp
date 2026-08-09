@@ -147,6 +147,7 @@ class SecureActionMCPGateway:
                 now=now,
             )
             receipt = runtime.submit(action_ir)
+            request_accepted = receipt.status in {ActionStatus.COMPLETED, ActionStatus.SCHEDULED}
             runtime_durability: dict[str, Any] | None = None
             if self.durability_store is not None:
                 try:
@@ -185,7 +186,7 @@ class SecureActionMCPGateway:
             base_result["audit"] = build_audit_envelope(
                 request,
                 "action.submit",
-                outcome="completed" if receipt.status == ActionStatus.COMPLETED else "failed",
+                outcome=receipt.status.value,
                 world_state_changed=receipt.status == ActionStatus.COMPLETED,
                 event_ids=receipt.event_ids,
                 idempotency_key=idempotency_key,
@@ -247,7 +248,7 @@ class SecureActionMCPGateway:
                 final_result["audit"] = build_audit_envelope(
                     request,
                     "action.submit",
-                    outcome="completed" if receipt.status == ActionStatus.COMPLETED else "failed",
+                    outcome=receipt.status.value,
                     world_state_changed=receipt.status == ActionStatus.COMPLETED,
                     event_ids=receipt.event_ids,
                     idempotency_key=idempotency_key,
@@ -260,7 +261,7 @@ class SecureActionMCPGateway:
                 idempotency_key,
                 action_ir.action_id,
                 final_result,
-                succeeded=receipt.status == ActionStatus.COMPLETED,
+                succeeded=request_accepted,
                 now=now,
             )
             return final_result

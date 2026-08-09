@@ -191,6 +191,28 @@ def _scoped_state_machine_overview(machine: Any, index: int) -> dict[str, Any]:
     }
 
 
+def _action_behavior_overview(behavior: Any, index: int) -> dict[str, Any]:
+    """Project compiled Action-scope authoring without exposing Scheduler writes."""
+    if not isinstance(behavior, dict):
+        return {
+            "behavior_id": f"(invalid-{index})",
+            "issues": [_issue(
+                "error", "invalid_action_behavior", "Action behavior 必須是物件",
+                f"action_behaviors[{index}]",
+            )],
+        }
+    return {
+        "behavior_id": behavior.get("behavior_id", f"(unnamed-{index})"),
+        "title": behavior.get("title", ""),
+        "verb": behavior.get("verb"),
+        "duration_ticks": behavior.get("duration_ticks"),
+        "completion_module": behavior.get("completion_module"),
+        "concurrency": behavior.get("concurrency"),
+        "interrupt_on": list(behavior.get("interrupt_on", [])),
+        "issues": [],
+    }
+
+
 def _function_records(package: dict[str, Any]) -> list[dict[str, Any]]:
     entries = package.get("functions", {}).get("functions", []) if isinstance(package.get("functions"), dict) else []
     records = []
@@ -236,9 +258,13 @@ def package_overview(package: dict[str, Any]) -> dict[str, Any]:
         _scoped_state_machine_overview(machine, index)
         for index, machine in enumerate(package.get("state_machines", []))
     ]
+    action_behaviors = [
+        _action_behavior_overview(behavior, index)
+        for index, behavior in enumerate(package.get("action_behaviors", []))
+    ]
     issues = [
         issue
-        for record in [*quests, *state_machines]
+        for record in [*quests, *state_machines, *action_behaviors]
         for issue in record["issues"]
     ]
 
@@ -256,6 +282,16 @@ def package_overview(package: dict[str, Any]) -> dict[str, Any]:
         for transition in machine.get("transitions", [])
         if isinstance(transition.get("on"), str)
     )
+    if action_behaviors:
+        event_types.update({
+            "action.scheduled", "action.started", "action.completed",
+            "action.cancelled", "action.interrupted", "action.failed",
+        })
+        event_types.update(
+            event_type
+            for behavior in action_behaviors
+            for event_type in behavior.get("interrupt_on", [])
+        )
     if package.get("dialogues", {}).get("dialogues"):
         event_types.add("dialogue.responded")
 
@@ -300,6 +336,7 @@ def package_overview(package: dict[str, Any]) -> dict[str, Any]:
             "records": function_records,
         },
         "quests": quests,
+        "action_behaviors": action_behaviors,
         "state_machines": state_machines,
         "semantic_records": _semantic_records_overview(package),
         "player_templates": {
@@ -366,6 +403,7 @@ def runtime_overview(runtime: "WorldRuntime") -> dict[str, Any]:
                 owner_id, "fsm", machine_id, machine.get("initial_state"),
             )
             machine["state_version"] = runtime.state.version(owner_id, "fsm", machine_id)
+    overview["pending_actions"] = runtime.pending_actions()
     overview["runtime"] = {
         "diagnostics": runtime.diagnostics(),
         "modules": {

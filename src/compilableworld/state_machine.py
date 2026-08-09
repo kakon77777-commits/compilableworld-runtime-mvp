@@ -31,7 +31,18 @@ STATE_MACHINE_REWARD_CURRENCY_LIMIT = 1_000_000_000
 # ownership is resolved separately from ActionIR causation and is therefore not
 # exposed as an ad-hoc payload match for events that do not carry it.
 STATE_MACHINE_TRIGGER_EVENT_FIELDS: dict[str, set[str]] = {
-    "action.failed": {"verb", "reason"},
+    "action.failed": {"action_id", "behavior_id", "actor", "verb", "reason"},
+    "action.scheduled": {
+        "action_id", "behavior_id", "actor", "verb", "duration_ticks", "due_tick",
+    },
+    "action.started": {"action_id", "behavior_id", "actor", "verb", "duration_ticks"},
+    "action.completed": {"action_id", "behavior_id", "actor", "verb", "duration_ticks"},
+    "action.cancelled": {
+        "action_id", "behavior_id", "actor", "verb", "duration_ticks", "due_tick", "reason",
+    },
+    "action.interrupted": {
+        "action_id", "behavior_id", "actor", "verb", "duration_ticks", "due_tick", "reason",
+    },
     "combat.actor_defeated": {"target"},
     "combat.attack_missed": {"target"},
     "combat.damage_applied": {"target", "damage", "remaining"},
@@ -41,6 +52,7 @@ STATE_MACHINE_TRIGGER_EVENT_FIELDS: dict[str, set[str]] = {
     "dialogue.spoken": {"text"},
     "door.opened": {"door"},
     "door.unlocked": {"door"},
+    "exploration.searched": {"room_id", "search_count"},
     "inventory.item_added": {"item"},
     "inventory.item_given": {"item", "actor", "recipient"},
     "inventory.item_removed": {"item"},

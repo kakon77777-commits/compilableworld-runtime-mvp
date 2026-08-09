@@ -40,6 +40,11 @@
                 "event_type": {
                   "enum": [
                     "action.failed",
+                    "action.scheduled",
+                    "action.started",
+                    "action.completed",
+                    "action.cancelled",
+                    "action.interrupted",
                     "combat.actor_defeated",
                     "combat.attack_missed",
                     "combat.damage_applied",
@@ -47,6 +52,7 @@
                     "dialogue.spoken",
                     "door.opened",
                     "door.unlocked",
+                    "exploration.searched",
                     "fsm.completed",
                     "fsm.failed",
                     "inventory.item_added",

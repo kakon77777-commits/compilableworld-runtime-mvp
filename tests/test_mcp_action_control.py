@@ -255,6 +255,33 @@ class SecureActionGatewayTests(unittest.TestCase):
                 now=self.NOW,
             )
 
+    def test_scheduled_long_action_is_accepted_not_misreported_as_failed(self) -> None:
+        context = self._context(session_token=self.session_token)
+        result = self.action_gateway.submit_action(
+            context,
+            {"verb": "search", "args": {}},
+            "idem-search-1",
+            now=self.NOW,
+        )
+        self.assertEqual(result["receipt"]["status"], "scheduled")
+        self.assertFalse(result["world_state_changed"])
+        self.assertEqual(result["audit"]["outcome"], "scheduled")
+        self.assertEqual(
+            self.action_gateway.reservation_store.get(self.session_id, "idem-search-1").status,
+            RESERVATION_STATUS_COMPLETED,
+        )
+        runtime = self.service.runtime_for_security(self.session_id)
+        self.assertEqual(runtime.scheduler.queued, 1)
+
+        replay = self.action_gateway.submit_action(
+            context,
+            {"verb": "search", "args": {}},
+            "idem-search-1",
+            now=self.NOW + 1,
+        )
+        self.assertTrue(replay["replayed"])
+        self.assertEqual(replay["receipt"]["status"], "scheduled")
+
     def test_gateway_uses_atomic_shared_sqlite_handoff(self) -> None:
         database = Path(self.temp.name) / "shared-commit.sqlite3"
         journal = ActionCommitJournalStore(database)

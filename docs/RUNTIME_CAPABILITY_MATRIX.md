@@ -4,7 +4,7 @@
 - **Baseline source:** uploaded integrated local snapshot
 - **Runtime package version:** `0.1.1`
 - **Audit date:** 2026-08-09
-- **Verification:** `PYTHONPATH=src python -m unittest discover -s tests` — **265/265 passed**
+- **Verification:** `PYTHONPATH=src python -m unittest discover -s tests` — **281/281 passed**
 - **Purpose:** authoritative inventory for PIW-MCP integration planning
 
 > Status meanings: **Implemented** = code and tests exist; **Partial** = usable core exists but stated boundary remains; **Planned** = no production implementation found in this baseline.
@@ -29,7 +29,7 @@
 | Replay | Implemented | runtime replay path | movement/inventory/door replay tests | MCP session recovery can rely on replay, with version limits |
 | Snapshot version validation | Implemented | runtime migration/version checks | unknown-version rejection test | MCP must return explicit version mismatch errors |
 | Cross-version migration registry | Partial | `compilableworld_mcp.migration_registry`, plus explicit legacy snapshot migration | coordination and legacy migration tests | generic registry exists; Kernel snapshot loader is still a separate adapter |
-| Scheduler | Implemented | `Scheduler` | delay and snapshot restore tests | delayed actions already belong to runtime authority |
+| Scheduler | Implemented | `Scheduler`, Action behavior lifecycle | delay, cancellation, interruption, pending Replay and snapshot restore tests | composite actions remain under runtime authority |
 | Single-process/single-world service | Partial | current runtime model | documented boundary | remote multi-session host remains outside current core |
 
 ## 2. World mechanics
@@ -52,7 +52,7 @@
 | Quests: event transitions | Implemented | action failure, movement, inventory, door, dialogue, combat, magic and terminal quest chaining share one bounded trigger contract |
 | Quests: branch/failure/priority | Implemented | deterministic priority, actor causation, event matching, requirements, graph reachability, terminal-state rejection, ambiguous dispatch rejection and exactly-once terminal reward; see `docs/WORLD_STATE_MACHINE_EXECUTION_CONTRACT_zh-TW.md` |
 | Scoped StateIR: World/Region/Scene/Entity/System | Implemented | versioned authoring schema, owner validation, isolated `fsm.*` cells, deterministic EventIR transitions, visibility projection, terminal chaining, Snapshot and Replay; owner scope is not implicit geographic event routing; see `docs/SCOPED_STATE_IR_EXECUTION_CONTRACT_zh-TW.md` |
-| Action-scope state machines | Planned | delayed actions exist, but interruptible/cancellable composite ActionIR state machines need a separate contract |
+| Action-scope state machines | Implemented | versioned bounded behavior definitions, authored duration, `one_per_actor`, lifecycle EventIR, manual cancellation, movement/damage/defeat interruption, Snapshot and pending Replay; no resume, compensation, parallel steps or arbitrary guards; see `docs/ACTION_SCOPE_BEHAVIOR_EXECUTION_CONTRACT_zh-TW.md` |
 | Runtime-generated items/entities | Partial | generated player exists; generic runtime entity spawning remains bounded |
 
 ## 3. Narrative, dialogue and player entry
@@ -91,7 +91,7 @@
 
 | Capability | Status | Notes |
 |---|---|---|
-| Runtime Studio overview | Implemented | FMS/TMS/entity/state/quest graph, scoped StateIR static/current state and trace tail |
+| Runtime Studio overview | Implemented | FMS/TMS/entity/state/quest graph, scoped StateIR static/current state, Action behavior definitions/pending progress and trace tail |
 | Read-only Studio HTTP APIs | Implemented | overview, functions, schemas, import |
 | EveGlyph YAML parser | Implemented | nested lists and quoted scalars supported |
 | Studio World IR normalization | Implemented | entities, entity lists, state machines, diagnostics |

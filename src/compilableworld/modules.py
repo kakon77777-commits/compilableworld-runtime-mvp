@@ -474,6 +474,40 @@ class DialogueModule(BaseModule):
         return TransitionResult(True, events=[event], message=response)
 
 
+class ExplorationModule(BaseModule):
+    """Small real completion module for the authored long-action pipeline."""
+
+    def __init__(self) -> None:
+        super().__init__(ModuleContract(
+            "exploration.core", "0.1.0", "TMS", ["search"],
+            ["exploration.searched"],
+            ["position.*", "status.*", "exploration.*"],
+            ["exploration.*"],
+            ["entity", "state", "action", "event", "scheduler"],
+        ))
+
+    def evaluate(self, action: ActionIR, runtime: WorldRuntime) -> TransitionResult:
+        if not runtime.state.get(action.actor_id, "status", "alive", True):
+            return TransitionResult(False, message="你已無法繼續搜索")
+        room_id = runtime.state.get(action.actor_id, "position", "room")
+        room = next((item for item in runtime.package["rooms"] if item["room_id"] == room_id), None)
+        if room is None:
+            return TransitionResult(False, message="目前場景不存在，搜索中止")
+        count = runtime.state.get(action.actor_id, "exploration", "search_count", 0) + 1
+        delta = StateDelta(
+            action.actor_id, "exploration", "search_count", "set", count,
+            source_module=self.contract.module_id,
+        )
+        event = self.event(
+            "exploration.searched", action,
+            {"room_id": room_id, "search_count": count},
+        )
+        return TransitionResult(
+            True, [delta], [event],
+            f"你仔細搜索了{room['name']}（累計 {count} 次）。",
+        )
+
+
 class StateMachineModule(BaseModule):
     """Execute compiled non-Quest StateIR for hierarchical world scopes.
 
@@ -704,10 +738,11 @@ class QuestModule(BaseModule):
 
 
 def install_builtin_modules(runtime: WorldRuntime) -> None:
+    runtime.bind_action_interrupts()
     available = {
         module.contract.module_id: module for module in [
             RoomModule(), MovementModule(), DoorModule(), InventoryModule(),
-            HealthModule(), CombatModule(), MagicModule(), DialogueModule(),
+            HealthModule(), CombatModule(), MagicModule(), DialogueModule(), ExplorationModule(),
             StateMachineModule(), QuestModule(),
         ]
     }

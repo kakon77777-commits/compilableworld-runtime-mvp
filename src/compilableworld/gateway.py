@@ -5,7 +5,7 @@ import shlex
 from dataclasses import dataclass
 from typing import Protocol
 
-from .kernel import WorldRuntime
+from .kernel import RuntimeErrorBase, WorldRuntime
 from .models import ActionIR, EventIR
 from .narrative import render_room_description
 
@@ -34,6 +34,8 @@ class DeterministicIntentParser:
             return ActionIR(actor_id, "move", args={"direction": parts[1].lower() if len(parts) > 1 else ""})
         if verb == "look":
             return ActionIR(actor_id, "look")
+        if verb == "search":
+            return ActionIR(actor_id, "search")
         if verb in {"i", "inv", "inventory"}:
             return ActionIR(actor_id, "inventory")
         if verb in {"take", "get", "drop", "open", "unlock", "attack"}:
@@ -122,7 +124,7 @@ class TerminalGateway:
             if text in {"quit", "exit"}:
                 break
             if text == "help":
-                print("look | n/s/e/w/north/south/east/west/up/down | go DIR | take/drop/open/unlock/attack 名稱或ID | talk/ask 對象 [topic] | give 物品 對象 | cast 法術名 | inventory | say TEXT | status | quests | tick [N] | events | diag | save FILE | load FILE")
+                print("look | search | n/s/e/w/north/south/east/west/up/down | go DIR | take/drop/open/unlock/attack 名稱或ID | talk/ask 對象 [topic] | give 物品 對象 | cast 法術名 | inventory | say TEXT | status | quests | tick [N] | pending | cancel ACTION_ID | events | diag | save FILE | load FILE")
                 continue
             if text.startswith("tick"):
                 parts = text.split()
@@ -132,6 +134,17 @@ class TerminalGateway:
             if text == "events":
                 for event in self.runtime.event_log.events[-10:]:
                     print(f"[{event.timestamp_tick}] {event.event_type} {json.dumps(event.payload, ensure_ascii=False)}")
+                continue
+            if text == "pending":
+                pending = self.runtime.pending_actions(self.actor_id)
+                print(json.dumps(pending, ensure_ascii=False, indent=2) if pending else "沒有待執行行為。")
+                continue
+            if text.startswith("cancel "):
+                try:
+                    receipt = self.runtime.cancel_action(self.actor_id, text[7:].strip())
+                    print(receipt.message)
+                except RuntimeErrorBase as exc:
+                    print(f"取消失敗: {exc}")
                 continue
             if text == "diag":
                 print(json.dumps(self.runtime.diagnostics(), ensure_ascii=False, indent=2))

@@ -8,10 +8,10 @@
 | Item | Value |
 |---|---|
 | Local integrated runtime | `0.1.1` |
-| Verified tests | `265/265` |
+| Verified tests | `281/281` |
 | GitHub `master` observed head | `72334d7` (verified 2026-08-09) |
-| GitHub integration branch before scoped StateIR package | `agent/m12-runtime-mcp-integration` at `c4b4cd0` |
-| Remote synchronization status | Scoped StateIR package is committed and pushed as one reviewed integration-branch change |
+| GitHub integration branch before Action-scope package | `agent/m12-runtime-mcp-integration` at `fc2bfec` |
+| Remote synchronization status | Scoped StateIR package is pushed; Action-scope package is ready for the reviewed integration-branch commit |
 | Intended next release baseline | `v0.2.0-alpha.1` or equivalent |
 
 ## Current integrated local state
@@ -132,5 +132,36 @@ out_of_scope:
   - Action-scope composite state machines
   - free-form guards, arbitrary effects or rewards
   - Runtime sampling of Studio bounded random metadata
+  - AI direct StateStore writes
+```
+
+### CW-M12-ACTION-003 — Cancellable Action-scope behaviors
+
+```yaml
+owner_environment: codex
+status: completed-and-deployed-on-integration-branch
+outputs:
+  - schemas/action-behaviors.v0.1.schema.json
+  - src/compilableworld/action_behavior.py
+  - Scheduler and Kernel lifecycle integration
+  - exploration.core careful-search vertical slice
+  - Studio static/pending projections and terminal commands
+  - MCP scheduled-action receipt alignment
+  - docs/ACTION_SCOPE_BEHAVIOR_EXECUTION_CONTRACT_zh-TW.md
+  - tests/test_action_behavior.py
+acceptance:
+  - authored duration and one-per-actor concurrency compile fail closed
+  - scheduled actions emit deterministic lifecycle EventIR
+  - owner-scoped cancellation and movement/damage/defeat interruption work
+  - completion writes only through module StateDelta/EventIR
+  - Snapshot preserves exact progress and EventLog Replay rebuilds pending work
+  - lifecycle events can drive scoped StateIR
+  - Studio and MCP report scheduled work without treating it as failure
+  - 281/281 tests pass
+out_of_scope:
+  - resume and compensation transactions
+  - parallel child steps or arbitrary interrupt expressions
+  - Studio visual authoring/write-back form
+  - player/MCP remote control of authoritative Runtime time
   - AI direct StateStore writes
 ```

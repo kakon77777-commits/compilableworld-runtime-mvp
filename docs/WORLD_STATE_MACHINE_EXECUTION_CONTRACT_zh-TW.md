@@ -24,11 +24,12 @@ Studio transition 可以明確提供 bounded `requirements`。目前只接受
 可執行 trigger 與可比對 payload 欄位由
 `src/compilableworld/state_machine.py` 的單一契約共享給 Studio、Compiler 與 Runtime：
 
-- Kernel：`action.failed`；
+- Kernel Action lifecycle：`action.scheduled`、`action.started`、`action.completed`、`action.cancelled`、`action.interrupted`、`action.failed`；
 - Movement／Inventory／Door：移動、拿取、交付、放下、開門與解鎖事件；
 - Dialogue：`dialogue.spoken`、`dialogue.responded`；
 - Combat／Magic：miss、damage、defeated 與 `magic.cast`；
 - Quest chaining：`quest.completed`、`quest.failed`。
+- Exploration：`exploration.searched`。
 
 `state.committed` 與純查詢／觀察事件不在 trigger 白名單內。這避免把讀取 UI 或任意
 StateStore path 變成隱含規則。

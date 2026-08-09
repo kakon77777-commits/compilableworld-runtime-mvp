@@ -9,6 +9,14 @@ from collections import deque
 from pathlib import Path
 from typing import Any
 
+from .action_behavior import (
+    ACTION_BEHAVIOR_CONCURRENCY,
+    ACTION_BEHAVIOR_DEFINITION_LIMIT,
+    ACTION_BEHAVIOR_DURATION_LIMIT,
+    ACTION_BEHAVIOR_FORMAT,
+    ACTION_BEHAVIOR_INTERRUPT_EVENTS,
+    ACTION_BEHAVIOR_INTERRUPT_LIMIT,
+)
 from .functions import FunctionDefinitionError, FunctionRegistry, validate_function_source
 from .player_generation import template_records
 from .schema_registry import SchemaContractError, csv_schema_columns, schema_contracts
@@ -160,6 +168,8 @@ def compile_world(
         resolved["functions"] = _safe_source(root, str(sources["functions"]))
     if "state_machines" in sources:
         resolved["state_machines"] = _safe_source(root, str(sources["state_machines"]))
+    if "action_behaviors" in sources:
+        resolved["action_behaviors"] = _safe_source(root, str(sources["action_behaviors"]))
     world = _load_json(resolved["world"])
     rooms = _load_csv(resolved["rooms"], "rooms")
     exits = _load_csv(resolved["exits"], "exits")
@@ -173,6 +183,10 @@ def compile_world(
     state_machines_source = (
         _load_json(resolved["state_machines"])
         if "state_machines" in resolved else {"format": "compilableworld.state-machines/v0.1", "state_machines": []}
+    )
+    action_behaviors_source = (
+        _load_json(resolved["action_behaviors"])
+        if "action_behaviors" in resolved else {"format": ACTION_BEHAVIOR_FORMAT, "behaviors": []}
     )
     try:
         player_templates = (
@@ -202,6 +216,7 @@ def compile_world(
     overlap = entity_ids & item_ids
     if overlap:
         raise CompileError(f"entity/item ID 衝突: {sorted(overlap)}")
+    action_behaviors = _validate_action_behaviors(action_behaviors_source)
     state_machines = _validate_scoped_state_machines(
         state_machines_source,
         world_id=manifest["world_id"],
@@ -245,7 +260,10 @@ def compile_world(
 
     source_schema_ids = {
         key: contract_ids[key]
-        for key in ("rooms", "exits", "entities", "items", "functions", "scenarios", "state_machines")
+        for key in (
+            "rooms", "exits", "entities", "items", "functions", "scenarios",
+            "state_machines", "action_behaviors",
+        )
         if key in sources
     }
 
@@ -354,6 +372,12 @@ def compile_world(
             raise CompileError(f"不合法 module ID: {module_id}")
     if state_machines and "state_machine.core" not in modules:
         raise CompileError("state_machines source 需要 manifest.modules 宣告 state_machine.core")
+    for behavior in action_behaviors:
+        if behavior["completion_module"] not in modules:
+            raise CompileError(
+                f"action behavior {behavior['behavior_id']} 的 completion_module "
+                f"未在 manifest.modules 宣告: {behavior['completion_module']}"
+            )
     package = {
         "format": "compilableworld.runtime-package/v0.1",
         "manifest": {
@@ -366,6 +390,7 @@ def compile_world(
         "rooms": rooms,
         "exits": exits,
         "entities": compiled_entities,
+        "action_behaviors": action_behaviors,
         "state_machines": state_machines,
         "quests": quests,
         "narrative": narrative,
@@ -398,6 +423,7 @@ def compile_world(
         "exits": len(exits), "entities": len(compiled_entities), "states": len(initial_state),
         "modules": modules, "dialogues": len(dialogues["dialogues"]),
         "scenarios": len(scenarios["scenarios"]), "functions": len(functions["functions"]),
+        "action_behaviors": len(action_behaviors),
         "state_machines": len(state_machines),
         "package_sha256": _sha256(package_path),
     }
@@ -424,6 +450,91 @@ def _state(owner: str, namespace: str, key: str, value: Any) -> dict[str, Any]:
 
 def _bool(value: str) -> bool:
     return str(value).strip().lower() in {"1", "true", "yes", "y"}
+
+
+def _validate_action_behaviors(source: Any) -> list[dict[str, Any]]:
+    if not isinstance(source, dict):
+        raise CompileError("action_behaviors.json 必須是物件")
+    unknown_root = set(source) - {"format", "behaviors"}
+    if unknown_root:
+        raise CompileError(f"action_behaviors.json 含未知欄位: {sorted(unknown_root)}")
+    if source.get("format") != ACTION_BEHAVIOR_FORMAT:
+        raise CompileError("action_behaviors.json format 不支援")
+    behaviors = source.get("behaviors")
+    if not isinstance(behaviors, list):
+        raise CompileError("action_behaviors.json.behaviors 必須是陣列")
+    if len(behaviors) > ACTION_BEHAVIOR_DEFINITION_LIMIT:
+        raise CompileError(
+            f"action_behaviors.json 不可超過 {ACTION_BEHAVIOR_DEFINITION_LIMIT} 個 behavior"
+        )
+
+    allowed = {
+        "behavior_id", "title", "verb", "duration_ticks",
+        "completion_module", "concurrency", "interrupt_on",
+    }
+    behavior_ids: set[str] = set()
+    verbs: set[str] = set()
+    normalized: list[dict[str, Any]] = []
+    for index, behavior in enumerate(behaviors):
+        label = f"action_behaviors.json.behaviors[{index}]"
+        if not isinstance(behavior, dict):
+            raise CompileError(f"{label} 必須是物件")
+        unknown = set(behavior) - allowed
+        missing = allowed - set(behavior)
+        if unknown:
+            raise CompileError(f"{label} 含未知欄位: {sorted(unknown)}")
+        if missing:
+            raise CompileError(f"{label} 缺少必填欄位: {sorted(missing)}")
+
+        behavior_id = behavior["behavior_id"]
+        verb = behavior["verb"]
+        completion_module = behavior["completion_module"]
+        if not isinstance(behavior_id, str) or not ID_RE.match(behavior_id):
+            raise CompileError(f"{label}.behavior_id 不合法")
+        if behavior_id in behavior_ids:
+            raise CompileError(f"action_behaviors.json 含重複 behavior_id: {behavior_id}")
+        behavior_ids.add(behavior_id)
+        if not isinstance(verb, str) or not ID_RE.match(verb):
+            raise CompileError(f"{label}.verb 不合法")
+        if verb in verbs:
+            raise CompileError(f"action_behaviors.json 同一 verb 只能有一個 behavior: {verb}")
+        verbs.add(verb)
+        if not isinstance(completion_module, str) or not ID_RE.match(completion_module):
+            raise CompileError(f"{label}.completion_module 不合法")
+        title = behavior["title"]
+        if not isinstance(title, str) or not title.strip():
+            raise CompileError(f"{label}.title 必須是非空字串")
+        duration = behavior["duration_ticks"]
+        if (
+            isinstance(duration, bool)
+            or not isinstance(duration, int)
+            or not 1 <= duration <= ACTION_BEHAVIOR_DURATION_LIMIT
+        ):
+            raise CompileError(
+                f"{label}.duration_ticks 必須是 1 到 {ACTION_BEHAVIOR_DURATION_LIMIT} 的整數"
+            )
+        if behavior["concurrency"] != ACTION_BEHAVIOR_CONCURRENCY:
+            raise CompileError(f"{label}.concurrency v0.1 只支援 {ACTION_BEHAVIOR_CONCURRENCY}")
+        interrupt_on = behavior["interrupt_on"]
+        if (
+            not isinstance(interrupt_on, list)
+            or len(interrupt_on) > ACTION_BEHAVIOR_INTERRUPT_LIMIT
+            or len(interrupt_on) != len(set(interrupt_on))
+            or any(event_type not in ACTION_BEHAVIOR_INTERRUPT_EVENTS for event_type in interrupt_on)
+        ):
+            raise CompileError(
+                f"{label}.interrupt_on 必須是不重複、最多 {ACTION_BEHAVIOR_INTERRUPT_LIMIT} 個受支援 EventIR"
+            )
+        normalized.append({
+            "behavior_id": behavior_id,
+            "title": title.strip(),
+            "verb": verb,
+            "duration_ticks": duration,
+            "completion_module": completion_module,
+            "concurrency": ACTION_BEHAVIOR_CONCURRENCY,
+            "interrupt_on": list(interrupt_on),
+        })
+    return normalized
 
 
 def _validate_scoped_state_machines(

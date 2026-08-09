@@ -25,7 +25,7 @@ class SchemaContractTests(unittest.TestCase):
         self.assertEqual(
             set(contracts),
             {
-                "functions", "scenarios", "runtime_package", "rooms", "exits",
+                "action_behaviors", "functions", "scenarios", "runtime_package", "rooms", "exits",
                 "entities", "items", "state_machines", "studio_world_ir", "studio_mapping",
             },
         )
@@ -89,6 +89,15 @@ class SchemaContractTests(unittest.TestCase):
         self.assertNotIn("guard", transition["properties"])
         self.assertNotIn("effects", transition["properties"])
 
+        action_behavior_schema = json.loads(
+            (ROOT / "schemas" / "action-behaviors.v0.1.schema.json").read_text(encoding="utf-8")
+        )
+        behavior = action_behavior_schema["$defs"]["behavior"]
+        self.assertEqual(action_behavior_schema["properties"]["behaviors"]["maxItems"], 1024)
+        self.assertEqual(behavior["properties"]["duration_ticks"]["maximum"], 1000000)
+        self.assertEqual(behavior["properties"]["interrupt_on"]["maxItems"], 16)
+        self.assertNotIn("guard", behavior["properties"])
+
         runtime_package_schema = json.loads(
             (ROOT / "schemas" / "runtime-package.v0.1.schema.json").read_text(encoding="utf-8")
         )
@@ -98,7 +107,9 @@ class SchemaContractTests(unittest.TestCase):
             "compilableworld.studio-semantic-records/v0.1",
         )
         self.assertIn("state_machines", runtime_package_schema["required"])
+        self.assertIn("action_behaviors", runtime_package_schema["required"])
         self.assertIn("state_machines", runtime_package_schema["properties"]["schema_contracts"]["required"])
+        self.assertIn("action_behaviors", runtime_package_schema["properties"]["schema_contracts"]["required"])
         self.assertEqual(runtime_package_schema["properties"]["state_machines"]["maxItems"], 1024)
 
     def test_csv_header_contract_rejects_unknown_columns(self) -> None:
