@@ -1,25 +1,26 @@
-# Action-scope 複合行為執行契約 v0.6
+# Action-scope 複合行為執行契約 v0.7
 
-本文件描述 CompilableWorld Runtime 已落地的長時間玩家行為。v0.6 在固定順序、精確 tick、fail-closed phase-entry conditions、bounded retry/deadline 與非遞迴 primitive child Action 上，增加有界 conditional child branch 與固定線性 rejoin；它仍不是任意 Action Graph、自由 expression、parallel/join 或 effect 腳本。
+本文件描述 CompilableWorld Runtime 已落地的長時間玩家行為。v0.7 在精確 tick、fail-closed phase-entry conditions、bounded retry/deadline、sticky conditional child branch 與非遞迴 primitive child Action 上，加入編譯期驗證的單一路徑 static DAG routing；它仍不是動態／遞迴 Action Graph、自由 expression、parallel/synchronizing join 或 effect 腳本。
 
 ## 1. Authoring 契約
 
-新來源檔使用 `compilableworld.action-behaviors/v0.6`，由 `schemas/action-behaviors.v0.6.schema.json` 約束。每個 behavior 必須宣告：
+新來源檔使用 `compilableworld.action-behaviors/v0.7`，由 `schemas/action-behaviors.v0.7.schema.json` 約束。每個 behavior 必須宣告：
 
 - `behavior_id`、`title`、唯一 `verb`；
-- `phases`：2–64 個固定順序 phase；每個 phase 有唯一 `phase_id`、`title`、1–1,000,000 `duration_ticks`、`when`、nullable `retry` 與 `branches`，原始總長不得超過 1,000,000 tick；
-- final phase 的 `branches` 必須為空。其他 phase 可為空，或宣告 2–16 個 priority branch；整個 v0.6 behavior 至少有一組 branch，而且至少一個 branch 含 primitive child Action；
+- `phases`：2–64 個靜態 phase node；每個 node 有唯一 `phase_id`、`title`、1–1,000,000 `duration_ticks`、`when`、nullable `retry` 與 `branches`，所有 authored node duration 總和不得超過 1,000,000 tick；
+- 第一個 node 是唯一 entry；恰有一個 `branches: []` 的 terminal。每個非 terminal node 必須宣告 1–16 個 priority branch，每個 branch 都有編譯期已知 `next_phase_id`，而且整個 behavior 至少有一個 2 個以上選項的 split；
+- Compiler 拒絕未知 target、self-route、cycle 與不可達 node，並把 entry 到 terminal 的最長靜態路徑正規化為 `duration_ticks`；
 - `completion_module`：manifest 明確啟用的 Runtime Module；啟動後 Kernel 會再確認實際 verb owner 與這個宣告一致；
 - `concurrency: one_per_actor`；
 - `interrupt_on`：最多 16 個不重複的 bounded EventIR。
 
 中斷仍只接受 `movement.actor_moved`、`combat.damage_applied`、`combat.actor_defeated`。未知欄位、重複 verb／phase／condition、未知 module、自由 guard、腳本、任意 StateStore path 或通用 effect 一律在編譯期拒絕。
 
-舊 `compilableworld.action-behaviors/v0.1` 單階段、v0.2 sequential、v0.3 condition-gated、v0.4 retry-bounded 與 v0.5 direct-child 來源仍可編譯；Compiler 會保留實際 `source_schemas.action_behaviors`，同時把 package 的最新正式契約標成 v0.6。它不會替舊來源假造不存在的 phases、conditions、retry policy、child step 或 branch。
+舊 `compilableworld.action-behaviors/v0.1` 單階段、v0.2 sequential、v0.3 condition-gated、v0.4 retry-bounded、v0.5 direct-child 與 v0.6 implicit-linear-branch 來源仍可編譯；Compiler 會保留實際 `source_schemas.action_behaviors`，同時把 package 的最新正式契約標成 v0.7。它不會替舊來源假造不存在的 phases、conditions、retry policy、child step、branch 或 route。
 
 ## 2. Runtime lifecycle
 
-玩家提交已 authored 的 verb 時，Kernel 以 authoring duration 為準。若 ActionIR 另帶不相符的 delay，或同一 actor 已有 authored 行為，提交會 fail closed。正常完成順序是：
+玩家提交已 authored 的 verb 時，Kernel 以編譯後最長路徑 duration 為排程上限。若 ActionIR 另帶不相符的 delay，或同一 actor 已有 authored 行為，提交會 fail closed。當分支進入唯一 terminal，Scheduler due tick 會收斂為實際單一路徑的 terminal boundary；正常完成順序是：
 
 ```text
 ActionIR
@@ -32,6 +33,7 @@ ActionIR
        -> primitive_module.evaluate(child ActionIR)
        -> state.committed + module EventIR + action.child_completed
        -> action.child_failed + parent action.failed（primitive 拒絕）
+  -> resolve(selected_branch.next_phase_id)
   -> evaluate(next_phase.when)
        -> action.retry_scheduled（條件不成立且尚在 authored retry/deadline 內）
        -> action.failed（無 retry，或次數/deadline 已耗盡）
@@ -47,15 +49,15 @@ ActionIR
 
 `action.scheduled` 含 private、可重建的 ActionIR；其他 lifecycle payload 只暴露有界識別與結果。完成模組仍遵守普通 Module Contract：只能回傳 StateDelta／EventIR，不能直接寫 StateStore。
 
-`action.branch_selected` 固定包含 behavior／phase／branch ID、唯一 priority、下一個線性 phase 與 nullable child step ID。`action.progressed` 固定包含已完成 phase、下一 phase、1-based phase index、已完成／總 phase 數、累積／總 tick。`advance(N)` 內部逐 tick 解算，所以跨越多個 tick 也不會漏掉中途 checkpoint；EventLog append 失敗時會把該 tick、branch choice 與 child 結果一起回滾，下一次只重試一次。兩種事件與 child lifecycle 都可驅動 Quest／scoped StateIR，但沒有 generic StateDelta 或自由 effect 入口。
+`action.branch_selected` 固定包含 behavior／phase／branch ID、唯一 priority、選定的 `next_phase_id` 與 nullable child step ID。`action.progressed` 固定包含已完成 phase、下一 phase、實際路徑序號、已完成／authored phase 數、active progress 與下一 boundary；進入 terminal 時也帶收斂後 due tick。`advance(N)` 內部逐 tick 解算，所以跨越多個 tick 也不會漏掉中途 checkpoint；EventLog append 失敗時會把該 tick、route cursor、branch choice 與 child 結果一起回滾。兩種事件與 child lifecycle 都可驅動 Quest／scoped StateIR，但沒有 generic StateDelta 或自由 effect 入口。
 
 如果完成模組拒絕行為或提交失敗，Runtime 產生 `action.failed`，不會留下部分 StateDelta。生命週期事件和完成結果共用既有 EventLog／EventBus 因果鏈，因此 Quest 或 scoped StateIR 可以監聽白名單內的 `action.*` EventIR。
 
 ## 3. Bounded conditional child branch
 
-每組非空 `branches` 必須有 2–16 個選項。每個 branch 固定包含全 behavior 唯一的 `branch_id`、0–1,000,000 唯一 `priority`、最多 16 個既有 bounded AND conditions，以及 nullable `child_action`。一組中必須恰有一個 `when: []` 的 fallback；fallback priority 必須低於所有 conditional branch。Compiler 依 priority 由高至低正規化，Kernel 選第一個全部條件成立的 branch，因此不依 JSON 輸入順序猜測，也不會沒有 fallback。
+每個非 terminal `branches` 必須有 1–16 個選項；單一 unconditional branch 可表達固定 edge，至少一個 node 必須有 2 個以上選項。每個 branch 固定包含全 behavior 唯一的 `branch_id`、0–1,000,000 唯一 `priority`、最多 16 個既有 bounded AND conditions、nullable `child_action` 與靜態 `next_phase_id`。一組中必須恰有一個 `when: []` 的 fallback；fallback priority 必須低於所有 conditional branch。Compiler 依 priority 由高至低正規化，Kernel 選第一個全部條件成立的 branch，因此不依 JSON 輸入順序猜測，也不會沒有 fallback。
 
-選擇只在該 phase boundary 第一次抵達時進行，並寫入 pending Action 的 `selected_branches[phase_id]`。若下一 phase gate 失敗而 retry，Kernel 重用原 branch，不重新讀 StateStore 來改選；成功 child 也不重跑。branch 執行後只能回到原本下一個線性 phase，這是 implicit join，不是任意 `next_phase_id` 路由。EventLog 與 Snapshot 都保存選擇，Replay 會驗證 branch ID、priority、next phase 與 child step 是否符合編譯後契約。
+選擇只在該 phase boundary 第一次抵達時進行，並寫入 pending Action 的 `selected_branches[phase_id]`。若 target phase gate 失敗而 retry，Kernel 重用原 branch，不重新讀 StateStore 來改選；成功 child 也不重跑。通過 gate 後，route cursor 才原子更新 `current_phase_id`、phase boundary、active-duration progress 與無重複 `visited_phase_ids`。多條 edge 可匯入同一後續 node，但因為執行期永遠只有一條 active path，這只是靜態 merge，不是平行同步 join。EventLog 與 Snapshot 都保存並驗證 route。
 
 branch conditions 使用第 4 節同一套 subject／namespace／operator／finite scalar 契約；沒有 OR、NOT、自由 guard 或 AI 裁決。編譯後 branch 集合損壞、選擇不存在或無法解析時，父 Action 以 `failure_code: branch_unresolved` fail closed。
 
@@ -106,13 +108,13 @@ retry EventIR 包含 attempt、固定 interval、first failure tick、next retry
 - `cancel_action(actor_id, action_id)` 只允許排程所有者取消，成功後產生 `action.cancelled`。
 - 只有 `EventIR.target` 等於排程 actor，而且事件型別出現在該 behavior 的 `interrupt_on` 時，才會產生 `action.interrupted`。
 - 移動、受傷、被擊敗都必須先是 Runtime 已提交的正式 EventIR；UI、AI 或自由文字不能偽造內部中斷判定。
-- 取消或中斷會將項目與 retry／branch／child progress 從 Scheduler／Runtime 移除。v0.6 不保留 resumable continuation，也不執行補償 effect。
+- 取消或中斷會將項目與 route／retry／branch／child progress 從 Scheduler／Runtime 移除。v0.7 不保留 resumable continuation，也不執行補償 effect。
 
 若 `action.scheduled`、`action.cancelled` 或 `action.interrupted` 寫入 EventLog 失敗，Kernel 會回復 queue 與 action registry，避免「事件說沒排程但 queue 有工作」或反向的半完成狀態。
 
 ## 8. Gray Crown 垂直切片
 
-`behavior.search.careful` 將 `search` 定義為「觀察搜索範圍」與「仔細檢查線索」兩個各一 tick 的 phase。第一個 phase 依 `survey_actor_alive` 選擇 `survey.alive`（priority 100，執行 `survey.room`／`look`）或 `survey.fallback`（priority 0，執行 `survey.status`／`status`），再共同 rejoin 到 `inspect`。第二 phase 的 `actor_alive` 不成立時最多以一 tick間隔 retry 兩次；即使期間 alive 改變，已選 branch 與已完成 child 都不重選、不重跑。持續失敗則在 deadline 發出 `action.failed(failure_code=retry_exhausted)`。通過 gate 後的下一個 final due tick 才由 `exploration.core` 提交：
+`behavior.search.careful` 保留為 v0.6 相容切片：它將 `search` 定義為「觀察搜索範圍」與「仔細檢查線索」兩個各一 tick 的 phase，兩條 branch 都 implicit rejoin 到 `inspect`。v0.7 驗證切片則加入可跳過的 `focus` node：高 priority route 走 `survey -> focus -> inspect` 三 tick，fallback 走 `survey -> inspect` 兩 tick，並在第一 tick 把初始最長路徑 due tick 由 3 收斂為 2。兩種來源都維持 branch／child sticky、gate retry 與唯一 `exploration.core` completion：
 
 ```text
 StateDelta(<actor>, exploration, search_count, increment)
@@ -123,25 +125,25 @@ EventIR(exploration.searched, target=<actor>)
 
 ## 9. Snapshot、Replay 與投影
 
-- Snapshot v0.5 保存目前 tick、排程 ActionIR、due tick、每個 pending Action 的 attempt／first failure／next retry／deadline、必須符合 authored path 的 `selected_branches` 與 `completed_steps`；v0.1–v0.4 仍有明確 migration，舊版 branch progress 以空物件開始。
-- EventLog Replay 套用所有已提交 `state.committed`，並以 private `action.scheduled`、`action.branch_selected`、`action.child_completed`、`action.retry_scheduled`、`action.progressed` 與 terminal lifecycle 事件重建 pending queue、更新 due tick、branch、retry 與 child progress。
+- Snapshot v0.6 保存目前 tick、排程 ActionIR、due tick、每個 pending Action 的 route cursor、attempt／deadline、必須符合實際 routed path 的 `selected_branches` 與 `completed_steps`；v0.1–v0.5 仍有明確 migration，舊來源 pending record 的 route 為 null。
+- EventLog Replay 套用所有已提交 `state.committed`，並以 private `action.scheduled`、`action.branch_selected`、`action.child_completed`、`action.retry_scheduled`、`action.progressed` 與 terminal lifecycle 事件重建 pending queue、route boundary、收斂後 due tick、branch、retry 與 child progress；branch target 或 boundary tick 不符便拒絕重播。
 - 純 EventLog 不記錄 checkpoint 之間沒有產生事件的靜默 tick，因此 Replay 不猜測其流逝；需要 checkpoint 之間的精確進度時使用 Snapshot。
 - Studio `package_overview()` 顯示完整 behavior／phase／branch／child／condition／retry 定義與 diagnostics；player/runtime pending projection只顯示 branch ID／priority／condition IDs、child step ID／完成數，以及安全的 retry policy／attempt／next tick／deadline，不顯示 child args、State Cell path、operator 或 value。
 - MCP Action Gateway 將 `scheduled` 視為已接受、可稽核與可 idempotent replay 的 receipt，而不是失敗；世界狀態是否已改變仍要等 completion commit。
 
-Runtime host 仍擁有時間推進權。v0.6 沒有提供讓玩家或 MCP 任意前進 authoritative tick 的遠端工具；本機終端的 `tick` 是 operator/debug 入口。
+Runtime host 仍擁有時間推進權。v0.7 沒有提供讓玩家或 MCP 任意前進 authoritative tick 的遠端工具；本機終端的 `tick` 是 operator/debug 入口。
 
 ## 10. 明確邊界
 
 本契約尚未包含：
 
 - pause／resume、checkpoint continuation 或補償交易；
-- 任意 phase routing／child Action graph、遞迴 authored behavior、動態 actor／authority／target、自由 effects 或直接 StateDelta；
-- nested branching、OR／NOT condition graph、parallel、顯式 join、loop 或 history state；
+- 動態或 Runtime 生成的 topology、遞迴 authored behavior、動態 actor／authority／target、自由 effects 或直接 StateDelta；
+- nested branch graph、OR／NOT condition graph、parallel、同步 join、loop 或 history state；
 - exponential/free-form backoff、random jitter、無限 retry 或動態 deadline extension；
 - 任意 guard、腳本、公式式中斷或 Runtime random sampling；
 - generic effect DSL 或跨模組直接呼叫；
 - Studio 視覺化 behavior authoring／直接 write-back；
 - AI 直接寫 StateStore 或自行提交不可逆效果。
 
-驗證基線由 `tests/test_action_behavior.py` 覆蓋 v0.6 編譯、v0.1–v0.5 相容、priority／fallback／condition／child fail-closed 驗證、sticky branch selection、implicit rejoin、primitive whitelist／target／args／module／禁止遞迴、child lifecycle／StateDelta／failure／不重跑、retry recovery／exhaustion、Snapshot v0.5／v0.1–v0.4 migration、Replay tamper rejection、完整 transaction rollback、Studio redaction，以及 branch／child／progress／retry／failure／completion EventIR 驅動 scoped StateIR；MCP scheduled receipt 另有整合測試。完整測試為 310/310。
+驗證基線由 `tests/test_action_behavior.py` 覆蓋 v0.7 static DAG 編譯、v0.1–v0.6 相容、unknown/self/cycle/unreachable 拒絕、長短路徑與 due 收斂、priority／fallback／condition／child fail-closed、sticky branch selection、primitive whitelist／禁止遞迴、retry recovery／exhaustion、Snapshot v0.6／v0.1–v0.5 migration、route-aware Replay 與 transaction rollback、Studio redaction，以及 lifecycle EventIR 驅動 scoped StateIR；MCP scheduled receipt另有整合測試。完整測試為 316/316。

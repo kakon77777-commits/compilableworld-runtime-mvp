@@ -58,7 +58,7 @@
       "additionalProperties": false,
       "required": ["action_behaviors", "functions", "scenarios", "state_machines", "runtime_package", "rooms", "exits", "entities", "items", "studio_world_ir", "studio_mapping"],
       "properties": {
-        "action_behaviors": { "const": "compilableworld.schema/action-behaviors/v0.6" },
+        "action_behaviors": { "const": "compilableworld.schema/action-behaviors/v0.7" },
         "functions": { "const": "compilableworld.schema/functions/v0.1" },
         "scenarios": { "const": "compilableworld.schema/scenarios/v0.1" },
         "state_machines": { "const": "compilableworld.schema/state-machines/v0.1" },
@@ -102,7 +102,8 @@
                 "compilableworld.schema/action-behaviors/v0.3",
                 "compilableworld.schema/action-behaviors/v0.4",
                 "compilableworld.schema/action-behaviors/v0.5",
-                "compilableworld.schema/action-behaviors/v0.6"
+                "compilableworld.schema/action-behaviors/v0.6",
+                "compilableworld.schema/action-behaviors/v0.7"
               ]
             },
             "rooms": { "const": "compilableworld.schema/csv/rooms/v0.1" },
@@ -157,6 +158,9 @@
         "title": { "type": "string", "minLength": 1 },
         "verb": { "$ref": "#/$defs/id" },
         "duration_ticks": { "type": "integer", "minimum": 1, "maximum": 1000000 },
+        "execution_model": { "const": "static_dag" },
+        "entry_phase_id": { "$ref": "#/$defs/id" },
+        "terminal_phase_id": { "$ref": "#/$defs/id" },
         "completion_module": { "$ref": "#/$defs/id" },
         "concurrency": { "const": "one_per_actor" },
         "interrupt_on": {
@@ -278,7 +282,8 @@
             { "$ref": "#/$defs/actionBehaviorChild" },
             { "type": "null" }
           ]
-        }
+        },
+        "next_phase_id": { "$ref": "#/$defs/id" }
       }
     },
     "actionBehaviorCondition": {

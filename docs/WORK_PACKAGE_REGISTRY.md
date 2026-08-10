@@ -1,17 +1,17 @@
 # CompilableWorld Active Work Package Registry
 
 - **Registry version:** v0.1
-- **Updated:** 2026-08-09
+- **Updated:** 2026-08-10
 
 ## Baseline status
 
 | Item | Value |
 |---|---|
 | Local integrated runtime | `0.1.1` |
-| Verified tests | `310/310` |
+| Verified tests | `316/316` |
 | GitHub `master` observed head | `72334d7` (verified 2026-08-09) |
-| GitHub integration branch before conditional-branch package | `agent/m12-runtime-mcp-integration` at `66aa4ed` |
-| Remote synchronization status | Conditional child branch v0.6 is the current integration-branch package |
+| GitHub integration branch before static-routing package | `agent/m12-runtime-mcp-integration` at `61f4273` |
+| Remote synchronization status | Static Action routing v0.7 is the current integration-branch package |
 | Intended next release baseline | `v0.2.0-alpha.1` or equivalent |
 
 ## Current integrated local state
@@ -48,7 +48,7 @@ acceptance:
 
 ```yaml
 owner_environment: local
-status: completed-on-integration-branch
+status: completed-and-deployed-on-integration-branch
 evidence:
   - origin/agent/m12-runtime-mcp-integration observed at acc1841 before this package
   - origin/master observed at 72334d7
@@ -315,6 +315,38 @@ out_of_scope:
   - OR/NOT or free-form expressions
   - parallel child execution, explicit join, loop and history state
   - resume, rollback or compensation transactions
+  - Studio visual behavior authoring/direct write-back
+  - AI direct StateStore writes
+```
+
+### CW-M12-ACTION-009 — Bounded static phase DAG routing
+
+```yaml
+owner_environment: codex
+status: completed-on-integration-branch
+outputs:
+  - schemas/action-behaviors.v0.7.schema.json
+  - v0.1 through v0.6 authoring compatibility paths
+  - compiler-validated unique entry/terminal, target closure, acyclicity and reachability
+  - sticky single-path route cursor with actual terminal due convergence
+  - Snapshot v0.6 route persistence and v0.1 through v0.5 migration
+  - route-aware Replay, Studio projection and pending runtime projection
+  - tests/test_action_behavior.py
+acceptance:
+  - every non-terminal phase has one to sixteen static next_phase_id edges
+  - at least one phase is a real split and exactly one phase is terminal
+  - unknown targets, self-routes, reachable cycles and unreachable phases fail compilation
+  - highest-priority matching branch selects one path and never executes sibling paths
+  - shorter routes reschedule completion to the actual terminal boundary
+  - gate retry preserves the selected branch, route cursor and completed child step
+  - Snapshot validates visited edges and queue/phase due ticks
+  - Replay rejects branch targets or route boundary ticks that violate authored topology
+  - 316/316 tests pass
+out_of_scope:
+  - runtime-generated, recursive or nested graph topology
+  - OR/NOT or free-form expressions
+  - parallel child execution and synchronizing join
+  - loop, history, pause/resume and compensation transactions
   - Studio visual behavior authoring/direct write-back
   - AI direct StateStore writes
 ```

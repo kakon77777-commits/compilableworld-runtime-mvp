@@ -24,12 +24,14 @@ from .action_behavior import (
     ACTION_BEHAVIOR_CONDITION_SUBJECTS,
     ACTION_BEHAVIOR_DEFINITION_LIMIT,
     ACTION_BEHAVIOR_DURATION_LIMIT,
+    ACTION_BEHAVIOR_EXECUTION_MODEL_STATIC_DAG,
     ACTION_BEHAVIOR_FORMAT,
     ACTION_BEHAVIOR_FORMAT_V1,
     ACTION_BEHAVIOR_FORMAT_V2,
     ACTION_BEHAVIOR_FORMAT_V3,
     ACTION_BEHAVIOR_FORMAT_V4,
     ACTION_BEHAVIOR_FORMAT_V5,
+    ACTION_BEHAVIOR_FORMAT_V6,
     ACTION_BEHAVIOR_INTERRUPT_EVENTS,
     ACTION_BEHAVIOR_INTERRUPT_LIMIT,
     ACTION_BEHAVIOR_PHASE_LIMIT,
@@ -40,6 +42,7 @@ from .action_behavior import (
     ACTION_BEHAVIOR_SCHEMA_ID_V3,
     ACTION_BEHAVIOR_SCHEMA_ID_V4,
     ACTION_BEHAVIOR_SCHEMA_ID_V5,
+    ACTION_BEHAVIOR_SCHEMA_ID_V6,
 )
 from .functions import FunctionDefinitionError, FunctionRegistry, validate_function_source
 from .player_generation import template_records
@@ -284,6 +287,7 @@ def compile_world(
         ACTION_BEHAVIOR_FORMAT_V3: ACTION_BEHAVIOR_SCHEMA_ID_V3,
         ACTION_BEHAVIOR_FORMAT_V4: ACTION_BEHAVIOR_SCHEMA_ID_V4,
         ACTION_BEHAVIOR_FORMAT_V5: ACTION_BEHAVIOR_SCHEMA_ID_V5,
+        ACTION_BEHAVIOR_FORMAT_V6: ACTION_BEHAVIOR_SCHEMA_ID_V6,
         ACTION_BEHAVIOR_FORMAT: ACTION_BEHAVIOR_SCHEMA_ID,
     }.get(action_behaviors_source.get("format") if isinstance(action_behaviors_source, dict) else None)
     for source_key, declared_schema_id in declared_source_schemas.items():
@@ -685,7 +689,7 @@ def _validate_action_behaviors(
     if source_format not in {
         ACTION_BEHAVIOR_FORMAT_V1, ACTION_BEHAVIOR_FORMAT_V2,
         ACTION_BEHAVIOR_FORMAT_V3, ACTION_BEHAVIOR_FORMAT_V4,
-        ACTION_BEHAVIOR_FORMAT_V5,
+        ACTION_BEHAVIOR_FORMAT_V5, ACTION_BEHAVIOR_FORMAT_V6,
         ACTION_BEHAVIOR_FORMAT,
     }:
         raise CompileError("action_behaviors.json format 不支援")
@@ -739,6 +743,9 @@ def _validate_action_behaviors(
         if not isinstance(title, str) or not title.strip():
             raise CompileError(f"{label}.title 必須是非空字串")
         phases: list[dict[str, Any]] = []
+        execution_model: str | None = None
+        entry_phase_id: str | None = None
+        terminal_phase_id: str | None = None
         if source_format == ACTION_BEHAVIOR_FORMAT_V1:
             duration = behavior["duration_ticks"]
             if (
@@ -763,6 +770,7 @@ def _validate_action_behaviors(
             child_step_ids: set[str] = set()
             branch_ids: set[str] = set()
             behavior_has_branches = False
+            behavior_has_split = False
             duration = 0
             for phase_index, phase in enumerate(raw_phases):
                 phase_label = f"{label}.phases[{phase_index}]"
@@ -773,18 +781,20 @@ def _validate_action_behaviors(
                     ACTION_BEHAVIOR_FORMAT_V3,
                     ACTION_BEHAVIOR_FORMAT_V4,
                     ACTION_BEHAVIOR_FORMAT_V5,
+                    ACTION_BEHAVIOR_FORMAT_V6,
                     ACTION_BEHAVIOR_FORMAT,
                 }:
                     phase_allowed.add("when")
                 if source_format in {
                     ACTION_BEHAVIOR_FORMAT_V4,
                     ACTION_BEHAVIOR_FORMAT_V5,
+                    ACTION_BEHAVIOR_FORMAT_V6,
                     ACTION_BEHAVIOR_FORMAT,
                 }:
                     phase_allowed.add("retry")
                 if source_format == ACTION_BEHAVIOR_FORMAT_V5:
                     phase_allowed.add("child_action")
-                if source_format == ACTION_BEHAVIOR_FORMAT:
+                if source_format in {ACTION_BEHAVIOR_FORMAT_V6, ACTION_BEHAVIOR_FORMAT}:
                     phase_allowed.add("branches")
                 phase_unknown = set(phase) - phase_allowed
                 phase_missing = phase_allowed - set(phase)
@@ -820,6 +830,7 @@ def _validate_action_behaviors(
                     ACTION_BEHAVIOR_FORMAT_V3,
                     ACTION_BEHAVIOR_FORMAT_V4,
                     ACTION_BEHAVIOR_FORMAT_V5,
+                    ACTION_BEHAVIOR_FORMAT_V6,
                     ACTION_BEHAVIOR_FORMAT,
                 }:
                     raw_when = phase["when"]
@@ -895,12 +906,14 @@ def _validate_action_behaviors(
                     ACTION_BEHAVIOR_FORMAT_V3,
                     ACTION_BEHAVIOR_FORMAT_V4,
                     ACTION_BEHAVIOR_FORMAT_V5,
+                    ACTION_BEHAVIOR_FORMAT_V6,
                     ACTION_BEHAVIOR_FORMAT,
                 }:
                     phase_record["when"] = normalized_when
                 if source_format in {
                     ACTION_BEHAVIOR_FORMAT_V4,
                     ACTION_BEHAVIOR_FORMAT_V5,
+                    ACTION_BEHAVIOR_FORMAT_V6,
                     ACTION_BEHAVIOR_FORMAT,
                 }:
                     retry = phase["retry"]
@@ -967,11 +980,14 @@ def _validate_action_behaviors(
                         entity_ids=entity_ids,
                         step_ids=child_step_ids,
                     )
-                if source_format == ACTION_BEHAVIOR_FORMAT:
+                if source_format in {ACTION_BEHAVIOR_FORMAT_V6, ACTION_BEHAVIOR_FORMAT}:
                     raw_branches = phase["branches"]
                     if not isinstance(raw_branches, list):
                         raise CompileError(f"{phase_label}.branches must be an array")
-                    if phase_index == len(raw_phases) - 1:
+                    if (
+                        source_format == ACTION_BEHAVIOR_FORMAT_V6
+                        and phase_index == len(raw_phases) - 1
+                    ):
                         if raw_branches:
                             raise CompileError(
                                 f"{phase_label}.branches is forbidden on the final phase"
@@ -979,9 +995,13 @@ def _validate_action_behaviors(
                         phase_record["branches"] = []
                     elif raw_branches:
                         behavior_has_branches = True
-                        if not 2 <= len(raw_branches) <= ACTION_BEHAVIOR_BRANCH_LIMIT:
+                        behavior_has_split = behavior_has_split or len(raw_branches) >= 2
+                        minimum_branches = (
+                            1 if source_format == ACTION_BEHAVIOR_FORMAT else 2
+                        )
+                        if not minimum_branches <= len(raw_branches) <= ACTION_BEHAVIOR_BRANCH_LIMIT:
                             raise CompileError(
-                                f"{phase_label}.branches must contain 2 to "
+                                f"{phase_label}.branches must contain {minimum_branches} to "
                                 f"{ACTION_BEHAVIOR_BRANCH_LIMIT} alternatives"
                             )
                         normalized_branches: list[dict[str, Any]] = []
@@ -992,6 +1012,8 @@ def _validate_action_behaviors(
                         branch_allowed = {
                             "branch_id", "priority", "when", "child_action",
                         }
+                        if source_format == ACTION_BEHAVIOR_FORMAT:
+                            branch_allowed.add("next_phase_id")
                         for branch_index, branch in enumerate(raw_branches):
                             branch_label = f"{phase_label}.branches[{branch_index}]"
                             if not isinstance(branch, dict):
@@ -1008,6 +1030,7 @@ def _validate_action_behaviors(
                                 )
                             branch_id = branch["branch_id"]
                             priority = branch["priority"]
+                            next_phase_id = branch.get("next_phase_id")
                             if not isinstance(branch_id, str) or not ID_RE.match(branch_id):
                                 raise CompileError(f"{branch_label}.branch_id is invalid")
                             if branch_id in branch_ids:
@@ -1027,6 +1050,13 @@ def _validate_action_behaviors(
                                     f"{phase_label}.branches priorities must be unique"
                                 )
                             priorities.add(priority)
+                            if source_format == ACTION_BEHAVIOR_FORMAT and (
+                                not isinstance(next_phase_id, str)
+                                or not ID_RE.match(next_phase_id)
+                            ):
+                                raise CompileError(
+                                    f"{branch_label}.next_phase_id is invalid"
+                                )
                             branch_when = _validate_action_branch_conditions(
                                 branch["when"],
                                 label=f"{branch_label}.when",
@@ -1037,7 +1067,7 @@ def _validate_action_behaviors(
                             else:
                                 fallback_count += 1
                                 fallback_priority = priority
-                            normalized_branches.append({
+                            branch_record = {
                                 "branch_id": branch_id,
                                 "priority": priority,
                                 "when": branch_when,
@@ -1048,7 +1078,10 @@ def _validate_action_behaviors(
                                     entity_ids=entity_ids,
                                     step_ids=child_step_ids,
                                 ),
-                            })
+                            }
+                            if source_format == ACTION_BEHAVIOR_FORMAT:
+                                branch_record["next_phase_id"] = next_phase_id
+                            normalized_branches.append(branch_record)
                         if fallback_count != 1:
                             raise CompileError(
                                 f"{phase_label}.branches requires exactly one unconditional fallback"
@@ -1068,10 +1101,79 @@ def _validate_action_behaviors(
                 phases.append(phase_record)
             if source_format == ACTION_BEHAVIOR_FORMAT_V5 and not child_step_ids:
                 raise CompileError(f"{label}.phases must declare at least one child_action")
-            if source_format == ACTION_BEHAVIOR_FORMAT and not behavior_has_branches:
+            if source_format == ACTION_BEHAVIOR_FORMAT_V6 and not behavior_has_branches:
                 raise CompileError(f"{label}.phases must declare at least one branch set")
-            if source_format == ACTION_BEHAVIOR_FORMAT and not child_step_ids:
+            if source_format == ACTION_BEHAVIOR_FORMAT_V6 and not child_step_ids:
                 raise CompileError(f"{label}.branches must declare at least one child_action")
+            if source_format == ACTION_BEHAVIOR_FORMAT:
+                if not behavior_has_split:
+                    raise CompileError(
+                        f"{label}.phases must declare at least one conditional routing split"
+                    )
+                phase_by_id = {phase["phase_id"]: phase for phase in phases}
+                terminal_ids = [
+                    phase["phase_id"] for phase in phases if not phase["branches"]
+                ]
+                if len(terminal_ids) != 1:
+                    raise CompileError(
+                        f"{label}.phases must declare exactly one terminal phase"
+                    )
+                for phase in phases:
+                    for branch in phase["branches"]:
+                        target_id = branch["next_phase_id"]
+                        if target_id not in phase_by_id:
+                            raise CompileError(
+                                f"{label} branch {branch['branch_id']} references unknown "
+                                f"next_phase_id: {target_id}"
+                            )
+                        if target_id == phase["phase_id"]:
+                            raise CompileError(
+                                f"{label} branch {branch['branch_id']} cannot route to itself"
+                            )
+
+                entry_phase_id = phases[0]["phase_id"]
+                terminal_phase_id = terminal_ids[0]
+                visiting: set[str] = set()
+                visited: set[str] = set()
+
+                def visit_phase(phase_id: str) -> None:
+                    if phase_id in visiting:
+                        raise CompileError(f"{label}.phases routing graph contains a cycle")
+                    if phase_id in visited:
+                        return
+                    visiting.add(phase_id)
+                    for branch in phase_by_id[phase_id]["branches"]:
+                        visit_phase(branch["next_phase_id"])
+                    visiting.remove(phase_id)
+                    visited.add(phase_id)
+
+                visit_phase(entry_phase_id)
+                unreachable = sorted(set(phase_by_id) - visited)
+                if unreachable:
+                    raise CompileError(
+                        f"{label}.phases contains unreachable phases: {unreachable}"
+                    )
+
+                longest_cache: dict[str, int] = {}
+
+                def longest_duration(phase_id: str) -> int:
+                    cached = longest_cache.get(phase_id)
+                    if cached is not None:
+                        return cached
+                    phase = phase_by_id[phase_id]
+                    tail = max(
+                        (
+                            longest_duration(branch["next_phase_id"])
+                            for branch in phase["branches"]
+                        ),
+                        default=0,
+                    )
+                    result = phase["duration_ticks"] + tail
+                    longest_cache[phase_id] = result
+                    return result
+
+                duration = longest_duration(entry_phase_id)
+                execution_model = ACTION_BEHAVIOR_EXECUTION_MODEL_STATIC_DAG
         if behavior["concurrency"] != ACTION_BEHAVIOR_CONCURRENCY:
             raise CompileError(f"{label}.concurrency 目前只支援 {ACTION_BEHAVIOR_CONCURRENCY}")
         interrupt_on = behavior["interrupt_on"]
@@ -1095,6 +1197,12 @@ def _validate_action_behaviors(
         }
         if phases:
             record["phases"] = phases
+        if execution_model is not None:
+            record.update({
+                "execution_model": execution_model,
+                "entry_phase_id": entry_phase_id,
+                "terminal_phase_id": terminal_phase_id,
+            })
         normalized.append(record)
     return normalized
 

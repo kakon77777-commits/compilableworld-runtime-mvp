@@ -206,6 +206,9 @@ def _action_behavior_overview(behavior: Any, index: int) -> dict[str, Any]:
         "title": behavior.get("title", ""),
         "verb": behavior.get("verb"),
         "duration_ticks": behavior.get("duration_ticks"),
+        "execution_model": behavior.get("execution_model"),
+        "entry_phase_id": behavior.get("entry_phase_id"),
+        "terminal_phase_id": behavior.get("terminal_phase_id"),
         "phases": [
             {
                 "phase_id": phase.get("phase_id"),
@@ -327,7 +330,7 @@ def package_overview(package: dict[str, Any]) -> dict[str, Any]:
             },
             "sms": {
                 "runtime_package_format": package.get("format"),
-                "snapshot_format": "compilableworld.snapshot/v0.5",
+                "snapshot_format": "compilableworld.snapshot/v0.6",
             },
             "tms": {"declared_modules": sorted(modules)},
             "dms": {"static_issue_count": len(issues)},

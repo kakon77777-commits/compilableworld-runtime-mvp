@@ -100,7 +100,7 @@ Function Registry 同時提供有上限的 LRU memoization（預設 2048 筆）�
 
 ### Authoring Schema 契約
 
-目前版本化交換契約都放在 [`schemas/`](schemas/)，共十八份檔案；Action behavior 同時保留 v0.1–v0.6 六個來源版本：
+目前版本化交換契約都放在 [`schemas/`](schemas/)，catalog 共十八個 current contract；Action behavior 同時保留 v0.1–v0.7 七個來源版本：
 
 - `functions.v0.1.schema.json`：FunctionIR 純公式來源。
 - `scenarios.v0.1.schema.json`：ScenarioIR 的 Given／When／Then 來源。
@@ -108,7 +108,7 @@ Function Registry 同時提供有上限的 LRU memoization（預設 2048 筆）�
 - `rooms.v0.1.csv.schema.json`、`exits.v0.1.csv.schema.json`：地圖房間與出口表格。
 - `entities.v0.1.csv.schema.json`、`items.v0.1.csv.schema.json`：實體與物品表格。
 - `state-machines.v0.1.schema.json`：World／Region／Scene／Entity／System owner scope 的可執行 StateIR。
-- `action-behaviors.v0.6.schema.json`：有界 sequential phases、priority conditional child branches、implicit linear rejoin、非遞迴 primitive child Actions、phase-entry conditions、fixed-interval retry/deadline、完成模組、並行限制與中斷事件；v0.1–v0.5 來源仍可編譯。
+- `action-behaviors.v0.7.schema.json`：有界 static phase DAG、priority conditional route、唯一 terminal、編譯期 unknown／cycle／unreachable 拒絕、單一路徑 route cursor、非遞迴 primitive child Actions、phase-entry conditions、fixed-interval retry/deadline、完成模組、並行限制與中斷事件；v0.1–v0.6 來源仍可編譯。
 - `studio-world-ir.v0.1.schema.json`：EveGlyph YAML 到共用 Studio World IR 的 migration，含 bounded event_match 與 requirements。
 - `studio-mapping.v0.1.schema.json`：人工確認 World IR 到 Runtime 房間、表格、EventIR、priority、reward、requirements 與 guard 的映射。
 
@@ -230,13 +230,13 @@ owner scope 在 v0.1 表示狀態所有權與可見性，不會自動把事件�
 
 ### Action-scope 複合行為
 
-`action_behaviors.json` 可將一個玩家 verb 綁定到 2–64 個固定順序 phase，每個 phase 有獨立名稱與 1–1,000,000 tick duration，原始總長仍不得超過 1,000,000 tick。v0.6 的非 final phase 可宣告 2–16 個唯一 priority branch，恰有一個最低 priority fallback；Kernel 以既有 bounded AND conditions 選第一個成立分支，發出 `action.branch_selected`，執行 nullable primitive child 後固定 rejoin 到下一個線性 phase。選擇與成功 child 都是 sticky，gate retry 不會重選或重跑。child 只能繼承父 actor，使用白名單 verb／module／target／args，不能遞迴 authored behavior。非首 phase 仍可宣告最多 16 個 AND gate，以及可選的 1–16 次 fixed-interval retry 與 authored deadline。branch、child Module 的 StateDelta／EventIR 與父 progress／retry／failure 原子寫入同一 EventLog batch；最後效果仍由唯一 completion module 提交。
+`action_behaviors.json` 可將一個玩家 verb 綁定到 2–64 個靜態 phase node，每個 node 有 1–1,000,000 tick duration，authored node 總長仍不得超過 1,000,000 tick。v0.7 以第一個 node 為 entry、要求唯一 terminal；每個非 terminal node 有 1–16 個 static `next_phase_id` branch，整體至少一個 split。Compiler 拒絕未知 target、self-route、cycle 與不可達 node，並以最長 entry-to-terminal path 作為排程上限。Kernel 依 bounded AND conditions 選 branch，nullable primitive child 完成且 target gate 通過後才原子推進 route cursor；選擇與成功 child 都是 sticky，retry 不會重選或重跑。進入 terminal 時 due tick 會收斂到實際路徑。child 仍只能繼承父 actor、使用白名單 verb／module／target／args，不能遞迴 authored behavior；最後效果仍由唯一 completion module 提交。
 
-Gray Crown 的 `search` 是第一個完整切片：第一 tick 若 actor alive，選 `survey.alive` 並以 `survey.room` 執行 `look`；否則選 `survey.fallback` 並以 `survey.status` 執行 `status`，兩者都 rejoin 到 `inspect`。`actor_alive` gate 不成立時最多以一 tick 間隔 retry 兩次，但 branch 與已完成 child 不重選、不重跑。終端會顯示 branch／child／phase／retry 進度，也可用 `pending` 檢視或取消；player projection 只顯示安全的 branch／step／condition ID、priority 與 retry attempt/deadline，不公開 child args、condition namespace、operator 或比較值。Snapshot v0.5 與 EventLog Replay 都可重建 due tick、branch choice、retry state 與 completed child path。完整規格見 `docs/ACTION_SCOPE_BEHAVIOR_EXECUTION_CONTRACT_zh-TW.md`。
+Gray Crown 的 `search` 保留為 v0.6 相容切片：第一 tick 依 actor alive 選擇 `look` 或 `status` child，再 implicit rejoin 到 `inspect`。v0.7 測試切片另驗證三 tick 長路徑 `survey -> focus -> inspect` 與兩 tick短路徑 `survey -> inspect`；短路徑在第一個 boundary 將 due tick 從 3 收斂為 2。終端／Studio projection 顯示安全的 branch／step／condition ID、`next_phase_id`、visited path 與 retry deadline，不公開 child args 或條件值。Snapshot v0.6 與 EventLog Replay 都可重建 route cursor、due tick、branch choice、retry state 與 completed child path。完整規格見 `docs/ACTION_SCOPE_BEHAVIOR_EXECUTION_CONTRACT_zh-TW.md`。
 
 ### Snapshot 與排程恢復
 
-`save_snapshot` 使用 `compilableworld.snapshot/v0.5`，除了 Runtime State、動態玩家、生成 profile、目前 tick 與排程 Action，也保存 pending Action 的 retry attempt、first failure、next retry、deadline、`selected_branches` 與 authored-path `completed_steps`。載入時會驗證 Snapshot 格式、版本、世界 ID、世界版本及 Action runtime state；舊 `v0.1` 以空排程遷移，`v0.2`／`v0.3` 以空 child progress、`v0.4` 以空 branch progress 遷移。
+`save_snapshot` 使用 `compilableworld.snapshot/v0.6`，除了 Runtime State、動態玩家、生成 profile、目前 tick 與排程 Action，也保存 pending Action 的 route cursor、retry attempt／deadline、`selected_branches` 與實際路徑 `completed_steps`。載入時會驗證 route node、visited edge、active retry target、phase／queue due tick 與 authored branch；舊 `v0.1`–`v0.5` 仍有明確 migration，legacy Action 的 route 為 null。
 
 ### AMK v0.1（可選的受治理記憶核心）
 
@@ -263,7 +263,7 @@ PYTHONPATH=src python3 -m compilableworld play build/gray_crown/world.package.js
 - Scheduler 已支援版本化 Action-scope 行為、生命週期、取消、中斷、pending 投影、Snapshot 與 Replay；Studio 目前只有唯讀 overview，尚未提供視覺化 authoring/write-back 表單。
 - 房間有可選的 `narrative.json` 條件式文字投影；NPC 有可選的 `dialogues.json` 單回合、狀態感知對話，兩者都由 CLI 與 Web 共用。已能由對話事件接取任務，但尚未實作多輪對話 session、玩家可見的選項卡、語義理解與 AI 生成敘事。`visible_entities` 仍會標示實體是否存活（終端機顯示「（已死亡）」，網頁介面同步）。
 - Quest 模組保留原有的兩種事件驅動 requirement（`deliver:<item>:<target>`、`reach:<room>`）與貨幣報酬，並新增顯式的多階段／分支／失敗 transition。未知 requirement、未知事件欄位、終態再轉移與同優先權分支衝突都會在編譯期 fail closed。尚未支援：複合布林條件、時間／排程觸發、回復／撤銷轉移、道具型報酬與執行期生成新實體。
-- World／Region／Scene／Entity／System 的 scoped StateIR 已可透過 EventIR 跨層轉移；Action-scope 也已有可中斷／取消的 bounded v0.6 sequential phase checkpoints、priority conditional child branch、implicit linear rejoin、primitive child sequence、phase-entry AND gates 與 fixed-interval retry/deadline。兩者都尚未支援地理感知的自動事件路由、自由 guard、任意 phase routing／nested branch、resume／補償交易、自由 backoff/jitter、遞迴 Action Graph 或 parallel／explicit join。
+- World／Region／Scene／Entity／System 的 scoped StateIR 已可透過 EventIR 跨層轉移；Action-scope 也已有可中斷／取消的 bounded v0.7 static phase DAG、sticky priority route、單一路徑 merge、primitive child sequence、phase-entry AND gates 與 fixed-interval retry/deadline。兩者都尚未支援地理感知的自動事件路由、自由 guard、nested/dynamic/recursive graph、resume／補償交易、自由 backoff/jitter、parallel 或 synchronizing join。
 - Intent Parser 是確定性參考實作；AI Adapter 必須輸出同一 `ActionIR` 並接受 Kernel 驗證。
 - Module Contract 的寫入範圍已由 Kernel 強制檢查；讀取範圍與 Action authority 的強制隔離留待 v0.2。
 - 核心 JSON／CSV Schema 已外部化為 `schemas/` 下十八份契約檔（含 Action behavior v0.1–v0.5 相容契約）；CSV header、scoped StateIR、Action-scope behavior、EveGlyph World IR migration 與人工 mapping validation 已接入，跨檔案引用與其他語意規則仍由 Compiler 驗證。

@@ -24,6 +24,7 @@ from .action_behavior import (
     ACTION_BEHAVIOR_CONDITION_OPERATORS,
     ACTION_BEHAVIOR_CONDITION_SUBJECTS,
     ACTION_BEHAVIOR_DURATION_LIMIT,
+    ACTION_BEHAVIOR_EXECUTION_MODEL_STATIC_DAG,
     ACTION_BEHAVIOR_INTERRUPT_EVENTS,
     ACTION_BEHAVIOR_RETRY_ATTEMPT_LIMIT,
 )
@@ -49,8 +50,9 @@ SNAPSHOT_FORMAT_V1 = "compilableworld.snapshot/v0.1"
 SNAPSHOT_FORMAT_V2 = "compilableworld.snapshot/v0.2"
 SNAPSHOT_FORMAT_V3 = "compilableworld.snapshot/v0.3"
 SNAPSHOT_FORMAT_V4 = "compilableworld.snapshot/v0.4"
-SNAPSHOT_FORMAT = "compilableworld.snapshot/v0.5"
-SNAPSHOT_VERSION = 5
+SNAPSHOT_FORMAT_V5 = "compilableworld.snapshot/v0.5"
+SNAPSHOT_FORMAT = "compilableworld.snapshot/v0.6"
+SNAPSHOT_VERSION = 6
 
 
 class ConflictError(RuntimeErrorBase):
@@ -534,10 +536,9 @@ class WorldRuntime:
                 return self._fail(action, "同一 actor 同時間只能執行一個 authored long action")
             delay = duration
         if delay > 0:
+            runtime_record = self._new_action_runtime_record(action, behavior)
             entry = self.scheduler.schedule(action, delay)
-            self.action_runtime[action.action_id] = {
-                "retries": {}, "completed_steps": [], "selected_branches": {},
-            }
+            self.action_runtime[action.action_id] = runtime_record
             event = self._action_lifecycle_event("action.scheduled", action, behavior, due_tick=entry[0])
             try:
                 self.event_log.append(event)
@@ -661,6 +662,52 @@ class WorldRuntime:
             None,
         )
 
+    @staticmethod
+    def _is_static_action_route(behavior: Any) -> bool:
+        return (
+            isinstance(behavior, dict)
+            and behavior.get("execution_model")
+            == ACTION_BEHAVIOR_EXECUTION_MODEL_STATIC_DAG
+        )
+
+    def _new_action_runtime_record(
+        self,
+        action: ActionIR,
+        behavior: dict[str, Any] | None,
+    ) -> dict[str, Any]:
+        route: dict[str, Any] | None = None
+        if self._is_static_action_route(behavior):
+            phases = behavior.get("phases")
+            entry_phase_id = behavior.get("entry_phase_id")
+            phase = next(
+                (
+                    item for item in phases or []
+                    if isinstance(item, dict) and item.get("phase_id") == entry_phase_id
+                ),
+                None,
+            )
+            if (
+                not isinstance(phases, list)
+                or not isinstance(entry_phase_id, str)
+                or not isinstance(phase, dict)
+                or isinstance(phase.get("duration_ticks"), bool)
+                or not isinstance(phase.get("duration_ticks"), int)
+            ):
+                raise RuntimeErrorBase("compiled static Action route is invalid")
+            route = {
+                "current_phase_id": entry_phase_id,
+                "phase_started_tick": action.proposed_at_tick,
+                "phase_due_tick": action.proposed_at_tick + phase["duration_ticks"],
+                "elapsed_duration_ticks": 0,
+                "visited_phase_ids": [entry_phase_id],
+            }
+        return {
+            "retries": {},
+            "completed_steps": [],
+            "selected_branches": {},
+            "route": route,
+        }
+
     def _action_lifecycle_event(
         self,
         event_type: str,
@@ -740,6 +787,7 @@ class WorldRuntime:
                                 branch["child_action"].get("step_id")
                                 if isinstance(branch.get("child_action"), dict) else None
                             ),
+                            "next_phase_id": branch.get("next_phase_id"),
                         }
                         for branch in phase.get("branches", [])
                         if isinstance(branch, dict)
@@ -758,14 +806,42 @@ class WorldRuntime:
             current_phase = (
                 dict(phases[min(completed_phases, len(phases) - 1)]) if phases else None
             )
-            retry_records = self.action_runtime.get(action.action_id, {}).get("retries", {})
+            runtime_record = self.action_runtime.get(action.action_id, {})
+            retry_records = runtime_record.get("retries", {})
             completed_steps = list(
-                self.action_runtime.get(action.action_id, {}).get("completed_steps", [])
+                runtime_record.get("completed_steps", [])
             )
             selected_branches = dict(
-                self.action_runtime.get(action.action_id, {}).get("selected_branches", {})
+                runtime_record.get("selected_branches", {})
             )
-            if retry_records:
+            route = runtime_record.get("route")
+            visited_phase_ids: list[str] = []
+            if self._is_static_action_route(behavior) and isinstance(route, dict):
+                started_tick = action.proposed_at_tick
+                visited_phase_ids = list(route.get("visited_phase_ids", []))
+                current_phase_id = route.get("current_phase_id")
+                current_phase = next(
+                    (
+                        dict(phase) for phase in phases
+                        if phase.get("phase_id") == current_phase_id
+                    ),
+                    None,
+                )
+                completed_phases = max(0, len(visited_phase_ids) - 1)
+                elapsed_duration = route.get("elapsed_duration_ticks", 0)
+                phase_started = route.get("phase_started_tick", self.scheduler.tick)
+                phase_due = route.get("phase_due_tick", self.scheduler.tick)
+                current_duration = (
+                    current_phase.get("duration_ticks", 0)
+                    if isinstance(current_phase, dict) else 0
+                )
+                progress = elapsed_duration + min(
+                    current_duration,
+                    max(0, self.scheduler.tick - phase_started),
+                )
+                if self.scheduler.tick >= phase_due:
+                    progress = elapsed_duration + current_duration
+            elif retry_records:
                 retry_phase_id = next(iter(retry_records))
                 retry_phase_index = next(
                     (
@@ -821,6 +897,8 @@ class WorldRuntime:
                     {"phase_id": phase_id, "branch_id": branch_id}
                     for phase_id, branch_id in selected_branches.items()
                 ],
+                "execution_model": behavior.get("execution_model") if behavior else None,
+                "visited_phase_ids": visited_phase_ids,
                 "child_step_count": sum(
                     (
                         phase.get("child_step_id") is not None
@@ -975,17 +1053,28 @@ class WorldRuntime:
         )
 
     def _bounded_action_branches(self, value: Any) -> list[dict[str, Any]] | None:
-        if not isinstance(value, list) or not 2 <= len(value) <= ACTION_BEHAVIOR_BRANCH_LIMIT:
+        if not isinstance(value, list) or not value:
+            return None
+        if any(not isinstance(branch, dict) for branch in value):
+            return None
+        legacy_fields = {"branch_id", "priority", "when", "child_action"}
+        routed_fields = legacy_fields | {"next_phase_id"}
+        field_sets = {
+            frozenset(branch) for branch in value if isinstance(branch, dict)
+        }
+        if len(field_sets) != 1 or field_sets.pop() not in {
+            frozenset(legacy_fields), frozenset(routed_fields),
+        }:
+            return None
+        routed = "next_phase_id" in value[0]
+        minimum = 1 if routed else 2
+        if not minimum <= len(value) <= ACTION_BEHAVIOR_BRANCH_LIMIT:
             return None
         branch_ids: set[str] = set()
         priorities: set[int] = set()
         fallback_priorities: list[int] = []
         conditional_priorities: list[int] = []
         for branch in value:
-            if not isinstance(branch, dict) or set(branch) != {
-                "branch_id", "priority", "when", "child_action",
-            }:
-                return None
             branch_id = branch.get("branch_id")
             priority = branch.get("priority")
             conditions = branch.get("when")
@@ -999,6 +1088,13 @@ class WorldRuntime:
                 or priority in priorities
                 or not isinstance(conditions, list)
                 or len(conditions) > ACTION_BEHAVIOR_CONDITION_LIMIT
+                or (
+                    routed
+                    and (
+                        not isinstance(branch.get("next_phase_id"), str)
+                        or not branch["next_phase_id"]
+                    )
+                )
             ):
                 return None
             branch_ids.add(branch_id)
@@ -1194,6 +1290,18 @@ class WorldRuntime:
                             "retries", {}
                         )
                         retry_state.pop(event.payload["next_phase_id"], None)
+                        routed_due_tick = event.payload.get("due_tick")
+                        if (
+                            isinstance(routed_due_tick, int)
+                            and not isinstance(routed_due_tick, bool)
+                            and routed_due_tick != entry[0]
+                        ):
+                            removed = self.scheduler.remove(action.action_id)
+                            if removed is None:
+                                raise RuntimeErrorBase(
+                                    f"routed action is no longer queued: {action.action_id}"
+                                )
+                            self.scheduler.restore((routed_due_tick, removed[1], action))
                         continue
                     removed = self.scheduler.remove(action.action_id)
                     if removed is None:
@@ -1204,7 +1312,9 @@ class WorldRuntime:
                         self.scheduler.restore((event.payload["due_tick"], removed[1], action))
                         retries = self.action_runtime.setdefault(
                             action.action_id,
-                            {"retries": {}, "completed_steps": [], "selected_branches": {}},
+                            self._new_action_runtime_record(
+                                action, self._action_behavior(action.verb),
+                            ),
                         )["retries"]
                         retries[event.payload["phase_id"]] = {
                             "attempts": event.payload["attempt"],
@@ -1283,6 +1393,13 @@ class WorldRuntime:
             phases = behavior.get("phases", []) if isinstance(behavior, dict) else []
             if not isinstance(phases, list) or len(phases) < 2:
                 continue
+            if self._is_static_action_route(behavior):
+                decision = self._static_action_checkpoint_decision(
+                    entry, behavior, phases, tick,
+                )
+                if decision is not None:
+                    decisions.append(decision)
+                continue
             active_retries = self.action_runtime.get(action.action_id, {}).get("retries", {})
             if active_retries and tick not in {
                 retry_state.get("next_retry_tick")
@@ -1303,7 +1420,7 @@ class WorldRuntime:
                 child_spec = phase.get("child_action")
                 runtime_record = self.action_runtime.setdefault(
                     action.action_id,
-                    {"retries": {}, "completed_steps": [], "selected_branches": {}},
+                    self._new_action_runtime_record(action, behavior),
                 )
                 raw_branches = phase.get("branches") if "branches" in phase else []
                 if raw_branches:
@@ -1525,6 +1642,283 @@ class WorldRuntime:
                 decisions.append((events, entry, "progress", None))
         return decisions
 
+    def _static_action_checkpoint_decision(
+        self,
+        entry: tuple[int, int, ActionIR],
+        behavior: dict[str, Any],
+        phases: list[dict[str, Any]],
+        tick: int,
+    ) -> tuple[list[EventIR], tuple[int, int, ActionIR], str, str | None] | None:
+        """Advance one sticky, single-path cursor through a validated static DAG."""
+        due_tick, _, action = entry
+        runtime_record = self.action_runtime.get(action.action_id)
+        route = runtime_record.get("route") if isinstance(runtime_record, dict) else None
+        if not isinstance(route, dict):
+            raise RuntimeErrorBase("pending static Action route state is unavailable")
+        phase_by_id = {
+            phase.get("phase_id"): phase
+            for phase in phases
+            if isinstance(phase, dict) and isinstance(phase.get("phase_id"), str)
+        }
+        current_phase_id = route.get("current_phase_id")
+        phase = phase_by_id.get(current_phase_id)
+        if not isinstance(phase, dict):
+            raise RuntimeErrorBase("pending static Action current phase is invalid")
+        raw_branches = phase.get("branches")
+        if raw_branches == []:
+            return None
+        branches = self._bounded_action_branches(raw_branches)
+        if branches is None or any("next_phase_id" not in branch for branch in branches):
+            raise RuntimeErrorBase("compiled static Action branches are invalid")
+
+        active_retries = runtime_record.get("retries", {})
+        retry_ticks = {
+            retry_state.get("next_retry_tick")
+            for retry_state in active_retries.values()
+            if isinstance(retry_state, dict)
+        }
+        if active_retries:
+            if tick not in retry_ticks:
+                return None
+        elif tick != route.get("phase_due_tick"):
+            return None
+
+        events: list[EventIR] = []
+        selected_branches = runtime_record.setdefault("selected_branches", {})
+        selected_branch_id = selected_branches.get(current_phase_id)
+        selected_branch = next(
+            (
+                branch for branch in branches
+                if branch.get("branch_id") == selected_branch_id
+            ),
+            None,
+        ) if isinstance(selected_branch_id, str) else None
+        if selected_branch_id is None:
+            selected_branch = next(
+                (
+                    branch for branch in branches
+                    if all(
+                        self._action_condition_matches(action, condition)
+                        for condition in branch["when"]
+                    )
+                ),
+                None,
+            )
+            if selected_branch is not None:
+                selected_branches[current_phase_id] = selected_branch["branch_id"]
+        next_phase = (
+            phase_by_id.get(selected_branch.get("next_phase_id"))
+            if isinstance(selected_branch, dict) else None
+        )
+        if selected_branch is None or not isinstance(next_phase, dict):
+            message = (
+                f"Action {behavior['title']} has no valid static route at phase "
+                f"{phase['title']}"
+            )
+            events.append(EventIR(
+                event_type="action.failed",
+                source="kernel",
+                target=action.actor_id,
+                causation_id=action.action_id,
+                correlation_id=action.correlation_id,
+                timestamp_tick=tick,
+                visibility="private",
+                payload={
+                    "action_id": action.action_id,
+                    "behavior_id": behavior["behavior_id"],
+                    "actor": action.actor_id,
+                    "verb": action.verb,
+                    "duration_ticks": behavior["duration_ticks"],
+                    "phase_id": phase["phase_id"],
+                    "failure_code": "route_unresolved",
+                    "reason": message,
+                },
+            ))
+            return events, entry, "failed", message
+        if selected_branch_id is None:
+            events.append(self._action_branch_event(
+                action, behavior, phase, selected_branch, next_phase, tick,
+            ))
+
+        child_spec = selected_branch.get("child_action")
+        step_id = child_spec.get("step_id") if isinstance(child_spec, dict) else None
+        completed_steps = runtime_record.setdefault("completed_steps", [])
+        if isinstance(step_id, str) and step_id not in completed_steps:
+            child_events, child_ok, child_message, child = self._execute_action_child(
+                action, behavior, phase, child_spec, tick,
+            )
+            events.extend(child_events)
+            if not child_ok:
+                message = f"child Action {step_id} failed: {child_message}"
+                events.append(EventIR(
+                    event_type="action.failed",
+                    source="kernel",
+                    target=action.actor_id,
+                    causation_id=action.action_id,
+                    correlation_id=action.correlation_id,
+                    timestamp_tick=tick,
+                    visibility="private",
+                    payload={
+                        "action_id": action.action_id,
+                        "behavior_id": behavior["behavior_id"],
+                        "actor": action.actor_id,
+                        "verb": action.verb,
+                        "duration_ticks": behavior["duration_ticks"],
+                        "phase_id": phase["phase_id"],
+                        "step_id": step_id,
+                        "child_action_id": child.action_id if child else None,
+                        "child_verb": child.verb if child else child_spec.get("verb"),
+                        "failure_code": "child_action_failed",
+                        "reason": message,
+                    },
+                ))
+                return events, entry, "failed", message
+            completed_steps.append(step_id)
+
+        failed_condition = next(
+            (
+                condition for condition in next_phase.get("when", [])
+                if not self._action_condition_matches(action, condition)
+            ),
+            None,
+        )
+        if failed_condition is not None:
+            condition_id = failed_condition.get("condition_id")
+            if not isinstance(condition_id, str) or not condition_id:
+                condition_id = "invalid_condition"
+            message = (
+                f"行為 {behavior['title']} 無法進入 phase {next_phase['title']}："
+                f"條件 {condition_id} 未滿足"
+            )
+            raw_retry_policy = next_phase.get("retry")
+            retry_policy = self._bounded_action_retry_policy(raw_retry_policy)
+            retry_state = active_retries.get(next_phase["phase_id"])
+            if isinstance(retry_policy, dict):
+                first_failure_tick = (
+                    retry_state["first_failure_tick"]
+                    if isinstance(retry_state, dict) else tick
+                )
+                attempt = (
+                    retry_state["attempts"] + 1
+                    if isinstance(retry_state, dict) else 1
+                )
+                retry_at_tick = tick + retry_policy["interval_ticks"]
+                timeout_at_tick = first_failure_tick + retry_policy["timeout_ticks"]
+                if (
+                    attempt <= retry_policy["max_attempts"]
+                    and retry_at_tick <= timeout_at_tick
+                ):
+                    retry_message = (
+                        f"{message}; retry {attempt}/{retry_policy['max_attempts']} "
+                        f"scheduled for tick {retry_at_tick}"
+                    )
+                    events.append(EventIR(
+                        event_type="action.retry_scheduled",
+                        source="kernel",
+                        target=action.actor_id,
+                        causation_id=action.action_id,
+                        correlation_id=action.correlation_id,
+                        timestamp_tick=tick,
+                        visibility="private",
+                        payload={
+                            "action_id": action.action_id,
+                            "behavior_id": behavior["behavior_id"],
+                            "actor": action.actor_id,
+                            "verb": action.verb,
+                            "duration_ticks": behavior["duration_ticks"],
+                            "phase_id": next_phase["phase_id"],
+                            "condition_id": condition_id,
+                            "attempt": attempt,
+                            "max_attempts": retry_policy["max_attempts"],
+                            "interval_ticks": retry_policy["interval_ticks"],
+                            "first_failure_tick": first_failure_tick,
+                            "retry_at_tick": retry_at_tick,
+                            "timeout_at_tick": timeout_at_tick,
+                            "due_tick": due_tick + retry_policy["interval_ticks"],
+                            "reason": retry_message,
+                        },
+                    ))
+                    return events, entry, "retry", retry_message
+            failure_code = (
+                "retry_exhausted" if isinstance(retry_policy, dict)
+                else "invalid_retry_policy" if raw_retry_policy is not None
+                else "condition_failed"
+            )
+            failure_payload = {
+                "action_id": action.action_id,
+                "behavior_id": behavior["behavior_id"],
+                "actor": action.actor_id,
+                "verb": action.verb,
+                "duration_ticks": behavior["duration_ticks"],
+                "phase_id": next_phase["phase_id"],
+                "condition_id": condition_id,
+                "failure_code": failure_code,
+                "reason": message,
+            }
+            if isinstance(retry_policy, dict):
+                failure_payload.update({
+                    "attempt": attempt,
+                    "max_attempts": retry_policy["max_attempts"],
+                    "timeout_at_tick": timeout_at_tick,
+                })
+            events.append(EventIR(
+                event_type="action.failed",
+                source="kernel",
+                target=action.actor_id,
+                causation_id=action.action_id,
+                correlation_id=action.correlation_id,
+                timestamp_tick=tick,
+                visibility="private",
+                payload=failure_payload,
+            ))
+            return events, entry, "failed", message
+
+        elapsed_duration = route.get("elapsed_duration_ticks")
+        visited_phase_ids = route.get("visited_phase_ids")
+        if (
+            isinstance(elapsed_duration, bool)
+            or not isinstance(elapsed_duration, int)
+            or not isinstance(visited_phase_ids, list)
+        ):
+            raise RuntimeErrorBase("pending static Action route progress is invalid")
+        progress_ticks = elapsed_duration + phase["duration_ticks"]
+        next_phase_due_tick = tick + next_phase["duration_ticks"]
+        route.update({
+            "current_phase_id": next_phase["phase_id"],
+            "phase_started_tick": tick,
+            "phase_due_tick": next_phase_due_tick,
+            "elapsed_duration_ticks": progress_ticks,
+            "visited_phase_ids": [*visited_phase_ids, next_phase["phase_id"]],
+        })
+        progress_payload = {
+            "action_id": action.action_id,
+            "behavior_id": behavior["behavior_id"],
+            "actor": action.actor_id,
+            "verb": action.verb,
+            "phase_id": phase["phase_id"],
+            "phase_title": phase["title"],
+            "phase_index": len(visited_phase_ids),
+            "completed_phases": len(visited_phase_ids),
+            "total_phases": len(phases),
+            "next_phase_id": next_phase["phase_id"],
+            "progress_ticks": progress_ticks,
+            "duration_ticks": behavior["duration_ticks"],
+            "phase_due_tick": next_phase_due_tick,
+        }
+        if next_phase["phase_id"] == behavior.get("terminal_phase_id"):
+            progress_payload["due_tick"] = next_phase_due_tick
+        events.append(EventIR(
+            event_type="action.progressed",
+            source="kernel",
+            target=action.actor_id,
+            causation_id=action.action_id,
+            correlation_id=action.correlation_id,
+            timestamp_tick=tick,
+            visibility="private",
+            payload=progress_payload,
+        ))
+        return events, entry, "progress", None
+
     def _action_condition_matches(self, action: ActionIR, condition: Any) -> bool:
         if not isinstance(condition, dict):
             return False
@@ -1610,6 +2004,7 @@ class WorldRuntime:
         self,
         payload: Any,
         queued_actions: dict[str, ActionIR],
+        queued_due_ticks: dict[str, int],
         *,
         require_all: bool,
         snapshot_tick: int,
@@ -1617,10 +2012,10 @@ class WorldRuntime:
     ) -> dict[str, dict[str, Any]]:
         if payload is None and not require_all:
             return {
-                action_id: {
-                    "retries": {}, "completed_steps": [], "selected_branches": {},
-                }
-                for action_id in queued_actions
+                action_id: self._new_action_runtime_record(
+                    action, self._action_behavior(action.verb),
+                )
+                for action_id, action in queued_actions.items()
             }
         if not isinstance(payload, dict):
             raise RuntimeErrorBase("Snapshot action_runtime must be an object")
@@ -1632,13 +2027,16 @@ class WorldRuntime:
         validated: dict[str, dict[str, Any]] = {}
         for action_id, action in queued_actions.items():
             raw_record = payload.get(action_id, {"retries": {}})
-            expected_fields = (
-                {"retries", "completed_steps", "selected_branches"}
-                if snapshot_version >= 5
-                else {"retries", "completed_steps"}
-                if snapshot_version >= 4
-                else {"retries"}
-            )
+            if snapshot_version >= 6:
+                expected_fields = {
+                    "retries", "completed_steps", "selected_branches", "route",
+                }
+            elif snapshot_version >= 5:
+                expected_fields = {"retries", "completed_steps", "selected_branches"}
+            elif snapshot_version >= 4:
+                expected_fields = {"retries", "completed_steps"}
+            else:
+                expected_fields = {"retries"}
             if not isinstance(raw_record, dict) or set(raw_record) != expected_fields:
                 raise RuntimeErrorBase("Snapshot action_runtime record is invalid")
             raw_retries = raw_record["retries"]
@@ -1653,6 +2051,78 @@ class WorldRuntime:
                 for phase in phases
                 if isinstance(phase, dict) and isinstance(phase.get("phase_id"), str)
             }
+            static_route = self._is_static_action_route(behavior)
+            raw_route = raw_record.get("route")
+            route: dict[str, Any] | None = None
+            if static_route:
+                if snapshot_version < 6:
+                    raise RuntimeErrorBase(
+                        "Snapshot version predates pending static Action route state"
+                    )
+                route_fields = {
+                    "current_phase_id", "phase_started_tick", "phase_due_tick",
+                    "elapsed_duration_ticks", "visited_phase_ids",
+                }
+                if not isinstance(raw_route, dict) or set(raw_route) != route_fields:
+                    raise RuntimeErrorBase("Snapshot action_runtime.route is invalid")
+                current_phase_id = raw_route["current_phase_id"]
+                phase_started_tick = raw_route["phase_started_tick"]
+                phase_due_tick = raw_route["phase_due_tick"]
+                elapsed_duration_ticks = raw_route["elapsed_duration_ticks"]
+                visited_phase_ids = raw_route["visited_phase_ids"]
+                current_phase = phase_by_id.get(current_phase_id)
+                if (
+                    not isinstance(current_phase_id, str)
+                    or not isinstance(current_phase, dict)
+                    or any(
+                        isinstance(value, bool) or not isinstance(value, int) or value < 0
+                        for value in (
+                            phase_started_tick, phase_due_tick, elapsed_duration_ticks,
+                        )
+                    )
+                    or not isinstance(visited_phase_ids, list)
+                    or not visited_phase_ids
+                    or any(
+                        not isinstance(phase_id, str) or phase_id not in phase_by_id
+                        for phase_id in visited_phase_ids
+                    )
+                    or len(visited_phase_ids) != len(set(visited_phase_ids))
+                    or visited_phase_ids[0] != behavior.get("entry_phase_id")
+                    or visited_phase_ids[-1] != current_phase_id
+                    or phase_started_tick > snapshot_tick
+                    or (raw_retries and phase_due_tick > snapshot_tick)
+                    or (not raw_retries and phase_due_tick <= snapshot_tick)
+                    or phase_due_tick
+                    != phase_started_tick + current_phase["duration_ticks"]
+                    or elapsed_duration_ticks != sum(
+                        phase_by_id[phase_id]["duration_ticks"]
+                        for phase_id in visited_phase_ids[:-1]
+                    )
+                ):
+                    raise RuntimeErrorBase("Snapshot action_runtime.route values are invalid")
+                route = {
+                    "current_phase_id": current_phase_id,
+                    "phase_started_tick": phase_started_tick,
+                    "phase_due_tick": phase_due_tick,
+                    "elapsed_duration_ticks": elapsed_duration_ticks,
+                    "visited_phase_ids": list(visited_phase_ids),
+                }
+                queued_due_tick = queued_due_ticks.get(action_id)
+                terminal = current_phase_id == behavior.get("terminal_phase_id")
+                if (
+                    isinstance(queued_due_tick, bool)
+                    or not isinstance(queued_due_tick, int)
+                    or queued_due_tick <= snapshot_tick
+                    or (terminal and queued_due_tick != phase_due_tick)
+                    or (not terminal and queued_due_tick < phase_due_tick)
+                ):
+                    raise RuntimeErrorBase(
+                        "Snapshot action_runtime.route due tick is invalid"
+                    )
+            elif snapshot_version >= 6 and raw_route is not None:
+                raise RuntimeErrorBase(
+                    "Snapshot legacy action_runtime.route must be null"
+                )
             cumulative_ticks = 0
             earliest_step_ticks: dict[str, int] = {}
             earliest_branch_ticks: dict[str, int] = {}
@@ -1688,6 +2158,20 @@ class WorldRuntime:
                             earliest_step_ticks[branch_child["step_id"]] = (
                                 action.proposed_at_tick + cumulative_ticks
                             )
+            if static_route and route is not None:
+                for phase_id in route["visited_phase_ids"]:
+                    earliest_branch_ticks[phase_id] = action.proposed_at_tick
+                    phase = phase_by_id[phase_id]
+                    for branch in self._bounded_action_branches(
+                        phase.get("branches")
+                    ) or []:
+                        branch_child = branch.get("child_action")
+                        if isinstance(branch_child, dict) and isinstance(
+                            branch_child.get("step_id"), str
+                        ):
+                            earliest_step_ticks[branch_child["step_id"]] = (
+                                action.proposed_at_tick
+                            )
 
             raw_selected_branches = raw_record.get("selected_branches", {})
             if not isinstance(raw_selected_branches, dict) or any(
@@ -1712,20 +2196,71 @@ class WorldRuntime:
                         "Snapshot action_runtime branch selection is invalid"
                     )
                 selected_branches[phase_id] = branch_id
-            selected_phase_ids = [
-                phase_id for phase_id in branch_phase_ids if phase_id in selected_branches
-            ]
-            if (
-                set(selected_branches) != set(selected_phase_ids)
-                or selected_phase_ids != branch_phase_ids[:len(selected_phase_ids)]
-            ):
-                raise RuntimeErrorBase(
-                    "Snapshot action_runtime branch selections are not an authored prefix"
-                )
+            if static_route and route is not None:
+                route_phase_ids = route["visited_phase_ids"]
+                expected_selected_ids = list(route_phase_ids[:-1])
+                current_route_phase = phase_by_id[route_phase_ids[-1]]
+                if raw_retries and current_route_phase.get("branches"):
+                    expected_selected_ids.append(route_phase_ids[-1])
+                if set(selected_branches) != set(expected_selected_ids):
+                    raise RuntimeErrorBase(
+                        "Snapshot action_runtime branch selections do not match routed path"
+                    )
+                for source_id, target_id in zip(
+                    route_phase_ids[:-1], route_phase_ids[1:], strict=True,
+                ):
+                    source = phase_by_id[source_id]
+                    branches = self._bounded_action_branches(source.get("branches"))
+                    selected = next(
+                        (
+                            branch for branch in branches or []
+                            if branch["branch_id"] == selected_branches.get(source_id)
+                        ),
+                        None,
+                    )
+                    if selected is None or selected.get("next_phase_id") != target_id:
+                        raise RuntimeErrorBase(
+                            "Snapshot action_runtime routed path violates branch target"
+                        )
+                if raw_retries:
+                    selected = next(
+                        (
+                            branch for branch in self._bounded_action_branches(
+                                current_route_phase.get("branches")
+                            ) or []
+                            if branch["branch_id"]
+                            == selected_branches.get(route_phase_ids[-1])
+                        ),
+                        None,
+                    )
+                    if (
+                        selected is None
+                        or set(raw_retries) != {selected.get("next_phase_id")}
+                    ):
+                        raise RuntimeErrorBase(
+                            "Snapshot action_runtime retry does not match routed target"
+                        )
+            else:
+                selected_phase_ids = [
+                    phase_id for phase_id in branch_phase_ids
+                    if phase_id in selected_branches
+                ]
+                if (
+                    set(selected_branches) != set(selected_phase_ids)
+                    or selected_phase_ids != branch_phase_ids[:len(selected_phase_ids)]
+                ):
+                    raise RuntimeErrorBase(
+                        "Snapshot action_runtime branch selections are not an authored prefix"
+                    )
 
             authored_steps: list[str] = []
             selected_child_steps: set[str] = set()
-            for phase in phases:
+            authored_phase_order = (
+                [phase_by_id[phase_id] for phase_id in route["visited_phase_ids"]]
+                if static_route and route is not None
+                else phases
+            )
+            for phase in authored_phase_order:
                 if not isinstance(phase, dict):
                     continue
                 child_action = phase.get("child_action")
@@ -1814,12 +2349,13 @@ class WorldRuntime:
                 "retries": retries,
                 "completed_steps": list(raw_completed_steps),
                 "selected_branches": selected_branches,
+                "route": route,
             }
         return validated
 
     def save_snapshot(self, path: str | Path) -> None:
-        pending_ids = {
-            action.action_id for _, _, action in self.scheduler.entries()
+        pending_actions = {
+            action.action_id: action for _, _, action in self.scheduler.entries()
         }
         payload = {
             "format": SNAPSHOT_FORMAT,
@@ -1839,9 +2375,12 @@ class WorldRuntime:
             "action_runtime": {
                 action_id: deepcopy(self.action_runtime.get(
                     action_id,
-                    {"retries": {}, "completed_steps": [], "selected_branches": {}},
+                    self._new_action_runtime_record(
+                        pending_actions[action_id],
+                        self._action_behavior(pending_actions[action_id].verb),
+                    ),
                 ))
-                for action_id in sorted(pending_ids)
+                for action_id in sorted(pending_actions)
             },
             "event_count": len(self.event_log.events),
         }
@@ -1854,7 +2393,7 @@ class WorldRuntime:
         snapshot_format = payload.get("format")
         if snapshot_format not in {
             SNAPSHOT_FORMAT_V1, SNAPSHOT_FORMAT_V2, SNAPSHOT_FORMAT_V3,
-            SNAPSHOT_FORMAT_V4, SNAPSHOT_FORMAT,
+            SNAPSHOT_FORMAT_V4, SNAPSHOT_FORMAT_V5, SNAPSHOT_FORMAT,
         }:
             raise RuntimeErrorBase("不支援的 Snapshot 格式")
         try:
@@ -1868,7 +2407,8 @@ class WorldRuntime:
             SNAPSHOT_FORMAT_V2: 2,
             SNAPSHOT_FORMAT_V3: 3,
             SNAPSHOT_FORMAT_V4: 4,
-            SNAPSHOT_FORMAT: 5,
+            SNAPSHOT_FORMAT_V5: 5,
+            SNAPSHOT_FORMAT: 6,
         }[snapshot_format]
         if snapshot_version != expected_snapshot_version:
             raise RuntimeErrorBase("Snapshot format 與 snapshot_version 不一致")
@@ -1931,9 +2471,14 @@ class WorldRuntime:
         next_scheduler = Scheduler()
         queued_actions = next_scheduler.import_state(scheduler_payload)
         next_actions = {action.action_id: action for action in queued_actions}
+        next_due_ticks = {
+            action.action_id: due_tick
+            for due_tick, _, action in next_scheduler.entries()
+        }
         next_action_runtime = self._validated_action_runtime(
             payload.get("action_runtime"),
             next_actions,
+            next_due_ticks,
             require_all=snapshot_version >= 3,
             snapshot_tick=next_scheduler.tick,
             snapshot_version=snapshot_version,
@@ -1992,9 +2537,11 @@ class WorldRuntime:
                 lifecycle_order += 1
                 action.status = ActionStatus.SCHEDULED
                 pending_actions[action.action_id] = (due_tick, lifecycle_order, action)
-                pending_action_runtime[action.action_id] = {
-                    "retries": {}, "completed_steps": [], "selected_branches": {},
-                }
+                pending_action_runtime[action.action_id] = (
+                    self._new_action_runtime_record(
+                        action, self._action_behavior(action.verb),
+                    )
+                )
             elif event.event_type == "action.branch_selected":
                 action_id = event.payload.get("action_id")
                 phase_id = event.payload.get("phase_id")
@@ -2002,13 +2549,27 @@ class WorldRuntime:
                 entry = pending_actions.get(action_id) if isinstance(action_id, str) else None
                 behavior = self._action_behavior(entry[2].verb) if entry is not None else None
                 phases = behavior.get("phases", []) if isinstance(behavior, dict) else []
-                phase_index = next(
-                    (
-                        index for index, phase in enumerate(phases[:-1])
-                        if isinstance(phase, dict) and phase.get("phase_id") == phase_id
-                    ),
-                    None,
+                static_route = self._is_static_action_route(behavior)
+                route = (
+                    pending_action_runtime.get(action_id, {}).get("route")
+                    if isinstance(action_id, str) else None
                 )
+                if static_route:
+                    phase_index = next(
+                        (
+                            index for index, item in enumerate(phases)
+                            if isinstance(item, dict) and item.get("phase_id") == phase_id
+                        ),
+                        None,
+                    )
+                else:
+                    phase_index = next(
+                        (
+                            index for index, item in enumerate(phases[:-1])
+                            if isinstance(item, dict) and item.get("phase_id") == phase_id
+                        ),
+                        None,
+                    )
                 phase = phases[phase_index] if isinstance(phase_index, int) else None
                 branches = self._bounded_action_branches(
                     phase.get("branches") if isinstance(phase, dict) else None
@@ -2021,6 +2582,15 @@ class WorldRuntime:
                     None,
                 )
                 child = branch.get("child_action") if isinstance(branch, dict) else None
+                expected_next_phase_id = (
+                    branch.get("next_phase_id")
+                    if static_route and isinstance(branch, dict)
+                    else (
+                        phases[phase_index + 1].get("phase_id")
+                        if isinstance(phase_index, int) and phase_index + 1 < len(phases)
+                        else None
+                    )
+                )
                 selections = (
                     pending_action_runtime[action_id]["selected_branches"]
                     if isinstance(action_id, str) and action_id in pending_action_runtime
@@ -2036,7 +2606,15 @@ class WorldRuntime:
                     or event.payload.get("actor") != entry[2].actor_id
                     or event.payload.get("verb") != entry[2].verb
                     or event.payload.get("priority") != branch["priority"]
-                    or event.payload.get("next_phase_id") != phases[phase_index + 1].get("phase_id")
+                    or event.payload.get("next_phase_id") != expected_next_phase_id
+                    or (
+                        static_route
+                        and (
+                            not isinstance(route, dict)
+                            or route.get("current_phase_id") != phase_id
+                            or event.timestamp_tick != route.get("phase_due_tick")
+                        )
+                    )
                     or event.payload.get("child_step_id") != (
                         child.get("step_id") if isinstance(child, dict) else None
                     )
@@ -2059,7 +2637,25 @@ class WorldRuntime:
                 authored_steps: list[str] = []
                 if isinstance(behavior, dict):
                     selections = pending_action_runtime[action_id]["selected_branches"]
-                    for phase in behavior.get("phases", []):
+                    route = pending_action_runtime[action_id].get("route")
+                    phases = behavior.get("phases", [])
+                    phase_by_id = {
+                        phase.get("phase_id"): phase
+                        for phase in phases
+                        if isinstance(phase, dict)
+                        and isinstance(phase.get("phase_id"), str)
+                    }
+                    authored_phases = (
+                        [
+                            phase_by_id[phase_id]
+                            for phase_id in route.get("visited_phase_ids", [])
+                            if phase_id in phase_by_id
+                        ]
+                        if self._is_static_action_route(behavior)
+                        and isinstance(route, dict)
+                        else phases
+                    )
+                    for phase in authored_phases:
                         if not isinstance(phase, dict):
                             continue
                         child_action = phase.get("child_action")
@@ -2133,6 +2729,47 @@ class WorldRuntime:
                     previous_retry["first_failure_tick"]
                     if isinstance(previous_retry, dict) else event.timestamp_tick
                 )
+                static_retry_valid = True
+                if self._is_static_action_route(behavior):
+                    runtime_record = pending_action_runtime[action_id]
+                    route = runtime_record.get("route")
+                    current_phase = next(
+                        (
+                            item for item in phases
+                            if isinstance(item, dict)
+                            and isinstance(route, dict)
+                            and item.get("phase_id") == route.get("current_phase_id")
+                        ),
+                        None,
+                    )
+                    selected_branch_id = runtime_record["selected_branches"].get(
+                        current_phase.get("phase_id")
+                        if isinstance(current_phase, dict) else None
+                    )
+                    selected_branch = next(
+                        (
+                            item for item in self._bounded_action_branches(
+                                current_phase.get("branches")
+                                if isinstance(current_phase, dict) else None
+                            ) or []
+                            if item.get("branch_id") == selected_branch_id
+                        ),
+                        None,
+                    )
+                    expected_boundary_tick = (
+                        previous_retry.get("next_retry_tick")
+                        if isinstance(previous_retry, dict)
+                        else route.get("phase_due_tick")
+                        if isinstance(route, dict)
+                        else None
+                    )
+                    static_retry_valid = (
+                        isinstance(route, dict)
+                        and selected_branch is not None
+                        and selected_branch.get("next_phase_id")
+                        == event.payload.get("phase_id")
+                        and event.timestamp_tick == expected_boundary_tick
+                    )
                 if (
                     not isinstance(retry_policy, dict)
                     or attempt != expected_attempt
@@ -2144,6 +2781,7 @@ class WorldRuntime:
                     or timeout_at_tick != first_failure_tick + retry_policy["timeout_ticks"]
                     or retry_at_tick > timeout_at_tick
                     or due_tick != entry[0] + interval_ticks
+                    or not static_retry_valid
                     or not isinstance(condition_id, str)
                     or condition_id not in {
                         condition.get("condition_id")
@@ -2167,7 +2805,106 @@ class WorldRuntime:
                 lifecycle_tick = max(lifecycle_tick, event.timestamp_tick)
                 action_id = event.payload.get("action_id")
                 next_phase_id = event.payload.get("next_phase_id")
+                if not isinstance(action_id, str) or not isinstance(next_phase_id, str):
+                    raise RuntimeErrorBase("EventLog action.progressed is invalid")
+                if action_id not in pending_actions:
+                    raise RuntimeErrorBase(
+                        "EventLog action.progressed references no pending action"
+                    )
                 if isinstance(action_id, str) and isinstance(next_phase_id, str):
+                    entry = pending_actions.get(action_id)
+                    runtime_record = pending_action_runtime.get(action_id)
+                    behavior = (
+                        self._action_behavior(entry[2].verb) if entry is not None else None
+                    )
+                    if self._is_static_action_route(behavior):
+                        route = (
+                            runtime_record.get("route")
+                            if isinstance(runtime_record, dict) else None
+                        )
+                        phases = behavior.get("phases", [])
+                        phase_by_id = {
+                            phase.get("phase_id"): phase
+                            for phase in phases
+                            if isinstance(phase, dict)
+                            and isinstance(phase.get("phase_id"), str)
+                        }
+                        phase_id = event.payload.get("phase_id")
+                        phase = phase_by_id.get(phase_id)
+                        next_phase = phase_by_id.get(next_phase_id)
+                        selected_branch_id = (
+                            runtime_record.get("selected_branches", {}).get(phase_id)
+                            if isinstance(runtime_record, dict) else None
+                        )
+                        branch = next(
+                            (
+                                item for item in self._bounded_action_branches(
+                                    phase.get("branches") if isinstance(phase, dict) else None
+                                ) or []
+                                if item.get("branch_id") == selected_branch_id
+                            ),
+                            None,
+                        )
+                        visited = (
+                            route.get("visited_phase_ids")
+                            if isinstance(route, dict) else None
+                        )
+                        elapsed = (
+                            route.get("elapsed_duration_ticks")
+                            if isinstance(route, dict) else None
+                        )
+                        next_due = (
+                            event.timestamp_tick + next_phase["duration_ticks"]
+                            if isinstance(next_phase, dict) else None
+                        )
+                        retry_ticks = {
+                            retry_state.get("next_retry_tick")
+                            for retry_state in runtime_record.get("retries", {}).values()
+                            if isinstance(retry_state, dict)
+                        } if isinstance(runtime_record, dict) else set()
+                        expected_boundary_tick = (
+                            next(iter(retry_ticks))
+                            if retry_ticks else route.get("phase_due_tick")
+                            if isinstance(route, dict) else None
+                        )
+                        if (
+                            entry is None
+                            or not isinstance(route, dict)
+                            or not isinstance(phase, dict)
+                            or not isinstance(next_phase, dict)
+                            or branch is None
+                            or branch.get("next_phase_id") != next_phase_id
+                            or route.get("current_phase_id") != phase_id
+                            or event.timestamp_tick != expected_boundary_tick
+                            or not isinstance(visited, list)
+                            or isinstance(elapsed, bool)
+                            or not isinstance(elapsed, int)
+                            or event.payload.get("phase_index") != len(visited)
+                            or event.payload.get("completed_phases") != len(visited)
+                            or event.payload.get("total_phases") != len(phases)
+                            or event.payload.get("progress_ticks")
+                            != elapsed + phase["duration_ticks"]
+                            or event.payload.get("phase_due_tick") != next_due
+                        ):
+                            raise RuntimeErrorBase(
+                                "EventLog action.progressed violates static route"
+                            )
+                        route.update({
+                            "current_phase_id": next_phase_id,
+                            "phase_started_tick": event.timestamp_tick,
+                            "phase_due_tick": next_due,
+                            "elapsed_duration_ticks": elapsed + phase["duration_ticks"],
+                            "visited_phase_ids": [*visited, next_phase_id],
+                        })
+                        if next_phase_id == behavior.get("terminal_phase_id"):
+                            routed_due = event.payload.get("due_tick")
+                            if routed_due != next_due:
+                                raise RuntimeErrorBase(
+                                    "EventLog terminal route due_tick is invalid"
+                                )
+                            pending_actions[action_id] = (
+                                routed_due, entry[1], entry[2],
+                            )
                     pending_action_runtime.get(action_id, {}).get("retries", {}).pop(
                         next_phase_id, None
                     )
@@ -2176,6 +2913,25 @@ class WorldRuntime:
             }:
                 action_id = event.payload.get("action_id")
                 if isinstance(action_id, str):
+                    entry = pending_actions.get(action_id)
+                    behavior = (
+                        self._action_behavior(entry[2].verb) if entry is not None else None
+                    )
+                    if event.event_type == "action.completed" and self._is_static_action_route(
+                        behavior
+                    ):
+                        route = pending_action_runtime.get(action_id, {}).get("route")
+                        if (
+                            entry is None
+                            or not isinstance(route, dict)
+                            or route.get("current_phase_id")
+                            != behavior.get("terminal_phase_id")
+                            or route.get("phase_due_tick") != event.timestamp_tick
+                            or entry[0] != event.timestamp_tick
+                        ):
+                            raise RuntimeErrorBase(
+                                "EventLog action.completed violates static terminal route"
+                            )
                     lifecycle_seen = True
                     lifecycle_tick = max(lifecycle_tick, event.timestamp_tick)
                     pending_actions.pop(action_id, None)

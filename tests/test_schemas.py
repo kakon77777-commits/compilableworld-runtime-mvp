@@ -94,7 +94,7 @@ class SchemaContractTests(unittest.TestCase):
         self.assertNotIn("effects", transition["properties"])
 
         action_behavior_schema = json.loads(
-            (ROOT / "schemas" / "action-behaviors.v0.6.schema.json").read_text(encoding="utf-8")
+            (ROOT / "schemas" / "action-behaviors.v0.7.schema.json").read_text(encoding="utf-8")
         )
         behavior = action_behavior_schema["$defs"]["behavior"]
         self.assertEqual(action_behavior_schema["properties"]["behaviors"]["maxItems"], 1024)
@@ -117,6 +117,9 @@ class SchemaContractTests(unittest.TestCase):
         self.assertEqual(
             action_behavior_schema["$defs"]["branch"]["properties"]["priority"]["maximum"],
             1000000,
+        )
+        self.assertIn(
+            "next_phase_id", action_behavior_schema["$defs"]["branch"]["required"],
         )
         self.assertEqual(
             action_behavior_schema["$defs"]["childAction"]["properties"]["args"]["maxProperties"],
@@ -151,7 +154,7 @@ class SchemaContractTests(unittest.TestCase):
         self.assertIn("action_behaviors", runtime_package_schema["properties"]["schema_contracts"]["required"])
         self.assertEqual(
             runtime_package_schema["properties"]["schema_contracts"]["properties"]["action_behaviors"]["const"],
-            "compilableworld.schema/action-behaviors/v0.6",
+            "compilableworld.schema/action-behaviors/v0.7",
         )
         self.assertEqual(runtime_package_schema["properties"]["state_machines"]["maxItems"], 1024)
 
