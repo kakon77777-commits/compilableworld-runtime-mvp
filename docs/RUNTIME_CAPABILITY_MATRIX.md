@@ -3,8 +3,8 @@
 - **Document version:** v0.1
 - **Baseline source:** uploaded integrated local snapshot
 - **Runtime package version:** `0.1.1`
-- **Audit date:** 2026-07-15
-- **Verification:** `PYTHONPATH=src python3 -m unittest discover -s tests -v` — **113/113 passed**
+- **Audit date:** 2026-08-09
+- **Verification:** `PYTHONPATH=src python -m pytest -q` — **316/316 passed**
 - **Purpose:** authoritative inventory for PIW-MCP integration planning
 
 > Status meanings: **Implemented** = code and tests exist; **Partial** = usable core exists but stated boundary remains; **Planned** = no production implementation found in this baseline.
@@ -28,8 +28,8 @@
 | Snapshot/save | Implemented | runtime snapshot methods | round-trip and legacy migration tests | checkpoint tool may wrap existing snapshot boundary |
 | Replay | Implemented | runtime replay path | movement/inventory/door replay tests | MCP session recovery can rely on replay, with version limits |
 | Snapshot version validation | Implemented | runtime migration/version checks | unknown-version rejection test | MCP must return explicit version mismatch errors |
-| Cross-version migration registry | Partial | legacy snapshot migration exists | legacy migration test | generic event/package migration still needs registry |
-| Scheduler | Implemented | `Scheduler` | delay and snapshot restore tests | delayed actions already belong to runtime authority |
+| Cross-version migration registry | Partial | `compilableworld_mcp.migration_registry`, plus explicit legacy snapshot migration | coordination and legacy migration tests | generic registry exists; Kernel snapshot loader is still a separate adapter |
+| Scheduler | Implemented | `Scheduler`, Action behavior lifecycle | delay, cancellation, interruption, pending Replay and snapshot restore tests | composite actions remain under runtime authority |
 | Single-process/single-world service | Partial | current runtime model | documented boundary | remote multi-session host remains outside current core |
 
 ## 2. World mechanics
@@ -49,8 +49,10 @@
 | Ranged/mental combat paths | Planned | Formula source exists but wiring is not present |
 | Multi-exchange channeling/interruption | Planned | Explicitly deferred |
 | Quests: simple requirements/rewards | Implemented | Reach and delivery completion |
-| Quests: event transitions | Implemented | Dialogue, movement and inventory events |
-| Quests: branch/failure/priority | Implemented | deterministic priority and ambiguous dispatch rejection |
+| Quests: event transitions | Implemented | action failure, movement, inventory, door, dialogue, combat, magic and terminal quest chaining share one bounded trigger contract |
+| Quests: branch/failure/priority | Implemented | deterministic priority, actor causation, event matching, requirements, graph reachability, terminal-state rejection, ambiguous dispatch rejection and exactly-once terminal reward; see `docs/WORLD_STATE_MACHINE_EXECUTION_CONTRACT_zh-TW.md` |
+| Scoped StateIR: World/Region/Scene/Entity/System | Implemented | versioned authoring schema, owner validation, isolated `fsm.*` cells, deterministic EventIR transitions, visibility projection, terminal chaining, Snapshot and Replay; owner scope is not implicit geographic event routing; see `docs/SCOPED_STATE_IR_EXECUTION_CONTRACT_zh-TW.md` |
+| Action-scope state machines | Implemented | v0.7 compile-time validated static phase DAG, one sticky priority-selected active route, unique terminal, unknown/self/cycle/unreachable rejection, actual-path due convergence, non-recursive primitive child Actions, fail-closed actor/target State Cell AND gates, fixed-interval retry/deadline, atomic lifecycle, v0.1–v0.6 compatibility, cancellation, interruption, Snapshot v0.6 and route-aware pending Replay; dynamic/recursive/nested graph, resume, compensation, parallel/synchronizing join, free backoff/jitter and arbitrary guards remain pending; see `docs/ACTION_SCOPE_BEHAVIOR_EXECUTION_CONTRACT_zh-TW.md` |
 | Runtime-generated items/entities | Partial | generated player exists; generic runtime entity spawning remains bounded |
 
 ## 3. Narrative, dialogue and player entry
@@ -83,13 +85,13 @@
 | Scenario IR Given/When/Then | Implemented | uses normal ActionIR/Kernel/EventIR pipeline |
 | Scenario compile-time validation | Implemented | unknown target and invalid actions rejected |
 | Scenario state/event expectations | Implemented | packaged authoring scenarios |
-| Long-session property scenarios | Planned | suitable next extension for PIW-MCP |
+| Long-session property scenarios | Partial | 100-turn deterministic observation/replay gate exists; broader stateful/property generation remains |
 
 ## 5. Studio and EveGlyph integration
 
 | Capability | Status | Notes |
 |---|---|---|
-| Runtime Studio overview | Implemented | FMS/TMS/entity/state/quest graph and trace tail |
+| Runtime Studio overview | Implemented | FMS/TMS/entity/state/quest graph, scoped StateIR static/current state, Action behavior definitions/pending progress and trace tail |
 | Read-only Studio HTTP APIs | Implemented | overview, functions, schemas, import |
 | EveGlyph YAML parser | Implemented | nested lists and quoted scalars supported |
 | Studio World IR normalization | Implemented | entities, entity lists, state machines, diagnostics |
@@ -97,7 +99,7 @@
 | Bounded random import | Implemented | unbounded random rejected |
 | Migration plan | Implemented | explicit missing bindings and diagnostics |
 | Mapping suggestion | Implemented | preserves explicit values; unknowns remain unresolved |
-| Mapping validation | Implemented | fail-closed guard policy |
+| Mapping validation | Implemented | fail-closed World IR diagnostics, transition conflicts, and guard policy |
 | Reviewed overlay compilation | Implemented | base source is not mutated |
 | Full visual editing/write-back | Partial | current APIs are intentionally read-only/controlled |
 
@@ -135,15 +137,17 @@
 
 ### Must be added outside the world kernel
 
-- MCP transport/server package
-- MCP tool/resource schemas
-- world-session registry
-- actor/session/role binding
-- idempotency request ledger
+- MCP transport/server package (Partial: read-only, secure, opt-in action FastMCP facades, ASGI/stdio ingress, Streamable HTTP builder, TLS-aware Uvicorn runner, and binding-aware CLI startup exist; external process supervision and optional SDK deployment remain host-specific)
+- MCP tool/resource schemas (Partial: read-only, request-context, authenticated request, and secure gateway contracts exist; per-tool JSON schemas remain pending)
+- world-session registry (Partial: in-process service plus process-local/SQLite lifecycle store, explicit session rehydration, and local runtime-binding startup registry exist; distributed service discovery remains host-specific)
+- actor/session/role binding (Partial: session scope and first user/world/role/actor ACL slice exist)
+- idempotency request ledger (Partial: Session-scoped reservation/replay and SQLite action commit journal recovery exist; distributed ledger semantics remain pending)
+- rate limiting, action reservation, and outbox (Partial: local/SQLite-shared Session ledger, sliding-window limiter, claim/ack outbox, replayable deduplicated EventLog bridge, local Kernel state/event-log commit rollback, shared-SQLite journal/outbox atomic handoff, action commit journal recovery, and optional restart-verifiable Runtime state/event projection exist; distributed limits and end-to-end Kernel/outbox ACID commit remain pending)
 - filtered event and projection adapters
-- remote authentication and authorization
+- remote authentication and authorization (Partial: HMAC/OIDC Principal paths, JTI revoke, ACL, lifecycle rotation, ASGI/FastMCP adapters exist; TLS termination, external claim policy, and distributed deployment remain pending)
+- runtime ownership lease (Partial: process-local/SQLite exclusive lease, monotonic fencing tokens, explicit same-owner recovery, heartbeat lifecycle, optional service startup/renewal binding, authenticated centralized coordination API, single-store fenced leader lease, and optional fail-closed quorum vote gate exist; full quorum consensus remains pending)
 - per-actor observation/belief projection
-- MCP audit envelope
+- MCP audit envelope (Partial: safe request/Principal/session/world/runtime/action/replay response envelopes, process-local/SQLite append/query sink, gateway persistence markers, local SHA-256 tamper detection, and restart-verifiable checkpoints exist; independently published distributed anchors and cross-host query remain pending)
 - multi-world process/service boundary
 
 ### Must not be duplicated

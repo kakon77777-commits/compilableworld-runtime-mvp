@@ -3,14 +3,62 @@ from __future__ import annotations
 import csv
 import hashlib
 import json
+import math
 import re
 from collections import deque
 from pathlib import Path
 from typing import Any
 
+from .action_behavior import (
+    ACTION_BEHAVIOR_CHILD_ARG_FIELDS,
+    ACTION_BEHAVIOR_CHILD_ARG_LIMIT,
+    ACTION_BEHAVIOR_CHILD_MODULES,
+    ACTION_BEHAVIOR_CHILD_REQUIRED_ARGS,
+    ACTION_BEHAVIOR_CHILD_TARGET_VERBS,
+    ACTION_BEHAVIOR_BRANCH_LIMIT,
+    ACTION_BEHAVIOR_BRANCH_PRIORITY_LIMIT,
+    ACTION_BEHAVIOR_CONCURRENCY,
+    ACTION_BEHAVIOR_CONDITION_LIMIT,
+    ACTION_BEHAVIOR_CONDITION_NAMESPACES,
+    ACTION_BEHAVIOR_CONDITION_OPERATORS,
+    ACTION_BEHAVIOR_CONDITION_SUBJECTS,
+    ACTION_BEHAVIOR_DEFINITION_LIMIT,
+    ACTION_BEHAVIOR_DURATION_LIMIT,
+    ACTION_BEHAVIOR_EXECUTION_MODEL_STATIC_DAG,
+    ACTION_BEHAVIOR_FORMAT,
+    ACTION_BEHAVIOR_FORMAT_V1,
+    ACTION_BEHAVIOR_FORMAT_V2,
+    ACTION_BEHAVIOR_FORMAT_V3,
+    ACTION_BEHAVIOR_FORMAT_V4,
+    ACTION_BEHAVIOR_FORMAT_V5,
+    ACTION_BEHAVIOR_FORMAT_V6,
+    ACTION_BEHAVIOR_INTERRUPT_EVENTS,
+    ACTION_BEHAVIOR_INTERRUPT_LIMIT,
+    ACTION_BEHAVIOR_PHASE_LIMIT,
+    ACTION_BEHAVIOR_RETRY_ATTEMPT_LIMIT,
+    ACTION_BEHAVIOR_SCHEMA_ID,
+    ACTION_BEHAVIOR_SCHEMA_ID_V1,
+    ACTION_BEHAVIOR_SCHEMA_ID_V2,
+    ACTION_BEHAVIOR_SCHEMA_ID_V3,
+    ACTION_BEHAVIOR_SCHEMA_ID_V4,
+    ACTION_BEHAVIOR_SCHEMA_ID_V5,
+    ACTION_BEHAVIOR_SCHEMA_ID_V6,
+)
 from .functions import FunctionDefinitionError, FunctionRegistry, validate_function_source
 from .player_generation import template_records
 from .schema_registry import SchemaContractError, csv_schema_columns, schema_contracts
+from .state_machine import (
+    STATE_MACHINE_DEFINITION_LIMIT,
+    STATE_MACHINE_EVENT_MATCH_LIMIT,
+    STATE_MACHINE_OWNER_SCOPES,
+    STATE_MACHINE_PRIORITY_LIMIT,
+    STATE_MACHINE_REQUIREMENT_LIMIT,
+    STATE_MACHINE_REWARD_CURRENCY_LIMIT,
+    STATE_MACHINE_STATE_LIMIT,
+    STATE_MACHINE_TRANSITION_LIMIT,
+    STATE_MACHINE_TRIGGER_EVENT_FIELDS,
+    STATE_MACHINE_VISIBILITIES,
+)
 
 
 ID_RE = re.compile(r"^[a-z][a-z0-9_.-]*$")
@@ -19,11 +67,7 @@ STATE_CONDITION_READ_NAMESPACES = {
     "position", "inventory", "door", "health", "status", "quest",
     "wallet", "fsm", "combat", "magic",
 }
-QUEST_TRIGGER_EVENT_FIELDS = {
-    "inventory.item_given": {"item", "actor", "recipient"},
-    "movement.actor_moved": {"from", "to", "direction"},
-    "dialogue.responded": {"speaker_id", "speaker_name", "topic", "resolved_topic", "dialogue_id", "text"},
-}
+QUEST_TRIGGER_EVENT_FIELDS = STATE_MACHINE_TRIGGER_EVENT_FIELDS
 
 
 class CompileError(ValueError):
@@ -149,6 +193,10 @@ def compile_world(
         resolved["scenarios"] = _safe_source(root, str(sources["scenarios"]))
     if "functions" in sources:
         resolved["functions"] = _safe_source(root, str(sources["functions"]))
+    if "state_machines" in sources:
+        resolved["state_machines"] = _safe_source(root, str(sources["state_machines"]))
+    if "action_behaviors" in sources:
+        resolved["action_behaviors"] = _safe_source(root, str(sources["action_behaviors"]))
     world = _load_json(resolved["world"])
     rooms = _load_csv(resolved["rooms"], "rooms")
     exits = _load_csv(resolved["exits"], "exits")
@@ -159,6 +207,14 @@ def compile_world(
     dialogues = _load_json(resolved["dialogues"]) if "dialogues" in resolved else {"dialogues": []}
     scenarios = _load_json(resolved["scenarios"]) if "scenarios" in resolved else {"scenarios": []}
     functions = _load_json(resolved["functions"]) if "functions" in resolved else {"functions": []}
+    state_machines_source = (
+        _load_json(resolved["state_machines"])
+        if "state_machines" in resolved else {"format": "compilableworld.state-machines/v0.1", "state_machines": []}
+    )
+    action_behaviors_source = (
+        _load_json(resolved["action_behaviors"])
+        if "action_behaviors" in resolved else {"format": ACTION_BEHAVIOR_FORMAT, "behaviors": []}
+    )
     try:
         player_templates = (
             template_records({"player_templates": _load_json(resolved["player_templates"])})
@@ -179,6 +235,7 @@ def compile_world(
         _required(row, ["item_id", "name", "room", "portable"], "items.csv")
 
     room_ids = _unique(rooms, "room_id", "rooms.csv")
+    region_ids = {row["region"] for row in rooms}
     exit_ids = _unique(exits, "exit_id", "exits.csv")
     entity_ids = _unique(entities, "entity_id", "entities.csv")
     item_ids = _unique(items, "item_id", "items.csv")
@@ -186,6 +243,17 @@ def compile_world(
     overlap = entity_ids & item_ids
     if overlap:
         raise CompileError(f"entity/item ID 衝突: {sorted(overlap)}")
+    action_behaviors = _validate_action_behaviors(
+        action_behaviors_source,
+        entity_ids=entity_ids | item_ids,
+    )
+    state_machines = _validate_scoped_state_machines(
+        state_machines_source,
+        world_id=manifest["world_id"],
+        region_ids=region_ids,
+        room_ids=room_ids,
+        entity_ids=entity_ids | item_ids,
+    )
     quests = _validate_quests(
         quests, room_ids=room_ids, item_ids=item_ids,
         entity_types={row["entity_id"]: row["entity_type"] for row in entities},
@@ -213,8 +281,22 @@ def compile_world(
     unknown_schema_keys = set(declared_source_schemas) - set(contract_ids)
     if unknown_schema_keys:
         raise CompileError(f"manifest.source_schemas 含未知來源: {sorted(unknown_schema_keys)}")
+    action_behavior_schema_id = {
+        ACTION_BEHAVIOR_FORMAT_V1: ACTION_BEHAVIOR_SCHEMA_ID_V1,
+        ACTION_BEHAVIOR_FORMAT_V2: ACTION_BEHAVIOR_SCHEMA_ID_V2,
+        ACTION_BEHAVIOR_FORMAT_V3: ACTION_BEHAVIOR_SCHEMA_ID_V3,
+        ACTION_BEHAVIOR_FORMAT_V4: ACTION_BEHAVIOR_SCHEMA_ID_V4,
+        ACTION_BEHAVIOR_FORMAT_V5: ACTION_BEHAVIOR_SCHEMA_ID_V5,
+        ACTION_BEHAVIOR_FORMAT_V6: ACTION_BEHAVIOR_SCHEMA_ID_V6,
+        ACTION_BEHAVIOR_FORMAT: ACTION_BEHAVIOR_SCHEMA_ID,
+    }.get(action_behaviors_source.get("format") if isinstance(action_behaviors_source, dict) else None)
     for source_key, declared_schema_id in declared_source_schemas.items():
-        if declared_schema_id != contract_ids[source_key]:
+        expected_schema_id = (
+            action_behavior_schema_id
+            if source_key == "action_behaviors" and action_behavior_schema_id is not None
+            else contract_ids[source_key]
+        )
+        if declared_schema_id != expected_schema_id:
             raise CompileError(
                 f"manifest.source_schemas.{source_key} 與正式契約不符: {declared_schema_id}"
             )
@@ -222,9 +304,14 @@ def compile_world(
 
     source_schema_ids = {
         key: contract_ids[key]
-        for key in ("rooms", "exits", "entities", "items", "functions", "scenarios")
+        for key in (
+            "rooms", "exits", "entities", "items", "functions", "scenarios",
+            "state_machines", "action_behaviors",
+        )
         if key in sources
     }
+    if "action_behaviors" in sources and action_behavior_schema_id is not None:
+        source_schema_ids["action_behaviors"] = action_behavior_schema_id
 
     for row in exits:
         if row["from_room"] not in room_ids or row["to_room"] not in room_ids:
@@ -301,9 +388,20 @@ def compile_world(
                 _state(door, "door", "key_id", row.get("key_id", "").strip() or None),
             ])
 
-    for owner, state_name in world.get("world_state_machines", {}).items():
+    legacy_world_state_machines = world.get("world_state_machines", {})
+    if not isinstance(legacy_world_state_machines, dict):
+        raise CompileError("world.world_state_machines 必須是物件")
+    for owner, state_name in legacy_world_state_machines.items():
+        if not isinstance(owner, str) or (owner != "world" and not ID_RE.match(owner)):
+            raise CompileError(f"world.world_state_machines owner 不合法: {owner}")
+        if not isinstance(state_name, str) or not ID_RE.match(state_name):
+            raise CompileError(f"world.world_state_machines state 不合法: {state_name}")
         state_owner = manifest["world_id"] if owner == "world" else owner
         initial_state.append(_state(state_owner, "fsm", "state", state_name))
+    for machine in state_machines:
+        initial_state.append(_state(
+            machine["owner_id"], "fsm", machine["state_machine_id"], machine["initial_state"]
+        ))
     if default_player:
         initial_state.append(_state(default_player, "wallet", "currency", 0))
         for quest in quests:
@@ -318,6 +416,33 @@ def compile_world(
     for module_id in modules:
         if not isinstance(module_id, str) or not ID_RE.match(module_id):
             raise CompileError(f"不合法 module ID: {module_id}")
+    if state_machines and "state_machine.core" not in modules:
+        raise CompileError("state_machines source 需要 manifest.modules 宣告 state_machine.core")
+    for behavior in action_behaviors:
+        if behavior["completion_module"] not in modules:
+            raise CompileError(
+                f"action behavior {behavior['behavior_id']} 的 completion_module "
+                f"未在 manifest.modules 宣告: {behavior['completion_module']}"
+            )
+        for phase in behavior.get("phases", []):
+            child_action = phase.get("child_action")
+            if isinstance(child_action, dict) and child_action["module_id"] not in modules:
+                raise CompileError(
+                    f"action behavior {behavior['behavior_id']} child step "
+                    f"{child_action['step_id']} module is not in manifest.modules: "
+                    f"{child_action['module_id']}"
+                )
+            for branch in phase.get("branches", []):
+                branch_child = branch.get("child_action")
+                if (
+                    isinstance(branch_child, dict)
+                    and branch_child["module_id"] not in modules
+                ):
+                    raise CompileError(
+                        f"action behavior {behavior['behavior_id']} branch "
+                        f"{branch['branch_id']} child module is not in manifest.modules: "
+                        f"{branch_child['module_id']}"
+                    )
     package = {
         "format": "compilableworld.runtime-package/v0.1",
         "manifest": {
@@ -330,6 +455,8 @@ def compile_world(
         "rooms": rooms,
         "exits": exits,
         "entities": compiled_entities,
+        "action_behaviors": action_behaviors,
+        "state_machines": state_machines,
         "quests": quests,
         "narrative": narrative,
         "dialogues": dialogues,
@@ -361,6 +488,8 @@ def compile_world(
         "exits": len(exits), "entities": len(compiled_entities), "states": len(initial_state),
         "modules": modules, "dialogues": len(dialogues["dialogues"]),
         "scenarios": len(scenarios["scenarios"]), "functions": len(functions["functions"]),
+        "action_behaviors": len(action_behaviors),
+        "state_machines": len(state_machines),
         "package_sha256": _sha256(package_path),
     }
     (out / "build-report.json").write_text(json.dumps(report, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
@@ -386,6 +515,942 @@ def _state(owner: str, namespace: str, key: str, value: Any) -> dict[str, Any]:
 
 def _bool(value: str) -> bool:
     return str(value).strip().lower() in {"1", "true", "yes", "y"}
+
+
+def _finite_json_scalar(value: Any) -> bool:
+    return (
+        value is None
+        or isinstance(value, (str, bool, int))
+        or (isinstance(value, float) and math.isfinite(value))
+    )
+
+
+def _validate_action_child(
+    raw_child: Any,
+    *,
+    label: str,
+    authored_verbs: set[str],
+    entity_ids: set[str],
+    step_ids: set[str],
+) -> dict[str, Any] | None:
+    if raw_child is None:
+        return None
+    allowed = {"step_id", "verb", "target", "args"}
+    if not isinstance(raw_child, dict):
+        raise CompileError(f"{label} must be an object or null")
+    unknown = set(raw_child) - allowed
+    missing = allowed - set(raw_child)
+    if unknown:
+        raise CompileError(f"{label} contains unknown fields: {sorted(unknown)}")
+    if missing:
+        raise CompileError(f"{label} is missing fields: {sorted(missing)}")
+
+    step_id = raw_child["step_id"]
+    verb = raw_child["verb"]
+    if not isinstance(step_id, str) or not ID_RE.match(step_id):
+        raise CompileError(f"{label}.step_id is invalid")
+    if step_id in step_ids:
+        raise CompileError(f"{label}.step_id is duplicated: {step_id}")
+    step_ids.add(step_id)
+    if verb not in ACTION_BEHAVIOR_CHILD_MODULES:
+        raise CompileError(f"{label}.verb is not a bounded primitive: {verb}")
+    if verb in authored_verbs:
+        raise CompileError(f"{label}.verb cannot invoke an authored behavior: {verb}")
+
+    target = raw_child["target"]
+    normalized_target: dict[str, str] | None = None
+    if target is not None:
+        if not isinstance(target, dict) or "source" not in target:
+            raise CompileError(f"{label}.target must be a bounded target object or null")
+        source = target.get("source")
+        expected_fields = {"source"} if source == "parent_target" else {"source", "entity_id"}
+        if set(target) != expected_fields or source not in {"parent_target", "entity"}:
+            raise CompileError(f"{label}.target shape is invalid")
+        if source == "entity":
+            entity_id = target.get("entity_id")
+            if not isinstance(entity_id, str) or entity_id not in entity_ids:
+                raise CompileError(f"{label}.target.entity_id references an unknown entity")
+            normalized_target = {"source": "entity", "entity_id": entity_id}
+        else:
+            normalized_target = {"source": "parent_target"}
+    if verb in ACTION_BEHAVIOR_CHILD_TARGET_VERBS and normalized_target is None:
+        raise CompileError(f"{label}.target is required for {verb}")
+    if verb not in ACTION_BEHAVIOR_CHILD_TARGET_VERBS and normalized_target is not None:
+        raise CompileError(f"{label}.target is forbidden for {verb}")
+
+    args = raw_child["args"]
+    if not isinstance(args, dict) or len(args) > ACTION_BEHAVIOR_CHILD_ARG_LIMIT:
+        raise CompileError(
+            f"{label}.args must be an object with at most {ACTION_BEHAVIOR_CHILD_ARG_LIMIT} fields"
+        )
+    allowed_args = ACTION_BEHAVIOR_CHILD_ARG_FIELDS[verb]
+    required_args = ACTION_BEHAVIOR_CHILD_REQUIRED_ARGS.get(verb, set())
+    if set(args) - allowed_args:
+        raise CompileError(f"{label}.args contains unsupported fields: {sorted(set(args) - allowed_args)}")
+    if required_args - set(args):
+        raise CompileError(f"{label}.args is missing fields: {sorted(required_args - set(args))}")
+    normalized_args: dict[str, Any] = {}
+    for key, value in args.items():
+        if not _finite_json_scalar(value):
+            raise CompileError(f"{label}.args.{key} must be a finite JSON scalar")
+        if key in {"direction", "recipient", "spell", "text", "topic"} and (
+            not isinstance(value, str) or not value.strip()
+        ):
+            raise CompileError(f"{label}.args.{key} must be a non-empty string")
+        normalized_args[key] = value.strip() if isinstance(value, str) else value
+    recipient = normalized_args.get("recipient")
+    if verb == "give" and recipient not in entity_ids:
+        raise CompileError(f"{label}.args.recipient references an unknown entity")
+    return {
+        "step_id": step_id,
+        "verb": verb,
+        "module_id": ACTION_BEHAVIOR_CHILD_MODULES[verb],
+        "target": normalized_target,
+        "args": normalized_args,
+    }
+
+
+def _validate_action_branch_conditions(
+    raw_conditions: Any,
+    *,
+    label: str,
+    condition_ids: set[str],
+) -> list[dict[str, Any]]:
+    if (
+        not isinstance(raw_conditions, list)
+        or len(raw_conditions) > ACTION_BEHAVIOR_CONDITION_LIMIT
+    ):
+        raise CompileError(
+            f"{label} must contain at most {ACTION_BEHAVIOR_CONDITION_LIMIT} conditions"
+        )
+    normalized: list[dict[str, Any]] = []
+    allowed = {"condition_id", "subject", "namespace", "key", "operator", "value"}
+    for index, condition in enumerate(raw_conditions):
+        condition_label = f"{label}[{index}]"
+        if not isinstance(condition, dict):
+            raise CompileError(f"{condition_label} must be an object")
+        unknown = set(condition) - allowed
+        missing = allowed - set(condition)
+        if unknown:
+            raise CompileError(
+                f"{condition_label} contains unknown fields: {sorted(unknown)}"
+            )
+        if missing:
+            raise CompileError(
+                f"{condition_label} is missing fields: {sorted(missing)}"
+            )
+        condition_id = condition["condition_id"]
+        subject = condition["subject"]
+        namespace = condition["namespace"]
+        key = condition["key"]
+        operator = condition["operator"]
+        expected = condition["value"]
+        if not isinstance(condition_id, str) or not ID_RE.match(condition_id):
+            raise CompileError(f"{condition_label}.condition_id is invalid")
+        if condition_id in condition_ids:
+            raise CompileError(f"duplicate action condition_id: {condition_id}")
+        condition_ids.add(condition_id)
+        if subject not in ACTION_BEHAVIOR_CONDITION_SUBJECTS:
+            raise CompileError(f"{condition_label}.subject is unsupported")
+        if namespace not in ACTION_BEHAVIOR_CONDITION_NAMESPACES:
+            raise CompileError(f"{condition_label}.namespace is unsupported")
+        if not isinstance(key, str) or not ID_RE.match(key):
+            raise CompileError(f"{condition_label}.key is invalid")
+        if operator not in ACTION_BEHAVIOR_CONDITION_OPERATORS:
+            raise CompileError(f"{condition_label}.operator is unsupported")
+        if not _finite_json_scalar(expected):
+            raise CompileError(f"{condition_label}.value must be a finite JSON scalar")
+        if operator in {
+            "less_than", "less_or_equal", "greater_than", "greater_or_equal",
+        } and (isinstance(expected, bool) or not isinstance(expected, (int, float))):
+            raise CompileError(f"{condition_label}.value must be numeric")
+        normalized.append({
+            "condition_id": condition_id,
+            "subject": subject,
+            "namespace": namespace,
+            "key": key,
+            "operator": operator,
+            "value": expected,
+        })
+    return normalized
+
+
+def _validate_action_behaviors(
+    source: Any,
+    *,
+    entity_ids: set[str],
+) -> list[dict[str, Any]]:
+    if not isinstance(source, dict):
+        raise CompileError("action_behaviors.json 必須是物件")
+    unknown_root = set(source) - {"format", "behaviors"}
+    if unknown_root:
+        raise CompileError(f"action_behaviors.json 含未知欄位: {sorted(unknown_root)}")
+    source_format = source.get("format")
+    if source_format not in {
+        ACTION_BEHAVIOR_FORMAT_V1, ACTION_BEHAVIOR_FORMAT_V2,
+        ACTION_BEHAVIOR_FORMAT_V3, ACTION_BEHAVIOR_FORMAT_V4,
+        ACTION_BEHAVIOR_FORMAT_V5, ACTION_BEHAVIOR_FORMAT_V6,
+        ACTION_BEHAVIOR_FORMAT,
+    }:
+        raise CompileError("action_behaviors.json format 不支援")
+    behaviors = source.get("behaviors")
+    if not isinstance(behaviors, list):
+        raise CompileError("action_behaviors.json.behaviors 必須是陣列")
+    if len(behaviors) > ACTION_BEHAVIOR_DEFINITION_LIMIT:
+        raise CompileError(
+            f"action_behaviors.json 不可超過 {ACTION_BEHAVIOR_DEFINITION_LIMIT} 個 behavior"
+        )
+
+    common = {
+        "behavior_id", "title", "verb", "completion_module", "concurrency", "interrupt_on",
+    }
+    allowed = common | ({"duration_ticks"} if source_format == ACTION_BEHAVIOR_FORMAT_V1 else {"phases"})
+    behavior_ids: set[str] = set()
+    verbs: set[str] = set()
+    authored_verbs = {
+        behavior.get("verb")
+        for behavior in behaviors
+        if isinstance(behavior, dict) and isinstance(behavior.get("verb"), str)
+    }
+    normalized: list[dict[str, Any]] = []
+    for index, behavior in enumerate(behaviors):
+        label = f"action_behaviors.json.behaviors[{index}]"
+        if not isinstance(behavior, dict):
+            raise CompileError(f"{label} 必須是物件")
+        unknown = set(behavior) - allowed
+        missing = allowed - set(behavior)
+        if unknown:
+            raise CompileError(f"{label} 含未知欄位: {sorted(unknown)}")
+        if missing:
+            raise CompileError(f"{label} 缺少必填欄位: {sorted(missing)}")
+
+        behavior_id = behavior["behavior_id"]
+        verb = behavior["verb"]
+        completion_module = behavior["completion_module"]
+        if not isinstance(behavior_id, str) or not ID_RE.match(behavior_id):
+            raise CompileError(f"{label}.behavior_id 不合法")
+        if behavior_id in behavior_ids:
+            raise CompileError(f"action_behaviors.json 含重複 behavior_id: {behavior_id}")
+        behavior_ids.add(behavior_id)
+        if not isinstance(verb, str) or not ID_RE.match(verb):
+            raise CompileError(f"{label}.verb 不合法")
+        if verb in verbs:
+            raise CompileError(f"action_behaviors.json 同一 verb 只能有一個 behavior: {verb}")
+        verbs.add(verb)
+        if not isinstance(completion_module, str) or not ID_RE.match(completion_module):
+            raise CompileError(f"{label}.completion_module 不合法")
+        title = behavior["title"]
+        if not isinstance(title, str) or not title.strip():
+            raise CompileError(f"{label}.title 必須是非空字串")
+        phases: list[dict[str, Any]] = []
+        execution_model: str | None = None
+        entry_phase_id: str | None = None
+        terminal_phase_id: str | None = None
+        if source_format == ACTION_BEHAVIOR_FORMAT_V1:
+            duration = behavior["duration_ticks"]
+            if (
+                isinstance(duration, bool)
+                or not isinstance(duration, int)
+                or not 1 <= duration <= ACTION_BEHAVIOR_DURATION_LIMIT
+            ):
+                raise CompileError(
+                    f"{label}.duration_ticks 必須是 1 到 {ACTION_BEHAVIOR_DURATION_LIMIT} 的整數"
+                )
+        else:
+            raw_phases = behavior["phases"]
+            if (
+                not isinstance(raw_phases, list)
+                or not 2 <= len(raw_phases) <= ACTION_BEHAVIOR_PHASE_LIMIT
+            ):
+                raise CompileError(
+                    f"{label}.phases 必須包含 2 到 {ACTION_BEHAVIOR_PHASE_LIMIT} 個 phase"
+                )
+            phase_ids: set[str] = set()
+            condition_ids: set[str] = set()
+            child_step_ids: set[str] = set()
+            branch_ids: set[str] = set()
+            behavior_has_branches = False
+            behavior_has_split = False
+            duration = 0
+            for phase_index, phase in enumerate(raw_phases):
+                phase_label = f"{label}.phases[{phase_index}]"
+                if not isinstance(phase, dict):
+                    raise CompileError(f"{phase_label} 必須是物件")
+                phase_allowed = {"phase_id", "title", "duration_ticks"}
+                if source_format in {
+                    ACTION_BEHAVIOR_FORMAT_V3,
+                    ACTION_BEHAVIOR_FORMAT_V4,
+                    ACTION_BEHAVIOR_FORMAT_V5,
+                    ACTION_BEHAVIOR_FORMAT_V6,
+                    ACTION_BEHAVIOR_FORMAT,
+                }:
+                    phase_allowed.add("when")
+                if source_format in {
+                    ACTION_BEHAVIOR_FORMAT_V4,
+                    ACTION_BEHAVIOR_FORMAT_V5,
+                    ACTION_BEHAVIOR_FORMAT_V6,
+                    ACTION_BEHAVIOR_FORMAT,
+                }:
+                    phase_allowed.add("retry")
+                if source_format == ACTION_BEHAVIOR_FORMAT_V5:
+                    phase_allowed.add("child_action")
+                if source_format in {ACTION_BEHAVIOR_FORMAT_V6, ACTION_BEHAVIOR_FORMAT}:
+                    phase_allowed.add("branches")
+                phase_unknown = set(phase) - phase_allowed
+                phase_missing = phase_allowed - set(phase)
+                if phase_unknown:
+                    raise CompileError(f"{phase_label} 含未知欄位: {sorted(phase_unknown)}")
+                if phase_missing:
+                    raise CompileError(f"{phase_label} 缺少必填欄位: {sorted(phase_missing)}")
+                phase_id = phase["phase_id"]
+                phase_title = phase["title"]
+                phase_duration = phase["duration_ticks"]
+                if not isinstance(phase_id, str) or not ID_RE.match(phase_id):
+                    raise CompileError(f"{phase_label}.phase_id 不合法")
+                if phase_id in phase_ids:
+                    raise CompileError(f"{label}.phases 含重複 phase_id: {phase_id}")
+                phase_ids.add(phase_id)
+                if not isinstance(phase_title, str) or not phase_title.strip():
+                    raise CompileError(f"{phase_label}.title 必須是非空字串")
+                if (
+                    isinstance(phase_duration, bool)
+                    or not isinstance(phase_duration, int)
+                    or not 1 <= phase_duration <= ACTION_BEHAVIOR_DURATION_LIMIT
+                ):
+                    raise CompileError(
+                        f"{phase_label}.duration_ticks 必須是 1 到 {ACTION_BEHAVIOR_DURATION_LIMIT} 的整數"
+                    )
+                duration += phase_duration
+                if duration > ACTION_BEHAVIOR_DURATION_LIMIT:
+                    raise CompileError(
+                        f"{label}.phases 總 duration 不可超過 {ACTION_BEHAVIOR_DURATION_LIMIT}"
+                    )
+                normalized_when: list[dict[str, Any]] = []
+                if source_format in {
+                    ACTION_BEHAVIOR_FORMAT_V3,
+                    ACTION_BEHAVIOR_FORMAT_V4,
+                    ACTION_BEHAVIOR_FORMAT_V5,
+                    ACTION_BEHAVIOR_FORMAT_V6,
+                    ACTION_BEHAVIOR_FORMAT,
+                }:
+                    raw_when = phase["when"]
+                    if (
+                        not isinstance(raw_when, list)
+                        or len(raw_when) > ACTION_BEHAVIOR_CONDITION_LIMIT
+                    ):
+                        raise CompileError(
+                            f"{phase_label}.when 必須是最多 {ACTION_BEHAVIOR_CONDITION_LIMIT} 個條件"
+                        )
+                    if phase_index == 0 and raw_when:
+                        raise CompileError(f"{phase_label}.when 第一個 phase 必須為空")
+                    for condition_index, condition in enumerate(raw_when):
+                        condition_label = f"{phase_label}.when[{condition_index}]"
+                        condition_allowed = {
+                            "condition_id", "subject", "namespace", "key", "operator", "value",
+                        }
+                        if not isinstance(condition, dict):
+                            raise CompileError(f"{condition_label} 必須是物件")
+                        condition_unknown = set(condition) - condition_allowed
+                        condition_missing = condition_allowed - set(condition)
+                        if condition_unknown:
+                            raise CompileError(
+                                f"{condition_label} 含未知欄位: {sorted(condition_unknown)}"
+                            )
+                        if condition_missing:
+                            raise CompileError(
+                                f"{condition_label} 缺少必填欄位: {sorted(condition_missing)}"
+                            )
+                        condition_id = condition["condition_id"]
+                        subject = condition["subject"]
+                        namespace = condition["namespace"]
+                        key = condition["key"]
+                        operator = condition["operator"]
+                        expected = condition["value"]
+                        if not isinstance(condition_id, str) or not ID_RE.match(condition_id):
+                            raise CompileError(f"{condition_label}.condition_id 不合法")
+                        if condition_id in condition_ids:
+                            raise CompileError(
+                                f"{label} 含重複 condition_id: {condition_id}"
+                            )
+                        condition_ids.add(condition_id)
+                        if subject not in ACTION_BEHAVIOR_CONDITION_SUBJECTS:
+                            raise CompileError(f"{condition_label}.subject 不支援")
+                        if namespace not in ACTION_BEHAVIOR_CONDITION_NAMESPACES:
+                            raise CompileError(f"{condition_label}.namespace 不支援")
+                        if not isinstance(key, str) or not ID_RE.match(key):
+                            raise CompileError(f"{condition_label}.key 不合法")
+                        if operator not in ACTION_BEHAVIOR_CONDITION_OPERATORS:
+                            raise CompileError(f"{condition_label}.operator 不支援")
+                        if not _finite_json_scalar(expected):
+                            raise CompileError(f"{condition_label}.value 必須是 finite JSON scalar")
+                        if operator in {
+                            "less_than", "less_or_equal", "greater_than", "greater_or_equal",
+                        } and (
+                            isinstance(expected, bool) or not isinstance(expected, (int, float))
+                        ):
+                            raise CompileError(f"{condition_label}.value 數值比較必須使用 number")
+                        normalized_when.append({
+                            "condition_id": condition_id,
+                            "subject": subject,
+                            "namespace": namespace,
+                            "key": key,
+                            "operator": operator,
+                            "value": expected,
+                        })
+                phase_record = {
+                    "phase_id": phase_id,
+                    "title": phase_title.strip(),
+                    "duration_ticks": phase_duration,
+                }
+                if source_format in {
+                    ACTION_BEHAVIOR_FORMAT_V3,
+                    ACTION_BEHAVIOR_FORMAT_V4,
+                    ACTION_BEHAVIOR_FORMAT_V5,
+                    ACTION_BEHAVIOR_FORMAT_V6,
+                    ACTION_BEHAVIOR_FORMAT,
+                }:
+                    phase_record["when"] = normalized_when
+                if source_format in {
+                    ACTION_BEHAVIOR_FORMAT_V4,
+                    ACTION_BEHAVIOR_FORMAT_V5,
+                    ACTION_BEHAVIOR_FORMAT_V6,
+                    ACTION_BEHAVIOR_FORMAT,
+                }:
+                    retry = phase["retry"]
+                    if phase_index == 0 and retry is not None:
+                        raise CompileError(f"{phase_label}.retry is forbidden on the first phase")
+                    if not normalized_when and retry is not None:
+                        raise CompileError(f"{phase_label}.retry requires at least one when condition")
+                    if retry is not None:
+                        retry_allowed = {"max_attempts", "interval_ticks", "timeout_ticks"}
+                        if not isinstance(retry, dict):
+                            raise CompileError(f"{phase_label}.retry must be an object or null")
+                        retry_unknown = set(retry) - retry_allowed
+                        retry_missing = retry_allowed - set(retry)
+                        if retry_unknown:
+                            raise CompileError(
+                                f"{phase_label}.retry contains unknown fields: {sorted(retry_unknown)}"
+                            )
+                        if retry_missing:
+                            raise CompileError(
+                                f"{phase_label}.retry is missing fields: {sorted(retry_missing)}"
+                            )
+                        max_attempts = retry["max_attempts"]
+                        interval_ticks = retry["interval_ticks"]
+                        timeout_ticks = retry["timeout_ticks"]
+                        if (
+                            isinstance(max_attempts, bool)
+                            or not isinstance(max_attempts, int)
+                            or not 1 <= max_attempts <= ACTION_BEHAVIOR_RETRY_ATTEMPT_LIMIT
+                        ):
+                            raise CompileError(
+                                f"{phase_label}.retry.max_attempts must be between 1 and "
+                                f"{ACTION_BEHAVIOR_RETRY_ATTEMPT_LIMIT}"
+                            )
+                        for retry_key, retry_value in {
+                            "interval_ticks": interval_ticks,
+                            "timeout_ticks": timeout_ticks,
+                        }.items():
+                            if (
+                                isinstance(retry_value, bool)
+                                or not isinstance(retry_value, int)
+                                or not 1 <= retry_value <= ACTION_BEHAVIOR_DURATION_LIMIT
+                            ):
+                                raise CompileError(
+                                    f"{phase_label}.retry.{retry_key} must be between 1 and "
+                                    f"{ACTION_BEHAVIOR_DURATION_LIMIT}"
+                                )
+                        phase_record["retry"] = {
+                            "max_attempts": max_attempts,
+                            "interval_ticks": interval_ticks,
+                            "timeout_ticks": timeout_ticks,
+                        }
+                    else:
+                        phase_record["retry"] = None
+                if source_format == ACTION_BEHAVIOR_FORMAT_V5:
+                    raw_child = phase["child_action"]
+                    if phase_index == len(raw_phases) - 1 and raw_child is not None:
+                        raise CompileError(
+                            f"{phase_label}.child_action is forbidden on the final phase"
+                        )
+                    phase_record["child_action"] = _validate_action_child(
+                        raw_child,
+                        label=f"{phase_label}.child_action",
+                        authored_verbs=authored_verbs,
+                        entity_ids=entity_ids,
+                        step_ids=child_step_ids,
+                    )
+                if source_format in {ACTION_BEHAVIOR_FORMAT_V6, ACTION_BEHAVIOR_FORMAT}:
+                    raw_branches = phase["branches"]
+                    if not isinstance(raw_branches, list):
+                        raise CompileError(f"{phase_label}.branches must be an array")
+                    if (
+                        source_format == ACTION_BEHAVIOR_FORMAT_V6
+                        and phase_index == len(raw_phases) - 1
+                    ):
+                        if raw_branches:
+                            raise CompileError(
+                                f"{phase_label}.branches is forbidden on the final phase"
+                            )
+                        phase_record["branches"] = []
+                    elif raw_branches:
+                        behavior_has_branches = True
+                        behavior_has_split = behavior_has_split or len(raw_branches) >= 2
+                        minimum_branches = (
+                            1 if source_format == ACTION_BEHAVIOR_FORMAT else 2
+                        )
+                        if not minimum_branches <= len(raw_branches) <= ACTION_BEHAVIOR_BRANCH_LIMIT:
+                            raise CompileError(
+                                f"{phase_label}.branches must contain {minimum_branches} to "
+                                f"{ACTION_BEHAVIOR_BRANCH_LIMIT} alternatives"
+                            )
+                        normalized_branches: list[dict[str, Any]] = []
+                        priorities: set[int] = set()
+                        fallback_count = 0
+                        conditional_priorities: list[int] = []
+                        fallback_priority: int | None = None
+                        branch_allowed = {
+                            "branch_id", "priority", "when", "child_action",
+                        }
+                        if source_format == ACTION_BEHAVIOR_FORMAT:
+                            branch_allowed.add("next_phase_id")
+                        for branch_index, branch in enumerate(raw_branches):
+                            branch_label = f"{phase_label}.branches[{branch_index}]"
+                            if not isinstance(branch, dict):
+                                raise CompileError(f"{branch_label} must be an object")
+                            unknown = set(branch) - branch_allowed
+                            missing = branch_allowed - set(branch)
+                            if unknown:
+                                raise CompileError(
+                                    f"{branch_label} contains unknown fields: {sorted(unknown)}"
+                                )
+                            if missing:
+                                raise CompileError(
+                                    f"{branch_label} is missing fields: {sorted(missing)}"
+                                )
+                            branch_id = branch["branch_id"]
+                            priority = branch["priority"]
+                            next_phase_id = branch.get("next_phase_id")
+                            if not isinstance(branch_id, str) or not ID_RE.match(branch_id):
+                                raise CompileError(f"{branch_label}.branch_id is invalid")
+                            if branch_id in branch_ids:
+                                raise CompileError(f"duplicate action branch_id: {branch_id}")
+                            branch_ids.add(branch_id)
+                            if (
+                                isinstance(priority, bool)
+                                or not isinstance(priority, int)
+                                or not 0 <= priority <= ACTION_BEHAVIOR_BRANCH_PRIORITY_LIMIT
+                            ):
+                                raise CompileError(
+                                    f"{branch_label}.priority must be between 0 and "
+                                    f"{ACTION_BEHAVIOR_BRANCH_PRIORITY_LIMIT}"
+                                )
+                            if priority in priorities:
+                                raise CompileError(
+                                    f"{phase_label}.branches priorities must be unique"
+                                )
+                            priorities.add(priority)
+                            if source_format == ACTION_BEHAVIOR_FORMAT and (
+                                not isinstance(next_phase_id, str)
+                                or not ID_RE.match(next_phase_id)
+                            ):
+                                raise CompileError(
+                                    f"{branch_label}.next_phase_id is invalid"
+                                )
+                            branch_when = _validate_action_branch_conditions(
+                                branch["when"],
+                                label=f"{branch_label}.when",
+                                condition_ids=condition_ids,
+                            )
+                            if branch_when:
+                                conditional_priorities.append(priority)
+                            else:
+                                fallback_count += 1
+                                fallback_priority = priority
+                            branch_record = {
+                                "branch_id": branch_id,
+                                "priority": priority,
+                                "when": branch_when,
+                                "child_action": _validate_action_child(
+                                    branch["child_action"],
+                                    label=f"{branch_label}.child_action",
+                                    authored_verbs=authored_verbs,
+                                    entity_ids=entity_ids,
+                                    step_ids=child_step_ids,
+                                ),
+                            }
+                            if source_format == ACTION_BEHAVIOR_FORMAT:
+                                branch_record["next_phase_id"] = next_phase_id
+                            normalized_branches.append(branch_record)
+                        if fallback_count != 1:
+                            raise CompileError(
+                                f"{phase_label}.branches requires exactly one unconditional fallback"
+                            )
+                        if conditional_priorities and fallback_priority >= min(
+                            conditional_priorities
+                        ):
+                            raise CompileError(
+                                f"{phase_label}.branches fallback must have the lowest priority"
+                            )
+                        normalized_branches.sort(
+                            key=lambda item: (-item["priority"], item["branch_id"])
+                        )
+                        phase_record["branches"] = normalized_branches
+                    else:
+                        phase_record["branches"] = []
+                phases.append(phase_record)
+            if source_format == ACTION_BEHAVIOR_FORMAT_V5 and not child_step_ids:
+                raise CompileError(f"{label}.phases must declare at least one child_action")
+            if source_format == ACTION_BEHAVIOR_FORMAT_V6 and not behavior_has_branches:
+                raise CompileError(f"{label}.phases must declare at least one branch set")
+            if source_format == ACTION_BEHAVIOR_FORMAT_V6 and not child_step_ids:
+                raise CompileError(f"{label}.branches must declare at least one child_action")
+            if source_format == ACTION_BEHAVIOR_FORMAT:
+                if not behavior_has_split:
+                    raise CompileError(
+                        f"{label}.phases must declare at least one conditional routing split"
+                    )
+                phase_by_id = {phase["phase_id"]: phase for phase in phases}
+                terminal_ids = [
+                    phase["phase_id"] for phase in phases if not phase["branches"]
+                ]
+                if len(terminal_ids) != 1:
+                    raise CompileError(
+                        f"{label}.phases must declare exactly one terminal phase"
+                    )
+                for phase in phases:
+                    for branch in phase["branches"]:
+                        target_id = branch["next_phase_id"]
+                        if target_id not in phase_by_id:
+                            raise CompileError(
+                                f"{label} branch {branch['branch_id']} references unknown "
+                                f"next_phase_id: {target_id}"
+                            )
+                        if target_id == phase["phase_id"]:
+                            raise CompileError(
+                                f"{label} branch {branch['branch_id']} cannot route to itself"
+                            )
+
+                entry_phase_id = phases[0]["phase_id"]
+                terminal_phase_id = terminal_ids[0]
+                visiting: set[str] = set()
+                visited: set[str] = set()
+
+                def visit_phase(phase_id: str) -> None:
+                    if phase_id in visiting:
+                        raise CompileError(f"{label}.phases routing graph contains a cycle")
+                    if phase_id in visited:
+                        return
+                    visiting.add(phase_id)
+                    for branch in phase_by_id[phase_id]["branches"]:
+                        visit_phase(branch["next_phase_id"])
+                    visiting.remove(phase_id)
+                    visited.add(phase_id)
+
+                visit_phase(entry_phase_id)
+                unreachable = sorted(set(phase_by_id) - visited)
+                if unreachable:
+                    raise CompileError(
+                        f"{label}.phases contains unreachable phases: {unreachable}"
+                    )
+
+                longest_cache: dict[str, int] = {}
+
+                def longest_duration(phase_id: str) -> int:
+                    cached = longest_cache.get(phase_id)
+                    if cached is not None:
+                        return cached
+                    phase = phase_by_id[phase_id]
+                    tail = max(
+                        (
+                            longest_duration(branch["next_phase_id"])
+                            for branch in phase["branches"]
+                        ),
+                        default=0,
+                    )
+                    result = phase["duration_ticks"] + tail
+                    longest_cache[phase_id] = result
+                    return result
+
+                duration = longest_duration(entry_phase_id)
+                execution_model = ACTION_BEHAVIOR_EXECUTION_MODEL_STATIC_DAG
+        if behavior["concurrency"] != ACTION_BEHAVIOR_CONCURRENCY:
+            raise CompileError(f"{label}.concurrency 目前只支援 {ACTION_BEHAVIOR_CONCURRENCY}")
+        interrupt_on = behavior["interrupt_on"]
+        if (
+            not isinstance(interrupt_on, list)
+            or len(interrupt_on) > ACTION_BEHAVIOR_INTERRUPT_LIMIT
+            or len(interrupt_on) != len(set(interrupt_on))
+            or any(event_type not in ACTION_BEHAVIOR_INTERRUPT_EVENTS for event_type in interrupt_on)
+        ):
+            raise CompileError(
+                f"{label}.interrupt_on 必須是不重複、最多 {ACTION_BEHAVIOR_INTERRUPT_LIMIT} 個受支援 EventIR"
+            )
+        record = {
+            "behavior_id": behavior_id,
+            "title": title.strip(),
+            "verb": verb,
+            "duration_ticks": duration,
+            "completion_module": completion_module,
+            "concurrency": ACTION_BEHAVIOR_CONCURRENCY,
+            "interrupt_on": list(interrupt_on),
+        }
+        if phases:
+            record["phases"] = phases
+        if execution_model is not None:
+            record.update({
+                "execution_model": execution_model,
+                "entry_phase_id": entry_phase_id,
+                "terminal_phase_id": terminal_phase_id,
+            })
+        normalized.append(record)
+    return normalized
+
+
+def _validate_scoped_state_machines(
+    source: Any,
+    *,
+    world_id: str,
+    region_ids: set[str],
+    room_ids: set[str],
+    entity_ids: set[str],
+) -> list[dict[str, Any]]:
+    """Validate versioned World/Region/Scene/Entity/System StateIR.
+
+    These machines are intentionally narrower than quests: a transition may
+    select a bounded EventIR payload and priority, but it has no free-form
+    guard, reward, arbitrary effect, or direct StateStore path.  Its only
+    effect is changing its own ``owner::fsm::state_machine_id`` cell.
+    """
+    if not isinstance(source, dict):
+        raise CompileError("state_machines.json 必須是物件")
+    unknown_root = set(source) - {"format", "state_machines"}
+    if unknown_root:
+        raise CompileError(f"state_machines.json 含未知欄位: {sorted(unknown_root)}")
+    if source.get("format") != "compilableworld.state-machines/v0.1":
+        raise CompileError("state_machines.json format 不支援")
+    machines = source.get("state_machines")
+    if not isinstance(machines, list):
+        raise CompileError("state_machines.json.state_machines 必須是陣列")
+    if len(machines) > STATE_MACHINE_DEFINITION_LIMIT:
+        raise CompileError(
+            f"state_machines.json 不可超過 {STATE_MACHINE_DEFINITION_LIMIT} 台狀態機"
+        )
+
+    normalized: list[dict[str, Any]] = []
+    machine_ids: set[str] = set()
+    state_paths: set[tuple[str, str]] = set()
+    allowed = {
+        "state_machine_id", "title", "owner_scope", "owner_id", "states",
+        "initial_state", "persistence", "visibility", "authority", "transitions",
+    }
+    required = set(allowed)
+    for index, machine in enumerate(machines):
+        label = f"state_machines.json.state_machines[{index}]"
+        if not isinstance(machine, dict):
+            raise CompileError(f"{label} 必須是物件")
+        unknown = set(machine) - allowed
+        if unknown:
+            raise CompileError(f"{label} 含未知欄位: {sorted(unknown)}")
+        missing = required - set(machine)
+        if missing:
+            raise CompileError(f"{label} 缺少必填欄位: {sorted(missing)}")
+
+        machine_id = machine["state_machine_id"]
+        if not isinstance(machine_id, str) or not ID_RE.match(machine_id) or machine_id == "state":
+            raise CompileError(f"{label}.state_machine_id 不合法或與 legacy fsm.state 衝突")
+        if machine_id in machine_ids:
+            raise CompileError(f"state_machines.json 含重複 state_machine_id: {machine_id}")
+        machine_ids.add(machine_id)
+
+        title = machine["title"]
+        if not isinstance(title, str) or not title.strip():
+            raise CompileError(f"{label}.title 必須是非空字串")
+        owner_scope = machine["owner_scope"]
+        source_owner_id = machine["owner_id"]
+        if owner_scope not in STATE_MACHINE_OWNER_SCOPES:
+            raise CompileError(f"{label}.owner_scope 不支援: {owner_scope}")
+        if not isinstance(source_owner_id, str) or not ID_RE.match(source_owner_id):
+            raise CompileError(f"{label}.owner_id 不合法")
+        owner_id = _resolve_state_machine_owner(
+            owner_scope, source_owner_id, label,
+            world_id=world_id, region_ids=region_ids,
+            room_ids=room_ids, entity_ids=entity_ids,
+        )
+        state_path = (owner_id, machine_id)
+        if state_path in state_paths:
+            raise CompileError(f"{label} 與其他狀態機使用重複 StateStore path: {state_path}")
+        state_paths.add(state_path)
+
+        states = machine["states"]
+        if (
+            not isinstance(states, list)
+            or not 2 <= len(states) <= STATE_MACHINE_STATE_LIMIT
+            or any(not isinstance(state, str) or not ID_RE.match(state) for state in states)
+            or len(states) != len(set(states))
+        ):
+            raise CompileError(
+                f"{label}.states 必須是 2 到 {STATE_MACHINE_STATE_LIMIT} 個不重複合法 ID"
+            )
+        initial_state = machine["initial_state"]
+        if initial_state not in states:
+            raise CompileError(f"{label}.initial_state 不在 states 中")
+        if machine["persistence"] != "runtime":
+            raise CompileError(f"{label}.persistence v0.1 只支援 runtime")
+        visibility = machine["visibility"]
+        if visibility not in STATE_MACHINE_VISIBILITIES:
+            raise CompileError(f"{label}.visibility 不支援: {visibility}")
+        if machine["authority"] != "state_machine.core":
+            raise CompileError(f"{label}.authority 必須是 state_machine.core")
+
+        transitions = _validate_scoped_transitions(
+            machine["transitions"], label, states=set(states), initial_state=initial_state,
+        )
+        normalized.append({
+            "state_machine_id": machine_id,
+            "title": title.strip(),
+            "owner_scope": owner_scope,
+            "owner_id": owner_id,
+            "states": list(states),
+            "initial_state": initial_state,
+            "persistence": "runtime",
+            "visibility": visibility,
+            "authority": "state_machine.core",
+            "transitions": transitions,
+        })
+    return normalized
+
+
+def _resolve_state_machine_owner(
+    owner_scope: str,
+    owner_id: str,
+    label: str,
+    *,
+    world_id: str,
+    region_ids: set[str],
+    room_ids: set[str],
+    entity_ids: set[str],
+) -> str:
+    if owner_scope == "world":
+        if owner_id not in {"world", world_id}:
+            raise CompileError(f"{label}.owner_id 的 world scope 必須是 world 或 {world_id}")
+        return world_id
+    if owner_scope == "region":
+        if not owner_id.startswith("region.") or owner_id not in region_ids:
+            raise CompileError(f"{label}.owner_id 引用不存在 region: {owner_id}")
+        return owner_id
+    if owner_scope == "scene":
+        if owner_id not in room_ids:
+            raise CompileError(f"{label}.owner_id 引用不存在 scene/room: {owner_id}")
+        return owner_id
+    if owner_scope == "entity":
+        if owner_id not in entity_ids:
+            raise CompileError(f"{label}.owner_id 引用不存在 entity: {owner_id}")
+        return owner_id
+    if not owner_id.startswith("system."):
+        raise CompileError(f"{label}.owner_id 的 system scope 必須以 system. 開頭")
+    return owner_id
+
+
+def _validate_scoped_transitions(
+    transitions: Any,
+    label: str,
+    *,
+    states: set[str],
+    initial_state: str,
+) -> list[dict[str, Any]]:
+    if (
+        not isinstance(transitions, list)
+        or not 1 <= len(transitions) <= STATE_MACHINE_TRANSITION_LIMIT
+    ):
+        raise CompileError(
+            f"{label}.transitions 必須是 1 到 {STATE_MACHINE_TRANSITION_LIMIT} 條 transition"
+        )
+    normalized: list[dict[str, Any]] = []
+    transition_ids: set[str] = set()
+    dispatches: set[tuple[str, str, int]] = set()
+    allowed = {"transition_id", "from", "on", "to", "event_match", "priority"}
+    required = {"transition_id", "from", "on", "to"}
+    for index, transition in enumerate(transitions):
+        transition_label = f"{label}.transitions[{index}]"
+        if not isinstance(transition, dict):
+            raise CompileError(f"{transition_label} 必須是物件")
+        unknown = set(transition) - allowed
+        if unknown:
+            raise CompileError(f"{transition_label} 含未知欄位: {sorted(unknown)}")
+        missing = required - set(transition)
+        if missing:
+            raise CompileError(f"{transition_label} 缺少必填欄位: {sorted(missing)}")
+
+        transition_id = transition["transition_id"]
+        from_state = transition["from"]
+        event_type = transition["on"]
+        to_state = transition["to"]
+        priority = transition.get("priority", 0)
+        if not isinstance(transition_id, str) or not ID_RE.match(transition_id):
+            raise CompileError(f"{transition_label}.transition_id 不合法")
+        if transition_id in transition_ids:
+            raise CompileError(f"{label}.transitions 含重複 transition_id: {transition_id}")
+        transition_ids.add(transition_id)
+        if from_state not in states or to_state not in states or from_state == to_state:
+            raise CompileError(f"{transition_label}.from/to 不在 states 中或未改變狀態")
+        if from_state in {"completed", "failed"}:
+            raise CompileError(f"{transition_label} 不可從終態 {from_state} 再轉移")
+        if event_type not in STATE_MACHINE_TRIGGER_EVENT_FIELDS:
+            raise CompileError(f"{transition_label}.on 不在 StateMachineModule EventIR 白名單中")
+        if (
+            isinstance(priority, bool)
+            or not isinstance(priority, int)
+            or not 0 <= priority <= STATE_MACHINE_PRIORITY_LIMIT
+        ):
+            raise CompileError(
+                f"{transition_label}.priority 必須是 0 到 {STATE_MACHINE_PRIORITY_LIMIT} 的整數"
+            )
+        dispatch = (from_state, event_type, priority)
+        if dispatch in dispatches:
+            raise CompileError(
+                f"{label}.transitions 的 from/on/priority 不可重複: {dispatch}"
+            )
+        dispatches.add(dispatch)
+
+        event_match = transition.get("event_match", {})
+        if not isinstance(event_match, dict):
+            raise CompileError(f"{transition_label}.event_match 必須是物件")
+        if len(event_match) > STATE_MACHINE_EVENT_MATCH_LIMIT:
+            raise CompileError(
+                f"{transition_label}.event_match 不可超過 {STATE_MACHINE_EVENT_MATCH_LIMIT} 個欄位"
+            )
+        unknown_match = set(event_match) - STATE_MACHINE_TRIGGER_EVENT_FIELDS[event_type]
+        if unknown_match:
+            raise CompileError(
+                f"{transition_label}.event_match 含不屬於 {event_type} 的欄位: {sorted(unknown_match)}"
+            )
+        if any(not _json_scalar(value) for value in event_match.values()):
+            raise CompileError(f"{transition_label}.event_match 值必須是 finite JSON 純量")
+        normalized.append({
+            "transition_id": transition_id,
+            "from": from_state,
+            "on": event_type,
+            "to": to_state,
+            "event_match": dict(event_match),
+            "priority": priority,
+        })
+
+    _validate_transition_reachability(initial_state, normalized, label)
+    reachable = {initial_state}
+    changed = True
+    while changed:
+        changed = False
+        for transition in normalized:
+            if transition["from"] in reachable and transition["to"] not in reachable:
+                reachable.add(transition["to"])
+                changed = True
+    unreachable_states = states - reachable
+    if unreachable_states:
+        raise CompileError(
+            f"{label}.states 含從 initial_state 不可達狀態: {sorted(unreachable_states)}"
+        )
+    return normalized
 
 
 def _validate_quests(
@@ -429,7 +1494,7 @@ def _validate_quests(
             if "requirements" in quest or "reward" in quest:
                 raise CompileError(f"任務 {quest_id} 使用 transitions 時，requirements 與 reward 必須寫在各 transition 內")
             compiled["transitions"] = _validate_quest_transitions(
-                quest["transitions"], label, room_ids=room_ids,
+                quest["transitions"], label, initial_state=initial_state, room_ids=room_ids,
                 item_ids=item_ids, entity_types=entity_types,
             )
         else:
@@ -448,6 +1513,7 @@ def _validate_quest_transitions(
     transitions: Any,
     label: str,
     *,
+    initial_state: str,
     room_ids: set[str],
     item_ids: set[str],
     entity_types: dict[str, str],
@@ -486,8 +1552,14 @@ def _validate_quest_transitions(
             raise CompileError(f"{transition_label} 不可從終態 {from_state} 再轉移")
         if not isinstance(event_type, str) or event_type not in QUEST_TRIGGER_EVENT_FIELDS:
             raise CompileError(f"{transition_label}.on 不在 QuestModule 支援的 EventIR 白名單中")
-        if isinstance(priority, bool) or not isinstance(priority, int) or priority < 0:
-            raise CompileError(f"{transition_label}.priority 必須是非負整數")
+        if (
+            isinstance(priority, bool)
+            or not isinstance(priority, int)
+            or not 0 <= priority <= STATE_MACHINE_PRIORITY_LIMIT
+        ):
+            raise CompileError(
+                f"{transition_label}.priority 必須是 0 到 {STATE_MACHINE_PRIORITY_LIMIT} 的整數"
+            )
         dispatch = (from_state, event_type, priority)
         if dispatch in dispatches:
             raise CompileError(f"{label}.transitions 的 from/on/priority 不可重複，否則會有未解決分支衝突: {dispatch}")
@@ -496,6 +1568,10 @@ def _validate_quest_transitions(
         event_match = transition.get("event_match", {})
         if not isinstance(event_match, dict):
             raise CompileError(f"{transition_label}.event_match 必須是物件")
+        if len(event_match) > STATE_MACHINE_EVENT_MATCH_LIMIT:
+            raise CompileError(
+                f"{transition_label}.event_match 不可超過 {STATE_MACHINE_EVENT_MATCH_LIMIT} 個欄位"
+            )
         unknown_match = set(event_match) - QUEST_TRIGGER_EVENT_FIELDS[event_type]
         if unknown_match:
             raise CompileError(f"{transition_label}.event_match 含不屬於 {event_type} 的欄位: {sorted(unknown_match)}")
@@ -522,7 +1598,38 @@ def _validate_quest_transitions(
         if reward is not None:
             normalized_transition["reward"] = _validate_reward(reward, transition_label)
         normalized.append(normalized_transition)
+    _validate_transition_reachability(initial_state, normalized, label)
     return normalized
+
+
+def _validate_transition_reachability(
+    initial_state: str, transitions: list[dict[str, Any]], label: str,
+) -> None:
+    """Reject structurally unreachable authored branches.
+
+    Conditions are intentionally ignored here: this proves graph reachability,
+    not that a particular world playthrough can satisfy every branch.  A
+    transition whose source can never be reached from the declared initial
+    state is almost always stale authoring data and must not rely on source
+    order or a future direct state mutation to become executable.
+    """
+    reachable = {initial_state}
+    changed = True
+    while changed:
+        changed = False
+        for transition in transitions:
+            if transition["from"] in reachable and transition["to"] not in reachable:
+                reachable.add(transition["to"])
+                changed = True
+    unreachable = [
+        transition["transition_id"]
+        for transition in transitions
+        if transition["from"] not in reachable
+    ]
+    if unreachable:
+        raise CompileError(
+            f"{label}.transitions 含從 initial_state 不可達的分支: {sorted(unreachable)}"
+        )
 
 
 def _validate_requirements(
@@ -535,6 +1642,10 @@ def _validate_requirements(
 ) -> list[str]:
     if not isinstance(requirements, list):
         raise CompileError(f"{label}.requirements 必須是陣列")
+    if len(requirements) > STATE_MACHINE_REQUIREMENT_LIMIT:
+        raise CompileError(
+            f"{label}.requirements 不可超過 {STATE_MACHINE_REQUIREMENT_LIMIT} 條"
+        )
     normalized: list[str] = []
     for index, requirement in enumerate(requirements):
         requirement_label = f"{label}.requirements[{index}]"
@@ -557,9 +1668,21 @@ def _validate_requirements(
 
 
 def _validate_reward(reward: Any, label: str) -> dict[str, Any]:
-    if not isinstance(reward, dict) or isinstance(reward.get("currency", 0), bool) or not isinstance(reward.get("currency", 0), int):
-        raise CompileError(f"{label}.reward.currency 必須是整數")
-    return dict(reward)
+    if not isinstance(reward, dict):
+        raise CompileError(f"{label}.reward 必須是物件")
+    unknown = set(reward) - {"currency"}
+    if unknown:
+        raise CompileError(f"{label}.reward 只支援 currency: {sorted(unknown)}")
+    currency = reward.get("currency", 0)
+    if (
+        isinstance(currency, bool)
+        or not isinstance(currency, int)
+        or not 0 <= currency <= STATE_MACHINE_REWARD_CURRENCY_LIMIT
+    ):
+        raise CompileError(
+            f"{label}.reward.currency 必須是 0 到 {STATE_MACHINE_REWARD_CURRENCY_LIMIT} 的整數"
+        )
+    return {"currency": currency}
 
 
 def _validate_narrative(narrative: Any, room_ids: set[str]) -> dict[str, list[dict[str, Any]]]:
@@ -826,7 +1949,11 @@ def _validate_state_conditions(
 
 
 def _json_scalar(value: Any) -> bool:
-    return value is None or isinstance(value, (str, int, float, bool))
+    return (
+        value is None
+        or isinstance(value, (str, int, bool))
+        or (isinstance(value, float) and math.isfinite(value))
+    )
 
 
 def _json_value(value: Any) -> bool:

@@ -16,7 +16,9 @@
     "dialogues": "dialogues.json",
     "player_templates": "player_templates.json",
     "scenarios": "scenarios.json",
-    "functions": "functions.json"
+    "functions": "functions.json",
+    "state_machines": "state_machines.json",
+    "action_behaviors": "action_behaviors.json"
   },
   "source_schemas": {
     "rooms": "compilableworld.schema/csv/rooms/v0.1",
@@ -24,7 +26,9 @@
     "entities": "compilableworld.schema/csv/entities/v0.1",
     "items": "compilableworld.schema/csv/items/v0.1",
     "functions": "compilableworld.schema/functions/v0.1",
-    "scenarios": "compilableworld.schema/scenarios/v0.1"
+    "scenarios": "compilableworld.schema/scenarios/v0.1",
+    "state_machines": "compilableworld.schema/state-machines/v0.1",
+    "action_behaviors": "compilableworld.schema/action-behaviors/v0.6"
   },
   "modules": [
     "room.core",
@@ -33,7 +37,9 @@
     "inventory.core",
     "health.core",
     "combat.basic",
+    "exploration.core",
     "dialogue.core",
+    "state_machine.core",
     "quest.core"
   ],
   "build": {"strict": true, "fail_on_warning": false}

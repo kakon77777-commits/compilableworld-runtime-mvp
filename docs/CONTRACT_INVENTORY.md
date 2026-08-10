@@ -80,6 +80,8 @@ Contains or references:
 - world metadata
 - entities, rooms, exits, items
 - quests and transitions
+- World/Region/Scene/Entity/System scoped StateIR
+- bounded Action-scope behavior definitions and lifecycle metadata
 - dialogues and narrative overlays
 - Function IR
 - Scenario IR
@@ -97,8 +99,10 @@ Checked-in schemas:
 5. `exits.v0.1.csv.schema.json`
 6. `entities.v0.1.csv.schema.json`
 7. `items.v0.1.csv.schema.json`
-8. `studio-world-ir.v0.1.schema.json`
-9. `studio-mapping.v0.1.schema.json`
+8. `state-machines.v0.1.schema.json`
+9. `action-behaviors.v0.7.schema.json`（Compiler 仍接受保留的 v0.1 單階段、v0.2 sequential、v0.3 condition-gated、v0.4 retry-bounded、v0.5 direct-child 與 v0.6 implicit-linear-branch 來源）
+10. `studio-world-ir.v0.1.schema.json`
+11. `studio-mapping.v0.1.schema.json`
 
 Compiler-owned semantic validation remains authoritative for:
 

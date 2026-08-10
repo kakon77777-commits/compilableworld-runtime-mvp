@@ -12,6 +12,7 @@ from .combat_formulas import (
 from .dialogue import select_dialogue
 from .kernel import WorldRuntime
 from .models import ActionIR, EventIR, ModuleContract, StateDelta, TransitionResult
+from .state_machine import resolve_state_machine_actor
 from .narrative import render_room_description
 
 
@@ -473,6 +474,135 @@ class DialogueModule(BaseModule):
         return TransitionResult(True, events=[event], message=response)
 
 
+class ExplorationModule(BaseModule):
+    """Small real completion module for the authored long-action pipeline."""
+
+    def __init__(self) -> None:
+        super().__init__(ModuleContract(
+            "exploration.core", "0.1.0", "TMS", ["search"],
+            ["exploration.searched"],
+            ["position.*", "status.*", "exploration.*"],
+            ["exploration.*"],
+            ["entity", "state", "action", "event", "scheduler"],
+        ))
+
+    def evaluate(self, action: ActionIR, runtime: WorldRuntime) -> TransitionResult:
+        if not runtime.state.get(action.actor_id, "status", "alive", True):
+            return TransitionResult(False, message="你已無法繼續搜索")
+        room_id = runtime.state.get(action.actor_id, "position", "room")
+        room = next((item for item in runtime.package["rooms"] if item["room_id"] == room_id), None)
+        if room is None:
+            return TransitionResult(False, message="目前場景不存在，搜索中止")
+        count = runtime.state.get(action.actor_id, "exploration", "search_count", 0) + 1
+        delta = StateDelta(
+            action.actor_id, "exploration", "search_count", "set", count,
+            source_module=self.contract.module_id,
+        )
+        event = self.event(
+            "exploration.searched", action,
+            {"room_id": room_id, "search_count": count},
+        )
+        return TransitionResult(
+            True, [delta], [event],
+            f"你仔細搜索了{room['name']}（累計 {count} 次）。",
+        )
+
+
+class StateMachineModule(BaseModule):
+    """Execute compiled non-Quest StateIR for hierarchical world scopes.
+
+    A machine can only write its own ``owner::fsm::state_machine_id`` cell.
+    Event payload equality and priority are compiled ahead of time; this module
+    does not evaluate prose guards, arbitrary effects, or Python expressions.
+    """
+
+    def __init__(self) -> None:
+        super().__init__(ModuleContract(
+            "state_machine.core", "0.1.0", "TMS", [],
+            ["fsm.transitioned", "fsm.completed", "fsm.failed"],
+            ["fsm.*"], ["fsm.*"], ["state", "event"],
+        ))
+        self._runtime: WorldRuntime | None = None
+
+    def evaluate(self, action: ActionIR, runtime: WorldRuntime) -> TransitionResult:
+        return TransitionResult(False, message="state_machine.core 不接受直接 ActionIR")
+
+    def on_register(self, runtime: WorldRuntime) -> None:
+        self._runtime = runtime
+        trigger_events = {
+            transition["on"]
+            for machine in runtime.package.get("state_machines", [])
+            for transition in machine.get("transitions", [])
+        }
+        for event_type in sorted(trigger_events):
+            runtime.events.subscribe(event_type, self._on_event)
+
+    def _on_event(self, event: EventIR) -> None:
+        runtime = self._runtime
+        assert runtime is not None
+        for machine in runtime.package.get("state_machines", []):
+            self._apply_transition(machine, event, runtime)
+
+    def _apply_transition(
+        self, machine: dict[str, Any], event: EventIR, runtime: WorldRuntime,
+    ) -> None:
+        machine_id = machine["state_machine_id"]
+        owner_id = machine["owner_id"]
+        current = runtime.state.get(
+            owner_id, "fsm", machine_id, machine["initial_state"],
+        )
+        matches = [
+            transition for transition in machine["transitions"]
+            if transition["from"] == current
+            and transition["on"] == event.event_type
+            and all(
+                key in event.payload and event.payload[key] == value
+                for key, value in transition["event_match"].items()
+            )
+        ]
+        if not matches:
+            return
+        transition = max(matches, key=lambda candidate: candidate["priority"])
+        target_state = transition["to"]
+        delta = StateDelta(
+            owner_id, "fsm", machine_id, "set", target_state,
+            source_module=self.contract.module_id,
+        )
+        payload = {
+            "state_machine_id": machine_id,
+            "title": machine["title"],
+            "owner_scope": machine["owner_scope"],
+            "owner_id": owner_id,
+            "transition_id": transition["transition_id"],
+            "from": current,
+            "to": target_state,
+            "trigger": event.event_type,
+        }
+        visibility = self._event_visibility(machine)
+        target = owner_id if machine["owner_scope"] == "entity" else None
+        events = [EventIR(
+            "fsm.transitioned", self.contract.module_id, payload,
+            target=target, causation_id=event.event_id,
+            correlation_id=event.correlation_id, visibility=visibility,
+        )]
+        if target_state in {"completed", "failed"}:
+            events.append(EventIR(
+                f"fsm.{target_state}", self.contract.module_id, payload,
+                target=target, causation_id=event.event_id,
+                correlation_id=event.correlation_id, visibility=visibility,
+            ))
+        runtime.commit_reaction(self, [delta], events)
+
+    @staticmethod
+    def _event_visibility(machine: dict[str, Any]) -> str:
+        visibility = machine["visibility"]
+        if visibility in {"public", "observable"}:
+            return "public"
+        if visibility == "private" and machine["owner_scope"] == "entity":
+            return "private"
+        return "audit"
+
+
 class QuestModule(BaseModule):
     """Event-reactive quest state transitions.
 
@@ -513,8 +643,8 @@ class QuestModule(BaseModule):
     def _on_progress_event(self, event: EventIR) -> None:
         runtime = self._runtime
         assert runtime is not None
-        actor_id = event.payload.get("actor") or event.target
-        if not actor_id or not runtime.registry.contains(actor_id):
+        actor_id = resolve_state_machine_actor(runtime, event)
+        if actor_id is None:
             return
         for quest in runtime.package.get("quests", []):
             if quest.get("transitions"):
@@ -608,10 +738,12 @@ class QuestModule(BaseModule):
 
 
 def install_builtin_modules(runtime: WorldRuntime) -> None:
+    runtime.bind_action_interrupts()
     available = {
         module.contract.module_id: module for module in [
             RoomModule(), MovementModule(), DoorModule(), InventoryModule(),
-            HealthModule(), CombatModule(), MagicModule(), DialogueModule(), QuestModule(),
+            HealthModule(), CombatModule(), MagicModule(), DialogueModule(), ExplorationModule(),
+            StateMachineModule(), QuestModule(),
         ]
     }
     for module_id in runtime.package["manifest"]["modules"]:

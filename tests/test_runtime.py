@@ -9,7 +9,7 @@ from unittest.mock import patch
 
 from compilableworld.compiler import CompileError, compile_world, validate_world
 from compilableworld.gateway import DeterministicIntentParser
-from compilableworld.kernel import StateStore, WorldRuntime
+from compilableworld.kernel import KernelTransactionError, StateStore, WorldRuntime
 from compilableworld.models import ActionIR, StateDelta
 from compilableworld.modules import CombatModule, install_builtin_modules
 from compilableworld.player_generation import generate_character
@@ -121,6 +121,21 @@ class RuntimeTests(unittest.TestCase):
     def tearDown(self) -> None:
         self.temp.cleanup()
 
+    def test_action_state_rolls_back_when_event_log_commit_fails(self) -> None:
+        before_state = self.runtime.state.export()
+        action = ActionIR("player.neo", "move", args={"direction": "north"})
+        with patch.object(
+            self.runtime.event_log,
+            "append_batch",
+            side_effect=KernelTransactionError("simulated durable log failure"),
+        ):
+            with self.assertRaises(KernelTransactionError):
+                self.runtime.submit(action)
+
+        self.assertEqual(self.runtime.state.export(), before_state)
+        self.assertEqual(self.runtime.event_log.events, [])
+        self.assertEqual(action.status.value, "failed")
+
     def test_movement_inventory_door_and_replay(self) -> None:
         take = self.runtime.submit(ActionIR("player.neo", "take", "item.old_key"))
         self.assertEqual(take.status.value, "completed")
@@ -143,8 +158,9 @@ class RuntimeTests(unittest.TestCase):
         snapshot = Path(self.temp.name) / "save.json"
         self.runtime.save_snapshot(snapshot)
         saved = json.loads(snapshot.read_text(encoding="utf-8"))
-        self.assertEqual(saved["format"], "compilableworld.snapshot/v0.2")
-        self.assertEqual(saved["snapshot_version"], 2)
+        self.assertEqual(saved["format"], "compilableworld.snapshot/v0.6")
+        self.assertEqual(saved["snapshot_version"], 6)
+        self.assertEqual(saved["action_runtime"], {})
         self.runtime.submit(ActionIR("player.neo", "move", args={"direction": "south"}))
         self.runtime.load_snapshot(snapshot)
         self.assertEqual(self.runtime.state.get("player.neo", "position", "room"), "room.market")
@@ -213,6 +229,7 @@ class RuntimeTests(unittest.TestCase):
         payload["format"] = "compilableworld.snapshot/v0.1"
         payload.pop("snapshot_version", None)
         payload.pop("scheduler", None)
+        payload.pop("action_runtime", None)
         snapshot.write_text(json.dumps(payload), encoding="utf-8")
 
         self.runtime.submit(ActionIR("player.neo", "move", args={"direction": "north"}))
@@ -228,6 +245,11 @@ class RuntimeTests(unittest.TestCase):
         payload["snapshot_version"] = 99
         snapshot.write_text(json.dumps(payload), encoding="utf-8")
         with self.assertRaisesRegex(RuntimeError, "不支援的 Snapshot 版本"):
+            self.runtime.load_snapshot(snapshot)
+
+        payload["snapshot_version"] = 2
+        snapshot.write_text(json.dumps(payload), encoding="utf-8")
+        with self.assertRaisesRegex(RuntimeError, "format 與 snapshot_version 不一致"):
             self.runtime.load_snapshot(snapshot)
 
     def test_scheduler_delays_execution(self) -> None:

@@ -45,14 +45,36 @@
     "transition": {
       "type": "object",
       "additionalProperties": false,
-      "required": ["transition_id", "from", "to", "on", "guards", "metadata"],
+      "required": ["transition_id", "from", "to", "on", "guards", "event_match", "requirements", "priority", "metadata"],
       "properties": {
         "transition_id": { "type": "string", "minLength": 1 },
         "from": { "type": ["string", "null"] },
         "to": { "type": ["string", "null"] },
         "on": { "type": ["string", "null"] },
         "guards": { "type": "array", "items": { "type": "string" } },
-        "metadata": { "type": "object" }
+        "event_match": {
+          "type": "object",
+          "maxProperties": 16,
+          "propertyNames": { "pattern": "^[A-Za-z_][A-Za-z0-9_.-]*$" },
+          "additionalProperties": { "type": ["string", "number", "boolean", "null"] }
+        },
+        "requirements": {
+          "type": "array",
+          "maxItems": 32,
+          "items": {
+            "type": "string",
+            "pattern": "^(reach:[a-z][a-z0-9_.-]*|deliver:[a-z][a-z0-9_.-]*:[a-z][a-z0-9_.-]*)$"
+          }
+        },
+        "priority": { "type": "integer", "minimum": 0, "maximum": 1000000 },
+        "reward": {
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "currency": { "type": "integer", "minimum": 0, "maximum": 1000000000 }
+          }
+        },
+       "metadata": { "type": "object" }
       }
     },
     "stateMachine": {

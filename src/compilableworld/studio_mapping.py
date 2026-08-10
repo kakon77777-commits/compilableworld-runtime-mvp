@@ -6,9 +6,18 @@ import json
 from pathlib import Path
 from typing import Any
 
+from .studio_world_ir import (
+    validate_studio_event_match,
+    validate_studio_priority,
+    validate_studio_requirements,
+    validate_studio_reward,
+)
+from .state_machine import STATE_MACHINE_TRIGGER_EVENT_FIELDS
+
 
 STUDIO_MAPPING_FORMAT = "compilableworld.studio-mapping/v0.1"
-_ALLOWED_RUNTIME_EVENTS = {"inventory.item_given", "movement.actor_moved", "dialogue.responded"}
+_ALLOWED_RUNTIME_EVENTS = set(STATE_MACHINE_TRIGGER_EVENT_FIELDS)
+_RUNTIME_EVENT_FIELDS = STATE_MACHINE_TRIGGER_EVENT_FIELDS
 _GUARD_POLICIES = {"none", "state_conditions", "runtime_module", "external_review", "drop_with_approval"}
 
 
@@ -69,7 +78,13 @@ def suggest_studio_mapping(world_ir: dict[str, Any]) -> dict[str, Any]:
             if not isinstance(transition, dict) or not isinstance(transition.get("transition_id"), str):
                 continue
             proposed_event = transition.get("proposed_runtime_event")
-            event_mappings[transition["transition_id"]] = {"event_type": proposed_event}
+            event_mappings[transition["transition_id"]] = {
+                "event_type": proposed_event,
+                "event_match": dict(transition.get("event_match", {})),
+                "requirements": list(transition.get("requirements", [])),
+                "priority": transition.get("priority", 0),
+                **({"reward": transition["reward"]} if transition.get("reward") is not None else {}),
+            }
         state_machines[machine_id] = {
             "target": "quest" if str(machine_id).startswith("quest.") else None,
             "guard_policy": "external_review" if has_guards else "none",
@@ -103,6 +118,15 @@ def validate_studio_mapping(world_ir: dict[str, Any], mapping: dict[str, Any]) -
     if not isinstance(mapping, dict):
         raise StudioMappingError("Studio mapping root must be an object")
     issues: list[dict[str, str]] = []
+    diagnostics = world_ir.get("diagnostics")
+    diagnostic_errors = diagnostics.get("errors", 0) if isinstance(diagnostics, dict) else 0
+    if isinstance(diagnostic_errors, int) and not isinstance(diagnostic_errors, bool) and diagnostic_errors > 0:
+        issues.append(_issue(
+            "error",
+            "world_ir_diagnostics",
+            "World IR contains validation errors; resolve the source draft before mapping can be runtime-ready",
+            "diagnostics",
+        ))
     if mapping.get("format") != STUDIO_MAPPING_FORMAT:
         issues.append(_issue("error", "invalid_mapping_format", f"expected {STUDIO_MAPPING_FORMAT}", "format"))
     if mapping.get("world_ir_format") != world_ir["format"]:
@@ -178,6 +202,45 @@ def validate_studio_mapping(world_ir: dict[str, Any], mapping: dict[str, Any]) -
             event_type = event_mapping.get("event_type")
             if event_type not in _ALLOWED_RUNTIME_EVENTS:
                 issues.append(_issue("error", "invalid_runtime_event", f"event_type must be one of {sorted(_ALLOWED_RUNTIME_EVENTS)}", f"{transition_path}.event_type"))
+            source_event_match = transition.get("event_match", {})
+            normalized_source_match = validate_studio_event_match(source_event_match, f"{transition_path}.source_event_match", issues)
+            mapped_event_match = event_mapping.get("event_match", source_event_match)
+            normalized_mapped_match = validate_studio_event_match(mapped_event_match, f"{transition_path}.event_match", issues)
+            allowed_fields = _RUNTIME_EVENT_FIELDS.get(event_type)
+            if allowed_fields is not None:
+                unknown_match = set(normalized_mapped_match) - allowed_fields
+                if unknown_match:
+                    issues.append(_issue("error", "invalid_event_match_field", f"event_match fields are not allowed for {event_type}: {sorted(unknown_match)}", f"{transition_path}.event_match"))
+            if normalized_mapped_match != normalized_source_match:
+                issues.append(_issue(
+                    "error",
+                    "event_match_mismatch",
+                    "mapping event_match must exactly preserve the World IR event_match",
+                    f"{transition_path}.event_match",
+                ))
+            source_requirements = transition.get("requirements", [])
+            normalized_source = validate_studio_requirements(source_requirements, f"{transition_path}.source_requirements", issues)
+            mapped_requirements = event_mapping.get("requirements", source_requirements)
+            normalized_mapped = validate_studio_requirements(mapped_requirements, f"{transition_path}.requirements", issues)
+            if normalized_mapped != normalized_source:
+                issues.append(_issue(
+                    "error",
+                    "requirements_mismatch",
+                    "mapping requirements must exactly preserve the World IR requirements",
+                    f"{transition_path}.requirements",
+                ))
+            source_priority = transition.get("priority", 0)
+            normalized_source_priority = validate_studio_priority(source_priority, f"{transition_path}.source_priority", issues)
+            mapped_priority = event_mapping.get("priority", source_priority)
+            normalized_mapped_priority = validate_studio_priority(mapped_priority, f"{transition_path}.priority", issues)
+            if normalized_mapped_priority != normalized_source_priority:
+                issues.append(_issue("error", "priority_mismatch", "mapping priority must exactly preserve the World IR priority", f"{transition_path}.priority"))
+            source_reward = transition.get("reward")
+            normalized_source_reward = validate_studio_reward(source_reward, transition.get("to"), f"{transition_path}.source_reward", issues)
+            mapped_reward = event_mapping.get("reward", source_reward)
+            normalized_mapped_reward = validate_studio_reward(mapped_reward, transition.get("to"), f"{transition_path}.reward", issues)
+            if normalized_mapped_reward != normalized_source_reward:
+                issues.append(_issue("error", "reward_mismatch", "mapping reward must exactly preserve the World IR reward", f"{transition_path}.reward"))
 
     errors = sum(issue["severity"] == "error" for issue in issues)
     warnings = len(issues) - errors
@@ -199,5 +262,7 @@ def validate_studio_mapping(world_ir: dict[str, Any], mapping: dict[str, Any]) -
 
 __all__ = [
     "STUDIO_MAPPING_FORMAT", "StudioMappingError", "load_studio_mapping",
-    "suggest_studio_mapping", "validate_studio_mapping", "write_mapping_template",
+    "suggest_studio_mapping", "validate_studio_event_match", "validate_studio_mapping",
+    "validate_studio_priority", "validate_studio_requirements", "validate_studio_reward",
+    "write_mapping_template",
 ]

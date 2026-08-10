@@ -1,0 +1,110 @@
+{
+  "format": "compilableworld.state-machines/v0.1",
+  "state_machines": [
+    {
+      "state_machine_id": "fsm.world.vault_seal",
+      "title": "舊王室庫房封印",
+      "owner_scope": "world",
+      "owner_id": "world",
+      "states": ["sealed", "completed"],
+      "initial_state": "sealed",
+      "persistence": "runtime",
+      "visibility": "public",
+      "authority": "state_machine.core",
+      "transitions": [
+        {
+          "transition_id": "fsm.world.vault_seal.unlocked",
+          "from": "sealed",
+          "on": "door.unlocked",
+          "to": "completed",
+          "event_match": {"door": "door.old_vault"},
+          "priority": 100
+        }
+      ]
+    },
+    {
+      "state_machine_id": "fsm.region.gray_crown.alert",
+      "title": "灰冠區域警戒",
+      "owner_scope": "region",
+      "owner_id": "region.gray_crown",
+      "states": ["watchful", "alerted"],
+      "initial_state": "watchful",
+      "persistence": "runtime",
+      "visibility": "observable",
+      "authority": "state_machine.core",
+      "transitions": [
+        {
+          "transition_id": "fsm.region.gray_crown.vault_revealed",
+          "from": "watchful",
+          "on": "fsm.completed",
+          "to": "alerted",
+          "event_match": {"state_machine_id": "fsm.world.vault_seal"},
+          "priority": 50
+        }
+      ]
+    },
+    {
+      "state_machine_id": "fsm.scene.vault.access",
+      "title": "庫房場景出入口",
+      "owner_scope": "scene",
+      "owner_id": "room.vault",
+      "states": ["sealed", "open"],
+      "initial_state": "sealed",
+      "persistence": "runtime",
+      "visibility": "observable",
+      "authority": "state_machine.core",
+      "transitions": [
+        {
+          "transition_id": "fsm.scene.vault.door_unlocked",
+          "from": "sealed",
+          "on": "door.unlocked",
+          "to": "open",
+          "event_match": {"door": "door.old_vault"},
+          "priority": 50
+        }
+      ]
+    },
+    {
+      "state_machine_id": "fsm.entity.guard.alert",
+      "title": "南門守衛警覺",
+      "owner_scope": "entity",
+      "owner_id": "npc.guard",
+      "states": ["calm", "alerted"],
+      "initial_state": "calm",
+      "persistence": "runtime",
+      "visibility": "inferred",
+      "authority": "state_machine.core",
+      "transitions": [
+        {
+          "transition_id": "fsm.entity.guard.vault_unlocked",
+          "from": "calm",
+          "on": "door.unlocked",
+          "to": "alerted",
+          "event_match": {"door": "door.old_vault"},
+          "priority": 25
+        }
+      ]
+    },
+    {
+      "state_machine_id": "fsm.system.security",
+      "title": "安全系統狀態",
+      "owner_scope": "system",
+      "owner_id": "system.security",
+      "states": ["nominal", "breached"],
+      "initial_state": "nominal",
+      "persistence": "runtime",
+      "visibility": "system_only",
+      "authority": "state_machine.core",
+      "transitions": [
+        {
+          "transition_id": "fsm.system.security.vault_unlocked",
+          "from": "nominal",
+          "on": "door.unlocked",
+          "to": "breached",
+          "event_match": {"door": "door.old_vault"},
+          "priority": 100
+        }
+      ]
+    }
+  ]
+}

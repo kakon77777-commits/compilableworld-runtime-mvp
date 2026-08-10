@@ -1,0 +1,66 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "compilableworld.schema/action-behaviors/v0.2",
+  "title": "CompilableWorld sequential Action-scope behavior source v0.2",
+  "description": "Bounded ordered phase checkpoints with deterministic target-based interruption and one atomic completion module.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["format", "behaviors"],
+  "properties": {
+    "format": { "const": "compilableworld.action-behaviors/v0.2" },
+    "behaviors": {
+      "type": "array",
+      "maxItems": 1024,
+      "items": { "$ref": "#/$defs/behavior" }
+    }
+  },
+  "$defs": {
+    "id": {
+      "type": "string",
+      "pattern": "^[a-z][a-z0-9_.-]*$"
+    },
+    "phase": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["phase_id", "title", "duration_ticks"],
+      "properties": {
+        "phase_id": { "$ref": "#/$defs/id" },
+        "title": { "type": "string", "minLength": 1 },
+        "duration_ticks": { "type": "integer", "minimum": 1, "maximum": 1000000 }
+      }
+    },
+    "behavior": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "behavior_id", "title", "verb", "phases",
+        "completion_module", "concurrency", "interrupt_on"
+      ],
+      "properties": {
+        "behavior_id": { "$ref": "#/$defs/id" },
+        "title": { "type": "string", "minLength": 1 },
+        "verb": { "$ref": "#/$defs/id" },
+        "phases": {
+          "type": "array",
+          "minItems": 2,
+          "maxItems": 64,
+          "items": { "$ref": "#/$defs/phase" }
+        },
+        "completion_module": { "$ref": "#/$defs/id" },
+        "concurrency": { "const": "one_per_actor" },
+        "interrupt_on": {
+          "type": "array",
+          "maxItems": 16,
+          "uniqueItems": true,
+          "items": {
+            "enum": [
+              "combat.actor_defeated",
+              "combat.damage_applied",
+              "movement.actor_moved"
+            ]
+          }
+        }
+      }
+    }
+  }
+}

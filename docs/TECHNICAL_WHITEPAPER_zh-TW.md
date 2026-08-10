@@ -323,7 +323,7 @@ AI 可以產生「嘗試無聲開門」的結構化步驟，卻不能直接宣�
 
 ## 7.3 複合行為
 
-後續版本應允許 Action Graph 表達：
+完整 Action Graph 最終應允許表達：
 
 - sequence；
 - parallel；
@@ -334,7 +334,7 @@ AI 可以產生「嘗試無聲開門」的結構化步驟，卻不能直接宣�
 - cancellation；
 - compensation。
 
-MVP 已先保留 Action 狀態與 Scheduler，讓複合行為可以在不破壞核心契約的情況下加入。
+目前參考 Runtime 已實作 bounded static phase DAG、編譯期 unknown/self/cycle/unreachable 拒絕、單一 sticky priority-selected active route、實際路徑 due 收斂、非遞迴 primitive child Action sequence、phase-entry condition、fixed-interval retry/deadline 與 cancellation/interruption；parallel child Action、nested/dynamic/recursive graph、synchronizing join 與 compensation 仍未實作。所有已落地部分仍由 Action route cursor、Scheduler、`action.branch_selected`／其他 EventIR、Snapshot 與 Replay 保存，不繞過 StateDelta 提交契約。
 
 ---
 

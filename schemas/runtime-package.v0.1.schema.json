@@ -6,7 +6,8 @@
   "type": "object",
   "additionalProperties": false,
   "required": [
-    "format", "manifest", "world", "rooms", "exits", "entities", "quests",
+    "format", "manifest", "world", "rooms", "exits", "entities", "action_behaviors",
+    "state_machines", "quests",
     "narrative", "dialogues", "scenarios", "functions", "player_templates",
     "initial_state", "schema_contracts", "source_checksums"
   ],
@@ -17,6 +18,16 @@
     "rooms": { "type": "array", "items": { "type": "object" } },
     "exits": { "type": "array", "items": { "type": "object" } },
     "entities": { "type": "array", "items": { "$ref": "#/$defs/entity" } },
+    "action_behaviors": {
+      "type": "array",
+      "maxItems": 1024,
+      "items": { "$ref": "#/$defs/actionBehavior" }
+    },
+    "state_machines": {
+      "type": "array",
+      "maxItems": 1024,
+      "items": { "$ref": "#/$defs/stateMachine" }
+    },
     "quests": { "type": "array", "items": { "type": "object" } },
     "narrative": { "type": "object" },
     "dialogues": { "type": "object" },
@@ -24,14 +35,33 @@
     "functions": { "type": "object" },
     "player_templates": { "type": "array", "items": { "type": "object" } },
     "initial_state": { "type": "array", "items": { "$ref": "#/$defs/stateCell" } },
-    "studio": { "type": "object" },
+    "studio": {
+      "type": "object",
+      "properties": {
+        "semantic_records_are_metadata_only": { "const": true },
+        "semantic_records_format": { "const": "compilableworld.studio-semantic-records/v0.1" },
+        "semantic_records": {
+          "type": "object",
+          "additionalProperties": {
+            "type": "object",
+            "additionalProperties": {
+              "type": "array",
+              "items": { "type": "object" }
+            }
+          }
+        }
+      },
+      "additionalProperties": true
+    },
     "schema_contracts": {
       "type": "object",
       "additionalProperties": false,
-      "required": ["functions", "scenarios", "runtime_package", "rooms", "exits", "entities", "items", "studio_world_ir", "studio_mapping"],
+      "required": ["action_behaviors", "functions", "scenarios", "state_machines", "runtime_package", "rooms", "exits", "entities", "items", "studio_world_ir", "studio_mapping"],
       "properties": {
+        "action_behaviors": { "const": "compilableworld.schema/action-behaviors/v0.7" },
         "functions": { "const": "compilableworld.schema/functions/v0.1" },
         "scenarios": { "const": "compilableworld.schema/scenarios/v0.1" },
+        "state_machines": { "const": "compilableworld.schema/state-machines/v0.1" },
         "runtime_package": { "const": "compilableworld.schema/runtime-package/v0.1" },
         "rooms": { "const": "compilableworld.schema/csv/rooms/v0.1" },
         "exits": { "const": "compilableworld.schema/csv/exits/v0.1" },
@@ -65,12 +95,24 @@
           "type": "object",
           "additionalProperties": false,
           "properties": {
+            "action_behaviors": {
+              "enum": [
+                "compilableworld.schema/action-behaviors/v0.1",
+                "compilableworld.schema/action-behaviors/v0.2",
+                "compilableworld.schema/action-behaviors/v0.3",
+                "compilableworld.schema/action-behaviors/v0.4",
+                "compilableworld.schema/action-behaviors/v0.5",
+                "compilableworld.schema/action-behaviors/v0.6",
+                "compilableworld.schema/action-behaviors/v0.7"
+              ]
+            },
             "rooms": { "const": "compilableworld.schema/csv/rooms/v0.1" },
             "exits": { "const": "compilableworld.schema/csv/exits/v0.1" },
             "entities": { "const": "compilableworld.schema/csv/entities/v0.1" },
             "items": { "const": "compilableworld.schema/csv/items/v0.1" },
             "functions": { "const": "compilableworld.schema/functions/v0.1" },
-            "scenarios": { "const": "compilableworld.schema/scenarios/v0.1" }
+            "scenarios": { "const": "compilableworld.schema/scenarios/v0.1" },
+            "state_machines": { "const": "compilableworld.schema/state-machines/v0.1" }
           }
         },
         "modules": {
@@ -102,6 +144,218 @@
         "key": { "$ref": "#/$defs/id" },
         "value": {},
         "version": { "type": "integer", "minimum": 0 }
+      }
+    },
+    "actionBehavior": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "behavior_id", "title", "verb", "duration_ticks",
+        "completion_module", "concurrency", "interrupt_on"
+      ],
+      "properties": {
+        "behavior_id": { "$ref": "#/$defs/id" },
+        "title": { "type": "string", "minLength": 1 },
+        "verb": { "$ref": "#/$defs/id" },
+        "duration_ticks": { "type": "integer", "minimum": 1, "maximum": 1000000 },
+        "execution_model": { "const": "static_dag" },
+        "entry_phase_id": { "$ref": "#/$defs/id" },
+        "terminal_phase_id": { "$ref": "#/$defs/id" },
+        "completion_module": { "$ref": "#/$defs/id" },
+        "concurrency": { "const": "one_per_actor" },
+        "interrupt_on": {
+          "type": "array",
+          "maxItems": 16,
+          "uniqueItems": true,
+          "items": {
+            "enum": [
+              "combat.actor_defeated",
+              "combat.damage_applied",
+              "movement.actor_moved"
+            ]
+          }
+        },
+        "phases": {
+          "type": "array",
+          "minItems": 2,
+          "maxItems": 64,
+          "items": { "$ref": "#/$defs/actionBehaviorPhase" }
+        }
+      }
+    },
+    "actionBehaviorPhase": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["phase_id", "title", "duration_ticks"],
+      "properties": {
+        "phase_id": { "$ref": "#/$defs/id" },
+        "title": { "type": "string", "minLength": 1 },
+        "duration_ticks": { "type": "integer", "minimum": 1, "maximum": 1000000 },
+        "when": {
+          "type": "array",
+          "maxItems": 16,
+          "items": { "$ref": "#/$defs/actionBehaviorCondition" }
+        },
+        "retry": {
+          "oneOf": [
+            { "$ref": "#/$defs/actionBehaviorRetry" },
+            { "type": "null" }
+          ]
+        },
+        "child_action": {
+          "oneOf": [
+            { "$ref": "#/$defs/actionBehaviorChild" },
+            { "type": "null" }
+          ]
+        },
+        "branches": {
+          "type": "array",
+          "maxItems": 16,
+          "items": { "$ref": "#/$defs/actionBehaviorBranch" }
+        }
+      }
+    },
+    "actionBehaviorRetry": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["max_attempts", "interval_ticks", "timeout_ticks"],
+      "properties": {
+        "max_attempts": { "type": "integer", "minimum": 1, "maximum": 16 },
+        "interval_ticks": { "type": "integer", "minimum": 1, "maximum": 1000000 },
+        "timeout_ticks": { "type": "integer", "minimum": 1, "maximum": 1000000 }
+      }
+    },
+    "actionBehaviorChild": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["step_id", "verb", "module_id", "target", "args"],
+      "properties": {
+        "step_id": { "$ref": "#/$defs/id" },
+        "verb": {
+          "enum": [
+            "attack", "cast", "drop", "give", "inventory", "look", "move",
+            "open", "quests", "say", "status", "take", "talk", "unlock"
+          ]
+        },
+        "module_id": { "$ref": "#/$defs/id" },
+        "target": {
+          "oneOf": [
+            {
+              "type": "object",
+              "additionalProperties": false,
+              "required": ["source"],
+              "properties": { "source": { "const": "parent_target" } }
+            },
+            {
+              "type": "object",
+              "additionalProperties": false,
+              "required": ["source", "entity_id"],
+              "properties": {
+                "source": { "const": "entity" },
+                "entity_id": { "$ref": "#/$defs/id" }
+              }
+            },
+            { "type": "null" }
+          ]
+        },
+        "args": {
+          "type": "object",
+          "maxProperties": 16,
+          "additionalProperties": { "type": ["string", "number", "boolean", "null"] }
+        }
+      }
+    },
+    "actionBehaviorBranch": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["branch_id", "priority", "when", "child_action"],
+      "properties": {
+        "branch_id": { "$ref": "#/$defs/id" },
+        "priority": { "type": "integer", "minimum": 0, "maximum": 1000000 },
+        "when": {
+          "type": "array",
+          "maxItems": 16,
+          "items": { "$ref": "#/$defs/actionBehaviorCondition" }
+        },
+        "child_action": {
+          "oneOf": [
+            { "$ref": "#/$defs/actionBehaviorChild" },
+            { "type": "null" }
+          ]
+        },
+        "next_phase_id": { "$ref": "#/$defs/id" }
+      }
+    },
+    "actionBehaviorCondition": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["condition_id", "subject", "namespace", "key", "operator", "value"],
+      "properties": {
+        "condition_id": { "$ref": "#/$defs/id" },
+        "subject": { "enum": ["actor", "target"] },
+        "namespace": {
+          "enum": [
+            "combat", "door", "exploration", "fsm", "health", "inventory",
+            "magic", "position", "quest", "status", "wallet"
+          ]
+        },
+        "key": { "$ref": "#/$defs/id" },
+        "operator": {
+          "enum": [
+            "equals", "not_equals", "less_than", "less_or_equal",
+            "greater_than", "greater_or_equal"
+          ]
+        },
+        "value": { "type": ["string", "number", "boolean", "null"] }
+      }
+    },
+    "stateMachineTransition": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["transition_id", "from", "on", "to", "event_match", "priority"],
+      "properties": {
+        "transition_id": { "$ref": "#/$defs/id" },
+        "from": { "$ref": "#/$defs/id" },
+        "on": { "$ref": "#/$defs/id" },
+        "to": { "$ref": "#/$defs/id" },
+        "event_match": {
+          "type": "object",
+          "maxProperties": 16,
+          "propertyNames": { "pattern": "^[A-Za-z_][A-Za-z0-9_.-]*$" },
+          "additionalProperties": { "type": ["string", "number", "boolean", "null"] }
+        },
+        "priority": { "type": "integer", "minimum": 0, "maximum": 1000000 }
+      }
+    },
+    "stateMachine": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "state_machine_id", "title", "owner_scope", "owner_id", "states",
+        "initial_state", "persistence", "visibility", "authority", "transitions"
+      ],
+      "properties": {
+        "state_machine_id": { "$ref": "#/$defs/id" },
+        "title": { "type": "string", "minLength": 1 },
+        "owner_scope": { "enum": ["world", "region", "scene", "entity", "system"] },
+        "owner_id": { "$ref": "#/$defs/id" },
+        "states": {
+          "type": "array",
+          "minItems": 2,
+          "maxItems": 256,
+          "uniqueItems": true,
+          "items": { "$ref": "#/$defs/id" }
+        },
+        "initial_state": { "$ref": "#/$defs/id" },
+        "persistence": { "const": "runtime" },
+        "visibility": { "enum": ["public", "observable", "inferred", "private", "system_only"] },
+        "authority": { "const": "state_machine.core" },
+        "transitions": {
+          "type": "array",
+          "minItems": 1,
+          "maxItems": 4096,
+          "items": { "$ref": "#/$defs/stateMachineTransition" }
+        }
       }
     }
   }
