@@ -8,10 +8,10 @@
 | Item | Value |
 |---|---|
 | Local integrated runtime | `0.1.1` |
-| Verified tests | `320/320`, plus `46` subtests |
+| Verified tests | `324/324`, plus `52` subtests |
 | GitHub `master` observed head | `70141f3` (verified 2026-08-11) |
 | Current development branch | `agent/stateir-v02-bounded-conditions` |
-| Remote synchronization status | M12 and Action routing v0.7 are merged; StateIR v0.2 is completed locally and not yet published |
+| Remote synchronization status | M12 and Action routing v0.7 are merged; StateIR v0.2 and future-architecture notes are on draft PR #4; StateIR v0.3 timer work is completed locally and PR remains intentionally unmerged |
 | Intended next release baseline | `v0.2.0-alpha.1` or equivalent |
 
 ## Current integrated local state
@@ -355,7 +355,7 @@ out_of_scope:
 
 ```yaml
 owner_environment: codex
-status: completed-locally
+status: completed-on-draft-pr
 outputs:
   - schemas/state-machines.v0.2.schema.json
   - v0.1 authoring compatibility and explicit source-schema negotiation
@@ -380,5 +380,39 @@ out_of_scope:
   - arbitrary StateStore paths, effects or rewards
   - implicit geographic event routing
   - timers, history states, parallel regions and synchronizing joins
+  - AI direct StateStore writes
+```
+
+### CW-M12-STATEIR-011 — Bounded deterministic tick timers
+
+```yaml
+owner_environment: codex
+status: completed-locally
+outputs:
+  - schemas/state-machines.v0.3.schema.json
+  - v0.1 and v0.2 event-source compatibility paths
+  - mutually exclusive EventIR on or bounded after_ticks trigger
+  - compiler-reserved owner::fsm_runtime::state_machine_id entry tick
+  - fsm.timer_elapsed lifecycle EventIR and timer-aware Replay validation
+  - Gray Crown breached-to-contained timer vertical slice
+  - Studio static trigger and live pending countdown projection
+  - tests/test_scoped_state_machine.py
+acceptance:
+  - after_ticks is a positive integer bounded at 1,000,000
+  - timer transitions reject on, event_match and actor conditions
+  - timers use only the authoritative Kernel scheduler tick and no wall clock
+  - owner conditions keep an elapsed timer eligible until a unique priority winner exists
+  - all due machines select from one pre-commit state and commit as one bounded batch
+  - entry tick changes only with the machine state through StateDelta
+  - Snapshot v0.6 preserves timer entry state without a second queue or format bump
+  - Replay validates authored timer identity and entered/eligible/fired tick arithmetic
+  - EventLog append failure rolls back StateIR cells and an overdue timer can retry
+  - 324/324 tests and 52 subtests pass
+out_of_scope:
+  - wall-clock, calendar, cron and multi-rate clock semantics
+  - periodic timers, cancellation, pause/resume and dynamic rescheduling
+  - history states, parallel regions and synchronizing joins
+  - implicit geographic event routing
+  - AI, Studio, player or MCP control of authoritative Runtime time
   - AI direct StateStore writes
 ```

@@ -79,7 +79,7 @@ class SchemaContractTests(unittest.TestCase):
         self.assertIn("action.branch_selected", event_mapping["properties"]["event_type"]["enum"])
 
         state_machine_schema = json.loads(
-            (ROOT / "schemas" / "state-machines.v0.2.schema.json").read_text(encoding="utf-8")
+            (ROOT / "schemas" / "state-machines.v0.3.schema.json").read_text(encoding="utf-8")
         )
         machine = state_machine_schema["$defs"]["stateMachine"]
         transition = state_machine_schema["$defs"]["transition"]
@@ -92,6 +92,9 @@ class SchemaContractTests(unittest.TestCase):
         self.assertEqual(transition["properties"]["event_match"]["maxProperties"], 16)
         self.assertIn("when", transition["required"])
         self.assertEqual(transition["properties"]["when"]["maxItems"], 16)
+        self.assertEqual(transition["properties"]["after_ticks"]["minimum"], 1)
+        self.assertEqual(transition["properties"]["after_ticks"]["maximum"], 1000000)
+        self.assertEqual(len(transition["oneOf"]), 2)
         self.assertEqual(
             set(state_machine_schema["$defs"]["condition"]["properties"]["subject"]["enum"]),
             {"owner", "actor"},
@@ -164,7 +167,7 @@ class SchemaContractTests(unittest.TestCase):
         )
         self.assertEqual(
             runtime_package_schema["properties"]["schema_contracts"]["properties"]["state_machines"]["const"],
-            "compilableworld.schema/state-machines/v0.2",
+            "compilableworld.schema/state-machines/v0.3",
         )
         self.assertEqual(
             runtime_package_schema["$defs"]["stateMachineTransition"]["properties"]["when"]["maxItems"],

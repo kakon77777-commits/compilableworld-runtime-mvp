@@ -53,7 +53,7 @@ class ScopedStateMachineTests(unittest.TestCase):
         self.assertIn("state_machine.core", self.package["manifest"]["modules"])
         self.assertEqual(
             self.package["manifest"]["source_schemas"]["state_machines"],
-            "compilableworld.schema/state-machines/v0.2",
+            "compilableworld.schema/state-machines/v0.3",
         )
 
         cells = {
@@ -69,6 +69,15 @@ class ScopedStateMachineTests(unittest.TestCase):
             cells[("system.security", "fsm", "fsm.system.security")],
             "nominal",
         )
+        self.assertEqual(
+            cells[("system.security", "fsm_runtime", "fsm.system.security")],
+            0,
+        )
+        system_machine = next(
+            machine for machine in self.package["state_machines"]
+            if machine["state_machine_id"] == "fsm.system.security"
+        )
+        self.assertEqual(system_machine["transitions"][1]["after_ticks"], 2)
 
     def test_unlock_event_advances_all_scopes_and_preserves_nested_causation(self) -> None:
         unlock_old_vault(self.runtime)
@@ -230,6 +239,153 @@ class ScopedStateMachineTests(unittest.TestCase):
             "fsm.world.vault_seal.fail_closed",
         )
 
+    def test_bounded_timer_uses_entry_tick_snapshot_and_replay(self) -> None:
+        unlock_old_vault(self.runtime)
+        self.runtime.advance(1)
+        self.assertEqual(
+            self.runtime.state.get("system.security", "fsm", "fsm.system.security"),
+            "breached",
+        )
+
+        snapshot = Path(self.temp.name) / "timer.snapshot.json"
+        self.runtime.save_snapshot(snapshot)
+        restored = WorldRuntime(self.package)
+        install_builtin_modules(restored)
+        restored.load_snapshot(snapshot)
+
+        self.runtime.advance(1)
+        restored.advance(1)
+        self.assertEqual(
+            self.runtime.state.get("system.security", "fsm", "fsm.system.security"),
+            "contained",
+        )
+        self.assertEqual(restored.state.export(), self.runtime.state.export())
+
+        timer_event = next(
+            event for event in self.runtime.event_log.events
+            if event.event_type == "fsm.timer_elapsed"
+        )
+        transition_event = next(
+            event for event in self.runtime.event_log.events
+            if event.event_type == "fsm.transitioned"
+            and event.payload["transition_id"] == "fsm.system.security.auto_contained"
+        )
+        self.assertEqual(timer_event.timestamp_tick, 2)
+        self.assertEqual(timer_event.payload["entered_tick"], 0)
+        self.assertEqual(timer_event.payload["eligible_at_tick"], 2)
+        self.assertEqual(timer_event.payload["fired_at_tick"], 2)
+        self.assertEqual(timer_event.correlation_id, timer_event.event_id)
+        self.assertEqual(transition_event.causation_id, timer_event.event_id)
+        timer_index = self.runtime.event_log.events.index(timer_event)
+        timer_commit = self.runtime.event_log.events[timer_index - 1]
+        self.assertEqual(timer_commit.event_type, "state.committed")
+        self.assertEqual(
+            {
+                (item["namespace"], item["key"], item["value"])
+                for item in timer_commit.payload["applied"]
+            },
+            {
+                ("fsm", "fsm.system.security", "contained"),
+                ("fsm_runtime", "fsm.system.security", 2),
+            },
+        )
+
+        replayed = WorldRuntime(self.package)
+        replayed.replay(self.runtime.event_log.events)
+        self.assertEqual(replayed.state.export(), self.runtime.state.export())
+        self.assertEqual(replayed.scheduler.tick, 2)
+
+    def test_timer_conditions_remain_eligible_and_priority_is_deterministic(self) -> None:
+        with tempfile.TemporaryDirectory() as temp:
+            world = Path(temp) / "world"
+            shutil.copytree(GRAY_CROWN, world)
+            source_path = world / "state_machines.json"
+            source = json.loads(source_path.read_text(encoding="utf-8"))
+            machine = next(
+                item for item in source["state_machines"]
+                if item["state_machine_id"] == "fsm.system.security"
+            )
+            machine["states"].append("lockdown")
+            high = machine["transitions"][1]
+            high["to"] = "lockdown"
+            high["when"] = [{
+                "condition_id": "security_is_armed",
+                "subject": "owner",
+                "namespace": "status",
+                "key": "armed",
+                "operator": "equals",
+                "value": True,
+            }]
+            machine["transitions"].append({
+                "transition_id": "fsm.system.security.fallback_contained",
+                "from": "breached",
+                "after_ticks": 3,
+                "to": "contained",
+                "when": [],
+                "priority": 0,
+            })
+            source_path.write_text(
+                json.dumps(source, ensure_ascii=False, indent=2) + "\n", encoding="utf-8"
+            )
+            runtime = WorldRuntime.from_package(compile_world(world, Path(temp) / "build"))
+            install_builtin_modules(runtime)
+
+            unlock_old_vault(runtime)
+            runtime.state.seed("system.security", "status", "armed", False)
+            runtime.advance(2)
+            self.assertEqual(
+                runtime.state.get("system.security", "fsm", "fsm.system.security"),
+                "breached",
+            )
+            runtime.state.seed("system.security", "status", "armed", True)
+            runtime.advance(1)
+
+        self.assertEqual(
+            runtime.state.get("system.security", "fsm", "fsm.system.security"),
+            "lockdown",
+        )
+        timer_event = next(
+            event for event in runtime.event_log.events
+            if event.event_type == "fsm.timer_elapsed"
+        )
+        self.assertEqual(timer_event.payload["transition_id"], high["transition_id"])
+        self.assertEqual(timer_event.payload["eligible_at_tick"], 2)
+        self.assertEqual(timer_event.payload["fired_at_tick"], 3)
+
+    def test_timer_log_failure_rolls_back_transition_and_retries_when_overdue(self) -> None:
+        unlock_old_vault(self.runtime)
+        before = self.runtime.state.export()
+        existing_events = list(self.runtime.event_log.events)
+        self.runtime.advance(1)
+        append_batch = self.runtime.event_log.append_batch
+
+        def fail_timer_batch(events) -> None:
+            batch = list(events)
+            if not batch:
+                append_batch(batch)
+                return
+            raise KernelTransactionError("simulated timer append failure")
+
+        with patch.object(
+            self.runtime.event_log,
+            "append_batch",
+            side_effect=fail_timer_batch,
+        ):
+            with self.assertRaises(KernelTransactionError):
+                self.runtime.advance(1)
+
+        self.assertEqual(self.runtime.state.export(), before)
+        self.assertEqual(self.runtime.event_log.events, existing_events)
+        self.assertEqual(self.runtime.scheduler.tick, 2)
+
+        self.runtime.advance(1)
+        timer_event = next(
+            event for event in self.runtime.event_log.events
+            if event.event_type == "fsm.timer_elapsed"
+        )
+        self.assertEqual(timer_event.payload["eligible_at_tick"], 2)
+        self.assertEqual(timer_event.payload["fired_at_tick"], 3)
+
     def test_snapshot_and_replay_preserve_every_scoped_state_cell(self) -> None:
         unlock_old_vault(self.runtime)
         snapshot = Path(self.temp.name) / "scoped.snapshot.json"
@@ -353,6 +509,37 @@ class ScopedStateMachineTests(unittest.TestCase):
                 "compilableworld.schema/state-machines/v0.1"
             )
 
+        def invalid_timer_delay(source: dict, manifest: dict) -> None:
+            source["state_machines"][4]["transitions"][1]["after_ticks"] = True
+
+        def timer_with_event_match(source: dict, manifest: dict) -> None:
+            source["state_machines"][4]["transitions"][1]["event_match"] = {}
+
+        def timer_with_event_trigger(source: dict, manifest: dict) -> None:
+            source["state_machines"][4]["transitions"][1]["on"] = "door.opened"
+
+        def timer_with_actor_condition(source: dict, manifest: dict) -> None:
+            source["state_machines"][4]["transitions"][1]["when"] = [{
+                "condition_id": "invalid_timer_actor",
+                "subject": "actor",
+                "namespace": "status",
+                "key": "alive",
+                "operator": "equals",
+                "value": True,
+            }]
+
+        def duplicate_timer_priority(source: dict, manifest: dict) -> None:
+            duplicate = dict(source["state_machines"][4]["transitions"][1])
+            duplicate["transition_id"] = "fsm.system.security.ambiguous_timer"
+            duplicate["after_ticks"] = 3
+            source["state_machines"][4]["transitions"].append(duplicate)
+
+        def v02_with_timer(source: dict, manifest: dict) -> None:
+            source["format"] = "compilableworld.state-machines/v0.2"
+            manifest["source_schemas"]["state_machines"] = (
+                "compilableworld.schema/state-machines/v0.2"
+            )
+
         changes = {
             "invalid_scene": invalid_scene,
             "free_effect": free_effect,
@@ -365,6 +552,12 @@ class ScopedStateMachineTests(unittest.TestCase):
             "duplicate_condition_id": duplicate_condition_id,
             "legacy_format_with_conditions": legacy_format_with_conditions,
             "mismatched_source_schema": mismatched_source_schema,
+            "invalid_timer_delay": invalid_timer_delay,
+            "timer_with_event_match": timer_with_event_match,
+            "timer_with_event_trigger": timer_with_event_trigger,
+            "timer_with_actor_condition": timer_with_actor_condition,
+            "duplicate_timer_priority": duplicate_timer_priority,
+            "v02_with_timer": v02_with_timer,
         }
         for label, change in changes.items():
             with self.subTest(label=label), tempfile.TemporaryDirectory() as temp:
@@ -394,6 +587,12 @@ class ScopedStateMachineTests(unittest.TestCase):
             manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
             source["format"] = "compilableworld.state-machines/v0.1"
             for machine in source["state_machines"]:
+                machine["transitions"] = [
+                    transition for transition in machine["transitions"]
+                    if "after_ticks" not in transition
+                ]
+                if machine["state_machine_id"] == "fsm.system.security":
+                    machine["states"].remove("contained")
                 for transition in machine["transitions"]:
                     transition.pop("when")
             manifest["source_schemas"]["state_machines"] = (
@@ -416,6 +615,45 @@ class ScopedStateMachineTests(unittest.TestCase):
         )
         self.assertTrue(all(
             transition["when"] == []
+            for machine in package["state_machines"]
+            for transition in machine["transitions"]
+        ))
+
+    def test_v02_source_remains_supported_without_timers(self) -> None:
+        with tempfile.TemporaryDirectory() as temp:
+            world = Path(temp) / "world"
+            shutil.copytree(GRAY_CROWN, world)
+            source_path = world / "state_machines.json"
+            manifest_path = world / "manifest.json"
+            source = json.loads(source_path.read_text(encoding="utf-8"))
+            manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+            source["format"] = "compilableworld.state-machines/v0.2"
+            for machine in source["state_machines"]:
+                machine["transitions"] = [
+                    transition for transition in machine["transitions"]
+                    if "after_ticks" not in transition
+                ]
+                if machine["state_machine_id"] == "fsm.system.security":
+                    machine["states"].remove("contained")
+            manifest["source_schemas"]["state_machines"] = (
+                "compilableworld.schema/state-machines/v0.2"
+            )
+            source_path.write_text(
+                json.dumps(source, ensure_ascii=False, indent=2) + "\n", encoding="utf-8"
+            )
+            manifest_path.write_text(
+                json.dumps(manifest, ensure_ascii=False, indent=2) + "\n", encoding="utf-8"
+            )
+            package = json.loads(
+                compile_world(world, Path(temp) / "build").read_text(encoding="utf-8")
+            )
+
+        self.assertEqual(
+            package["manifest"]["source_schemas"]["state_machines"],
+            "compilableworld.schema/state-machines/v0.2",
+        )
+        self.assertFalse(any(
+            "after_ticks" in transition
             for machine in package["state_machines"]
             for transition in machine["transitions"]
         ))
@@ -445,12 +683,30 @@ class ScopedStateMachineTests(unittest.TestCase):
         )
         self.assertEqual(live_world["current_state"], "completed")
         self.assertEqual(live_world["state_version"], 1)
+        live_system = next(
+            item for item in live_view["state_machines"]
+            if item["state_machine_id"] == "fsm.system.security"
+        )
+        self.assertEqual(live_system["entered_tick"], 0)
+        self.assertEqual(live_system["pending_timers"], [{
+            "transition_id": "fsm.system.security.auto_contained",
+            "after_ticks": 2,
+            "eligible_at_tick": 2,
+            "remaining_ticks": 2,
+            "eligible": False,
+        }])
+        static_system = next(
+            item for item in package_view["state_machines"]
+            if item["state_machine_id"] == "fsm.system.security"
+        )
+        self.assertEqual(static_system["transitions"][1]["trigger_kind"], "timer")
+        self.assertEqual(static_system["transitions"][1]["after_ticks"], 2)
 
     def test_state_machine_module_has_no_direct_action_surface(self) -> None:
         contract = self.runtime.modules["state_machine.core"].contract
         self.assertEqual(contract.actions, [])
-        self.assertEqual(contract.write, ["fsm.*"])
-        self.assertEqual(contract.requires_kernel, ["state", "event"])
+        self.assertEqual(contract.write, ["fsm.*", "fsm_runtime.*"])
+        self.assertEqual(contract.requires_kernel, ["state", "event", "clock"])
 
         package = json.loads(json.dumps(self.package))
         transition = package["state_machines"][0]["transitions"][0]

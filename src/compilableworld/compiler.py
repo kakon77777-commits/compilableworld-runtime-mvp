@@ -56,14 +56,17 @@ from .state_machine import (
     STATE_MACHINE_EVENT_MATCH_LIMIT,
     STATE_MACHINE_FORMAT,
     STATE_MACHINE_FORMAT_V1,
+    STATE_MACHINE_FORMAT_V2,
     STATE_MACHINE_OWNER_SCOPES,
     STATE_MACHINE_PRIORITY_LIMIT,
     STATE_MACHINE_REQUIREMENT_LIMIT,
     STATE_MACHINE_REWARD_CURRENCY_LIMIT,
     STATE_MACHINE_SCHEMA_ID,
     STATE_MACHINE_SCHEMA_ID_V1,
+    STATE_MACHINE_SCHEMA_ID_V2,
     STATE_MACHINE_STATE_LIMIT,
     STATE_MACHINE_TRANSITION_LIMIT,
+    STATE_MACHINE_TIMER_TICK_LIMIT,
     STATE_MACHINE_TRIGGER_EVENT_FIELDS,
     STATE_MACHINE_VISIBILITIES,
 )
@@ -300,6 +303,7 @@ def compile_world(
     }.get(action_behaviors_source.get("format") if isinstance(action_behaviors_source, dict) else None)
     state_machine_schema_id = {
         STATE_MACHINE_FORMAT_V1: STATE_MACHINE_SCHEMA_ID_V1,
+        STATE_MACHINE_FORMAT_V2: STATE_MACHINE_SCHEMA_ID_V2,
         STATE_MACHINE_FORMAT: STATE_MACHINE_SCHEMA_ID,
     }.get(state_machines_source.get("format") if isinstance(state_machines_source, dict) else None)
     for source_key, declared_schema_id in declared_source_schemas.items():
@@ -418,6 +422,10 @@ def compile_world(
         initial_state.append(_state(
             machine["owner_id"], "fsm", machine["state_machine_id"], machine["initial_state"]
         ))
+        if any("after_ticks" in transition for transition in machine["transitions"]):
+            initial_state.append(_state(
+                machine["owner_id"], "fsm_runtime", machine["state_machine_id"], 0
+            ))
     if default_player:
         initial_state.append(_state(default_player, "wallet", "currency", 0))
         for quest in quests:
@@ -1245,7 +1253,9 @@ def _validate_scoped_state_machines(
     if unknown_root:
         raise CompileError(f"state_machines.json 含未知欄位: {sorted(unknown_root)}")
     source_format = source.get("format")
-    if source_format not in {STATE_MACHINE_FORMAT_V1, STATE_MACHINE_FORMAT}:
+    if source_format not in {
+        STATE_MACHINE_FORMAT_V1, STATE_MACHINE_FORMAT_V2, STATE_MACHINE_FORMAT,
+    }:
         raise CompileError("state_machines.json format 不支援")
     machines = source.get("state_machines")
     if not isinstance(machines, list):
@@ -1323,7 +1333,8 @@ def _validate_scoped_state_machines(
 
         transitions = _validate_scoped_transitions(
             machine["transitions"], label, states=set(states), initial_state=initial_state,
-            allow_conditions=source_format == STATE_MACHINE_FORMAT,
+            allow_conditions=source_format in {STATE_MACHINE_FORMAT_V2, STATE_MACHINE_FORMAT},
+            allow_timers=source_format == STATE_MACHINE_FORMAT,
         )
         normalized.append({
             "state_machine_id": machine_id,
@@ -1378,6 +1389,7 @@ def _validate_scoped_transitions(
     states: set[str],
     initial_state: str,
     allow_conditions: bool,
+    allow_timers: bool,
 ) -> list[dict[str, Any]]:
     if (
         not isinstance(transitions, list)
@@ -1392,7 +1404,11 @@ def _validate_scoped_transitions(
     allowed = {"transition_id", "from", "on", "to", "event_match", "priority"}
     if allow_conditions:
         allowed.add("when")
-    required = {"transition_id", "from", "on", "to"}
+    if allow_timers:
+        allowed.add("after_ticks")
+    required = {"transition_id", "from", "to"}
+    if not allow_timers:
+        required.add("on")
     if allow_conditions:
         required.add("when")
     condition_ids: set[str] = set()
@@ -1409,7 +1425,17 @@ def _validate_scoped_transitions(
 
         transition_id = transition["transition_id"]
         from_state = transition["from"]
-        event_type = transition["on"]
+        has_event_trigger = "on" in transition
+        has_timer_trigger = "after_ticks" in transition
+        if allow_timers:
+            if has_event_trigger == has_timer_trigger:
+                raise CompileError(
+                    f"{transition_label} 必須且只能宣告 on 或 after_ticks"
+                )
+        elif has_timer_trigger:
+            raise CompileError(f"{transition_label}.after_ticks 需要 StateIR v0.3")
+        event_type = transition.get("on")
+        after_ticks = transition.get("after_ticks")
         to_state = transition["to"]
         priority = transition.get("priority", 0)
         if not isinstance(transition_id, str) or not ID_RE.match(transition_id):
@@ -1421,8 +1447,17 @@ def _validate_scoped_transitions(
             raise CompileError(f"{transition_label}.from/to 不在 states 中或未改變狀態")
         if from_state in {"completed", "failed"}:
             raise CompileError(f"{transition_label} 不可從終態 {from_state} 再轉移")
-        if event_type not in STATE_MACHINE_TRIGGER_EVENT_FIELDS:
+        if has_event_trigger and event_type not in STATE_MACHINE_TRIGGER_EVENT_FIELDS:
             raise CompileError(f"{transition_label}.on 不在 StateMachineModule EventIR 白名單中")
+        if has_timer_trigger and (
+            isinstance(after_ticks, bool)
+            or not isinstance(after_ticks, int)
+            or not 1 <= after_ticks <= STATE_MACHINE_TIMER_TICK_LIMIT
+        ):
+            raise CompileError(
+                f"{transition_label}.after_ticks 必須是 1 到 "
+                f"{STATE_MACHINE_TIMER_TICK_LIMIT} 的整數"
+            )
         if (
             isinstance(priority, bool)
             or not isinstance(priority, int)
@@ -1431,27 +1466,36 @@ def _validate_scoped_transitions(
             raise CompileError(
                 f"{transition_label}.priority 必須是 0 到 {STATE_MACHINE_PRIORITY_LIMIT} 的整數"
             )
-        dispatch = (from_state, event_type, priority)
+        # Elapsed timers remain eligible while owner conditions are false, so
+        # two timer edges with the same from/priority could overlap even when
+        # their delays differ. Treat all timer delays as one dispatch family.
+        trigger_key = event_type if has_event_trigger else "@timer"
+        dispatch = (from_state, trigger_key, priority)
         if dispatch in dispatches:
             raise CompileError(
-                f"{label}.transitions 的 from/on/priority 不可重複: {dispatch}"
+                f"{label}.transitions 的 from/trigger/priority 不可重複: {dispatch}"
             )
         dispatches.add(dispatch)
 
+        if has_timer_trigger and "event_match" in transition:
+            raise CompileError(f"{transition_label}.after_ticks 不可搭配 event_match")
         event_match = transition.get("event_match", {})
-        if not isinstance(event_match, dict):
-            raise CompileError(f"{transition_label}.event_match 必須是物件")
-        if len(event_match) > STATE_MACHINE_EVENT_MATCH_LIMIT:
-            raise CompileError(
-                f"{transition_label}.event_match 不可超過 {STATE_MACHINE_EVENT_MATCH_LIMIT} 個欄位"
-            )
-        unknown_match = set(event_match) - STATE_MACHINE_TRIGGER_EVENT_FIELDS[event_type]
-        if unknown_match:
-            raise CompileError(
-                f"{transition_label}.event_match 含不屬於 {event_type} 的欄位: {sorted(unknown_match)}"
-            )
-        if any(not _json_scalar(value) for value in event_match.values()):
-            raise CompileError(f"{transition_label}.event_match 值必須是 finite JSON 純量")
+        if has_event_trigger:
+            if not isinstance(event_match, dict):
+                raise CompileError(f"{transition_label}.event_match 必須是物件")
+            if len(event_match) > STATE_MACHINE_EVENT_MATCH_LIMIT:
+                raise CompileError(
+                    f"{transition_label}.event_match 不可超過 "
+                    f"{STATE_MACHINE_EVENT_MATCH_LIMIT} 個欄位"
+                )
+            unknown_match = set(event_match) - STATE_MACHINE_TRIGGER_EVENT_FIELDS[event_type]
+            if unknown_match:
+                raise CompileError(
+                    f"{transition_label}.event_match 含不屬於 {event_type} 的欄位: "
+                    f"{sorted(unknown_match)}"
+                )
+            if any(not _json_scalar(value) for value in event_match.values()):
+                raise CompileError(f"{transition_label}.event_match 值必須是 finite JSON 純量")
         raw_when = transition.get("when", [])
         if (
             not isinstance(raw_when, list)
@@ -1491,6 +1535,10 @@ def _validate_scoped_transitions(
             condition_ids.add(condition_id)
             if subject not in STATE_MACHINE_CONDITION_SUBJECTS:
                 raise CompileError(f"{condition_label}.subject 不支援")
+            if has_timer_trigger and subject == "actor":
+                raise CompileError(
+                    f"{condition_label}.subject timer transition 不可使用 actor"
+                )
             if namespace not in STATE_MACHINE_CONDITION_NAMESPACES:
                 raise CompileError(f"{condition_label}.namespace 不支援")
             if not isinstance(key, str) or not ID_RE.match(key):
@@ -1511,15 +1559,21 @@ def _validate_scoped_transitions(
                 "operator": operator,
                 "value": expected,
             })
-        normalized.append({
+        normalized_transition = {
             "transition_id": transition_id,
             "from": from_state,
-            "on": event_type,
             "to": to_state,
-            "event_match": dict(event_match),
             "when": normalized_when,
             "priority": priority,
-        })
+        }
+        if has_event_trigger:
+            normalized_transition.update({
+                "on": event_type,
+                "event_match": dict(event_match),
+            })
+        else:
+            normalized_transition["after_ticks"] = after_ticks
+        normalized.append(normalized_transition)
 
     _validate_transition_reachability(initial_state, normalized, label)
     reachable = {initial_state}

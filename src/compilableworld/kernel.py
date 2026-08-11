@@ -1378,6 +1378,13 @@ class WorldRuntime:
                         self.metrics["child_actions_failed"] += 1
                     self.events.publish(event)
                     self.metrics[f"event:{event.event_type}"] += 1
+            # StateIR timers observe the committed checkpoint state at this
+            # tick and run before terminal scheduled Actions. The hook is
+            # module-owned and can only commit through StateDelta/EventIR.
+            state_machine_module = self.modules.get("state_machine.core")
+            advance_timers = getattr(state_machine_module, "advance_timers", None)
+            if callable(advance_timers):
+                advance_timers(next_tick)
             receipts.extend(self._execute(action) for action in self.scheduler.pop_ready())
         return receipts
 
@@ -2524,6 +2531,55 @@ class WorldRuntime:
                         item["owner"], item["namespace"], item["key"],
                         item["value"], item["version"],
                     )
+            if event.event_type == "fsm.timer_elapsed":
+                payload = event.payload
+                machine_id = payload.get("state_machine_id")
+                transition_id = payload.get("transition_id")
+                machine = next((
+                    item for item in self.package.get("state_machines", [])
+                    if isinstance(item, dict)
+                    and item.get("state_machine_id") == machine_id
+                ), None)
+                transition = next((
+                    item for item in machine.get("transitions", [])
+                    if isinstance(item, dict)
+                    and item.get("transition_id") == transition_id
+                ), None) if isinstance(machine, dict) else None
+                after_ticks = payload.get("after_ticks")
+                entered_tick = payload.get("entered_tick")
+                eligible_at_tick = payload.get("eligible_at_tick")
+                fired_at_tick = payload.get("fired_at_tick")
+                if (
+                    event.source != "state_machine.core"
+                    or not isinstance(machine_id, str)
+                    or not isinstance(transition_id, str)
+                    or not isinstance(machine, dict)
+                    or not isinstance(transition, dict)
+                    or isinstance(after_ticks, bool)
+                    or not isinstance(after_ticks, int)
+                    or isinstance(entered_tick, bool)
+                    or not isinstance(entered_tick, int)
+                    or isinstance(eligible_at_tick, bool)
+                    or not isinstance(eligible_at_tick, int)
+                    or isinstance(fired_at_tick, bool)
+                    or not isinstance(fired_at_tick, int)
+                    or after_ticks != transition.get("after_ticks")
+                    or entered_tick < 0
+                    or eligible_at_tick != entered_tick + after_ticks
+                    or fired_at_tick != event.timestamp_tick
+                    or fired_at_tick < eligible_at_tick
+                    or payload.get("owner_id") != machine.get("owner_id")
+                    or payload.get("owner_scope") != machine.get("owner_scope")
+                    or payload.get("title") != machine.get("title")
+                    or payload.get("from") != transition.get("from")
+                    or payload.get("to") != transition.get("to")
+                    or payload.get("trigger") != "fsm.timer_elapsed"
+                    or event.causation_id is not None
+                    or event.correlation_id != event.event_id
+                ):
+                    raise RuntimeErrorBase("EventLog fsm.timer_elapsed violates authored timer")
+                lifecycle_seen = True
+                lifecycle_tick = max(lifecycle_tick, event.timestamp_tick)
             if event.event_type == "action.scheduled":
                 lifecycle_seen = True
                 lifecycle_tick = max(lifecycle_tick, event.timestamp_tick)

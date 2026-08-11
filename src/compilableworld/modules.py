@@ -12,7 +12,13 @@ from .combat_formulas import (
 from .dialogue import select_dialogue
 from .kernel import WorldRuntime
 from .models import ActionIR, EventIR, ModuleContract, StateDelta, TransitionResult
-from .state_machine import resolve_state_machine_actor, state_machine_condition_matches
+from .state_machine import (
+    STATE_MACHINE_CONDITION_LIMIT,
+    STATE_MACHINE_PRIORITY_LIMIT,
+    STATE_MACHINE_TIMER_TICK_LIMIT,
+    resolve_state_machine_actor,
+    state_machine_condition_matches,
+)
 from .narrative import render_room_description
 
 
@@ -511,17 +517,20 @@ class ExplorationModule(BaseModule):
 class StateMachineModule(BaseModule):
     """Execute compiled non-Quest StateIR for hierarchical world scopes.
 
-    A machine can only write its own ``owner::fsm::state_machine_id`` cell.
-    Event payload equality, bounded StateStore conditions, and priority are
-    compiled ahead of time; this module does not evaluate prose guards,
-    arbitrary effects, or Python expressions.
+    A machine can only write its own ``owner::fsm::state_machine_id`` cell and,
+    when it declares a timer, its reserved
+    ``owner::fsm_runtime::state_machine_id`` entry tick. Event payload
+    equality, bounded StateStore conditions, deterministic tick timers, and
+    priority are compiled ahead of time; this module does not evaluate prose
+    guards, arbitrary effects, wall-clock time, or Python expressions.
     """
 
     def __init__(self) -> None:
         super().__init__(ModuleContract(
-            "state_machine.core", "0.2.0", "TMS", [],
-            ["fsm.transitioned", "fsm.completed", "fsm.failed"],
-            ["fsm.*"], ["fsm.*"], ["state", "event"],
+            "state_machine.core", "0.3.0", "TMS", [],
+            ["fsm.timer_elapsed", "fsm.transitioned", "fsm.completed", "fsm.failed"],
+            ["fsm.*", "fsm_runtime.*"], ["fsm.*", "fsm_runtime.*"],
+            ["state", "event", "clock"],
         ))
         self._runtime: WorldRuntime | None = None
 
@@ -531,9 +540,10 @@ class StateMachineModule(BaseModule):
     def on_register(self, runtime: WorldRuntime) -> None:
         self._runtime = runtime
         trigger_events = {
-            transition["on"]
+            transition.get("on")
             for machine in runtime.package.get("state_machines", [])
             for transition in machine.get("transitions", [])
+            if isinstance(transition, dict) and isinstance(transition.get("on"), str)
         }
         for event_type in sorted(trigger_events):
             runtime.events.subscribe(event_type, self._on_event)
@@ -544,6 +554,85 @@ class StateMachineModule(BaseModule):
         actor_id = resolve_state_machine_actor(runtime, event)
         for machine in runtime.package.get("state_machines", []):
             self._apply_transition(machine, event, runtime, actor_id=actor_id)
+
+    def advance_timers(self, tick: int) -> None:
+        """Commit every due StateIR timer at one deterministic tick boundary.
+
+        Timer candidates become eligible after their authored delay and remain
+        eligible while their owner-only conditions are false. All machines are
+        selected from the same pre-commit state and committed as one bounded
+        StateDelta/EventIR batch. No background thread or wall clock exists.
+        """
+        runtime = self._runtime
+        assert runtime is not None
+        if (
+            isinstance(tick, bool)
+            or not isinstance(tick, int)
+            or tick < 0
+            or runtime.scheduler.tick != tick
+        ):
+            return
+        deltas: list[StateDelta] = []
+        events: list[EventIR] = []
+        machines = [
+            machine for machine in runtime.package.get("state_machines", [])
+            if isinstance(machine, dict)
+        ]
+        for machine in sorted(
+            machines,
+            key=lambda item: (str(item.get("owner_id", "")), str(item.get("state_machine_id", ""))),
+        ):
+            selected = self._select_timed_transition(machine, runtime, tick)
+            if selected is None:
+                continue
+            machine_deltas, machine_events = self._transition_effects(
+                machine, selected, runtime, trigger_event=None, tick=tick,
+            )
+            deltas.extend(machine_deltas)
+            events.extend(machine_events)
+        if deltas:
+            runtime.commit_reaction(self, deltas, events)
+
+    def _select_timed_transition(
+        self, machine: dict[str, Any], runtime: WorldRuntime, tick: int,
+    ) -> dict[str, Any] | None:
+        machine_id = machine.get("state_machine_id")
+        owner_id = machine.get("owner_id")
+        initial_state = machine.get("initial_state")
+        if not all(isinstance(value, str) and value for value in (
+            machine_id, owner_id, initial_state,
+        )):
+            return None
+        current = runtime.state.get(owner_id, "fsm", machine_id, initial_state)
+        missing = object()
+        entered_tick = runtime.state.get(
+            owner_id, "fsm_runtime", machine_id, missing,
+        )
+        if (
+            entered_tick is missing
+            or isinstance(entered_tick, bool)
+            or not isinstance(entered_tick, int)
+            or entered_tick < 0
+            or entered_tick > tick
+        ):
+            return None
+        matches = []
+        for transition in machine.get("transitions", []):
+            if not isinstance(transition, dict) or transition.get("from") != current:
+                continue
+            after_ticks = transition.get("after_ticks")
+            if (
+                isinstance(after_ticks, bool)
+                or not isinstance(after_ticks, int)
+                or not 1 <= after_ticks <= STATE_MACHINE_TIMER_TICK_LIMIT
+                or tick < entered_tick + after_ticks
+            ):
+                continue
+            if self._transition_conditions_match(
+                runtime, machine, transition, actor_id=None,
+            ):
+                matches.append(transition)
+        return self._select_unique_priority(matches)
 
     def _apply_transition(
         self, machine: dict[str, Any], event: EventIR, runtime: WorldRuntime,
@@ -557,26 +646,49 @@ class StateMachineModule(BaseModule):
         matches = [
             transition for transition in machine["transitions"]
             if transition["from"] == current
-            and transition["on"] == event.event_type
+            and transition.get("on") == event.event_type
             and all(
                 key in event.payload and event.payload[key] == value
-                for key, value in transition["event_match"].items()
+                for key, value in transition.get("event_match", {}).items()
             )
-            and all(
-                state_machine_condition_matches(
-                    runtime, machine, condition, actor_id=actor_id,
-                )
-                for condition in transition.get("when", [])
+            and self._transition_conditions_match(
+                runtime, machine, transition, actor_id=actor_id,
             )
         ]
         if not matches:
             return
-        transition = max(matches, key=lambda candidate: candidate["priority"])
+        transition = self._select_unique_priority(matches)
+        if transition is None:
+            return
+        deltas, events = self._transition_effects(
+            machine, transition, runtime, trigger_event=event, tick=runtime.scheduler.tick,
+        )
+        runtime.commit_reaction(self, deltas, events)
+
+    def _transition_effects(
+        self,
+        machine: dict[str, Any],
+        transition: dict[str, Any],
+        runtime: WorldRuntime,
+        *,
+        trigger_event: EventIR | None,
+        tick: int,
+    ) -> tuple[list[StateDelta], list[EventIR]]:
+        machine_id = machine["state_machine_id"]
+        owner_id = machine["owner_id"]
+        current = runtime.state.get(
+            owner_id, "fsm", machine_id, machine["initial_state"],
+        )
         target_state = transition["to"]
-        delta = StateDelta(
+        deltas = [StateDelta(
             owner_id, "fsm", machine_id, "set", target_state,
             source_module=self.contract.module_id,
-        )
+        )]
+        if self._machine_has_timers(machine):
+            deltas.append(StateDelta(
+                owner_id, "fsm_runtime", machine_id, "set", tick,
+                source_module=self.contract.module_id,
+            ))
         payload = {
             "state_machine_id": machine_id,
             "title": machine["title"],
@@ -585,22 +697,83 @@ class StateMachineModule(BaseModule):
             "transition_id": transition["transition_id"],
             "from": current,
             "to": target_state,
-            "trigger": event.event_type,
+            "trigger": trigger_event.event_type if trigger_event else "fsm.timer_elapsed",
         }
         visibility = self._event_visibility(machine)
         target = owner_id if machine["owner_scope"] == "entity" else None
-        events = [EventIR(
+        events: list[EventIR] = []
+        if trigger_event is None:
+            after_ticks = transition["after_ticks"]
+            entered_tick = runtime.state.get(owner_id, "fsm_runtime", machine_id)
+            timer_event = EventIR(
+                "fsm.timer_elapsed", self.contract.module_id,
+                {
+                    **payload,
+                    "after_ticks": after_ticks,
+                    "entered_tick": entered_tick,
+                    "eligible_at_tick": entered_tick + after_ticks,
+                    "fired_at_tick": tick,
+                },
+                target=target, visibility=visibility,
+            )
+            timer_event.correlation_id = timer_event.event_id
+            events.append(timer_event)
+            trigger_event = timer_event
+        events.append(EventIR(
             "fsm.transitioned", self.contract.module_id, payload,
-            target=target, causation_id=event.event_id,
-            correlation_id=event.correlation_id, visibility=visibility,
-        )]
+            target=target, causation_id=trigger_event.event_id,
+            correlation_id=trigger_event.correlation_id, visibility=visibility,
+        ))
         if target_state in {"completed", "failed"}:
             events.append(EventIR(
                 f"fsm.{target_state}", self.contract.module_id, payload,
-                target=target, causation_id=event.event_id,
-                correlation_id=event.correlation_id, visibility=visibility,
+                target=target, causation_id=trigger_event.event_id,
+                correlation_id=trigger_event.correlation_id, visibility=visibility,
             ))
-        runtime.commit_reaction(self, [delta], events)
+        return deltas, events
+
+    @staticmethod
+    def _machine_has_timers(machine: dict[str, Any]) -> bool:
+        return any(
+            isinstance(transition, dict) and "after_ticks" in transition
+            for transition in machine.get("transitions", [])
+        )
+
+    @staticmethod
+    def _transition_conditions_match(
+        runtime: WorldRuntime,
+        machine: dict[str, Any],
+        transition: dict[str, Any],
+        *,
+        actor_id: str | None,
+    ) -> bool:
+        conditions = transition.get("when", [])
+        return (
+            isinstance(conditions, list)
+            and len(conditions) <= STATE_MACHINE_CONDITION_LIMIT
+            and all(
+                state_machine_condition_matches(
+                    runtime, machine, condition, actor_id=actor_id,
+                )
+                for condition in conditions
+            )
+        )
+
+    @staticmethod
+    def _select_unique_priority(
+        matches: list[dict[str, Any]],
+    ) -> dict[str, Any] | None:
+        valid = [
+            candidate for candidate in matches
+            if isinstance(candidate.get("priority"), int)
+            and not isinstance(candidate.get("priority"), bool)
+            and 0 <= candidate["priority"] <= STATE_MACHINE_PRIORITY_LIMIT
+        ]
+        if not valid:
+            return None
+        highest = max(candidate["priority"] for candidate in valid)
+        selected = [candidate for candidate in valid if candidate["priority"] == highest]
+        return selected[0] if len(selected) == 1 else None
 
     @staticmethod
     def _event_visibility(machine: dict[str, Any]) -> str:

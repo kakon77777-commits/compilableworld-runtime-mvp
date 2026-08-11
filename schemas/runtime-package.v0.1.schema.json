@@ -61,7 +61,7 @@
         "action_behaviors": { "const": "compilableworld.schema/action-behaviors/v0.7" },
         "functions": { "const": "compilableworld.schema/functions/v0.1" },
         "scenarios": { "const": "compilableworld.schema/scenarios/v0.1" },
-        "state_machines": { "const": "compilableworld.schema/state-machines/v0.2" },
+        "state_machines": { "const": "compilableworld.schema/state-machines/v0.3" },
         "runtime_package": { "const": "compilableworld.schema/runtime-package/v0.1" },
         "rooms": { "const": "compilableworld.schema/csv/rooms/v0.1" },
         "exits": { "const": "compilableworld.schema/csv/exits/v0.1" },
@@ -115,7 +115,8 @@
             "state_machines": {
               "enum": [
                 "compilableworld.schema/state-machines/v0.1",
-                "compilableworld.schema/state-machines/v0.2"
+                "compilableworld.schema/state-machines/v0.2",
+                "compilableworld.schema/state-machines/v0.3"
               ]
             }
           }
@@ -317,11 +318,12 @@
     "stateMachineTransition": {
       "type": "object",
       "additionalProperties": false,
-      "required": ["transition_id", "from", "on", "to", "event_match", "when", "priority"],
+      "required": ["transition_id", "from", "to", "when", "priority"],
       "properties": {
         "transition_id": { "$ref": "#/$defs/id" },
         "from": { "$ref": "#/$defs/id" },
         "on": { "$ref": "#/$defs/id" },
+        "after_ticks": { "type": "integer", "minimum": 1, "maximum": 1000000 },
         "to": { "$ref": "#/$defs/id" },
         "event_match": {
           "type": "object",
@@ -335,7 +337,22 @@
           "items": { "$ref": "#/$defs/stateMachineCondition" }
         },
         "priority": { "type": "integer", "minimum": 0, "maximum": 1000000 }
-      }
+      },
+      "oneOf": [
+        {
+          "required": ["on", "event_match"],
+          "not": { "required": ["after_ticks"] }
+        },
+        {
+          "required": ["after_ticks"],
+          "not": {
+            "anyOf": [
+              { "required": ["on"] },
+              { "required": ["event_match"] }
+            ]
+          }
+        }
+      ]
     },
     "stateMachineCondition": {
       "type": "object",

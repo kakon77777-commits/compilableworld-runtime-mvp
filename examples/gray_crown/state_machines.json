@@ -1,5 +1,5 @@
 {
-  "format": "compilableworld.state-machines/v0.2",
+  "format": "compilableworld.state-machines/v0.3",
   "state_machines": [
     {
       "state_machine_id": "fsm.world.vault_seal",
@@ -119,7 +119,7 @@
       "title": "安全系統狀態",
       "owner_scope": "system",
       "owner_id": "system.security",
-      "states": ["nominal", "breached"],
+      "states": ["nominal", "breached", "contained"],
       "initial_state": "nominal",
       "persistence": "runtime",
       "visibility": "system_only",
@@ -131,6 +131,14 @@
           "on": "door.unlocked",
           "to": "breached",
           "event_match": {"door": "door.old_vault"},
+          "when": [],
+          "priority": 100
+        },
+        {
+          "transition_id": "fsm.system.security.auto_contained",
+          "from": "breached",
+          "after_ticks": 2,
+          "to": "contained",
           "when": [],
           "priority": 100
         }

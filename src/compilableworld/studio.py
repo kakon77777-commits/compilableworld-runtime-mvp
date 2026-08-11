@@ -180,7 +180,9 @@ def _scoped_state_machine_overview(machine: Any, index: int) -> dict[str, Any]:
             {
                 "transition_id": transition.get("transition_id"),
                 "from": transition.get("from"),
+                "trigger_kind": "timer" if "after_ticks" in transition else "event",
                 "on": transition.get("on"),
+                "after_ticks": transition.get("after_ticks"),
                 "to": transition.get("to"),
                 "event_match": dict(transition.get("event_match", {})),
                 "when": [
@@ -303,6 +305,12 @@ def package_overview(package: dict[str, Any]) -> dict[str, Any]:
         for transition in machine.get("transitions", [])
         if isinstance(transition.get("on"), str)
     )
+    if any(
+        transition.get("trigger_kind") == "timer"
+        for machine in state_machines
+        for transition in machine.get("transitions", [])
+    ):
+        event_types.add("fsm.timer_elapsed")
     if action_behaviors:
         event_types.update({
             "action.scheduled", "action.started", "action.completed",
@@ -423,10 +431,34 @@ def runtime_overview(runtime: "WorldRuntime") -> dict[str, Any]:
         owner_id = machine.get("owner_id")
         machine_id = machine.get("state_machine_id")
         if isinstance(owner_id, str) and isinstance(machine_id, str):
-            machine["current_state"] = runtime.state.get(
+            current_state = runtime.state.get(
                 owner_id, "fsm", machine_id, machine.get("initial_state"),
             )
+            machine["current_state"] = current_state
             machine["state_version"] = runtime.state.version(owner_id, "fsm", machine_id)
+            entered_tick = runtime.state.get(owner_id, "fsm_runtime", machine_id)
+            machine["entered_tick"] = (
+                entered_tick
+                if isinstance(entered_tick, int) and not isinstance(entered_tick, bool)
+                else None
+            )
+            machine["pending_timers"] = [
+                {
+                    "transition_id": transition.get("transition_id"),
+                    "after_ticks": transition["after_ticks"],
+                    "eligible_at_tick": entered_tick + transition["after_ticks"],
+                    "remaining_ticks": max(
+                        0, entered_tick + transition["after_ticks"] - runtime.scheduler.tick,
+                    ),
+                    "eligible": runtime.scheduler.tick >= entered_tick + transition["after_ticks"],
+                }
+                for transition in machine.get("transitions", [])
+                if transition.get("from") == current_state
+                and isinstance(entered_tick, int)
+                and not isinstance(entered_tick, bool)
+                and isinstance(transition.get("after_ticks"), int)
+                and not isinstance(transition.get("after_ticks"), bool)
+            ]
     overview["pending_actions"] = runtime.pending_actions()
     overview["runtime"] = {
         "diagnostics": runtime.diagnostics(),
