@@ -58,6 +58,8 @@ from .state_machine import (
     STATE_MACHINE_FORMAT_V1,
     STATE_MACHINE_FORMAT_V2,
     STATE_MACHINE_FORMAT_V3,
+    STATE_MACHINE_FORMAT_V4,
+    STATE_MACHINE_HIERARCHY_DEPTH_LIMIT,
     STATE_MACHINE_OWNER_SCOPES,
     STATE_MACHINE_PRIORITY_LIMIT,
     STATE_MACHINE_REACTION_DEPTH_LIMIT,
@@ -67,11 +69,16 @@ from .state_machine import (
     STATE_MACHINE_SCHEMA_ID_V1,
     STATE_MACHINE_SCHEMA_ID_V2,
     STATE_MACHINE_SCHEMA_ID_V3,
+    STATE_MACHINE_SCHEMA_ID_V4,
     STATE_MACHINE_STATE_LIMIT,
     STATE_MACHINE_TRANSITION_LIMIT,
     STATE_MACHINE_TIMER_TICK_LIMIT,
     STATE_MACHINE_TRIGGER_EVENT_FIELDS,
     STATE_MACHINE_VISIBILITIES,
+    state_machine_is_active_leaf,
+    state_machine_lineage,
+    state_machine_resolve_leaf,
+    state_machine_state_matches,
 )
 
 
@@ -312,6 +319,7 @@ def compile_world(
         STATE_MACHINE_FORMAT_V1: STATE_MACHINE_SCHEMA_ID_V1,
         STATE_MACHINE_FORMAT_V2: STATE_MACHINE_SCHEMA_ID_V2,
         STATE_MACHINE_FORMAT_V3: STATE_MACHINE_SCHEMA_ID_V3,
+        STATE_MACHINE_FORMAT_V4: STATE_MACHINE_SCHEMA_ID_V4,
         STATE_MACHINE_FORMAT: STATE_MACHINE_SCHEMA_ID,
     }.get(state_machines_source.get("format") if isinstance(state_machines_source, dict) else None)
     for source_key, declared_schema_id in declared_source_schemas.items():
@@ -428,7 +436,7 @@ def compile_world(
         initial_state.append(_state(state_owner, "fsm", "state", state_name))
     for machine in state_machines:
         initial_state.append(_state(
-            machine["owner_id"], "fsm", machine["state_machine_id"], machine["initial_state"]
+            machine["owner_id"], "fsm", machine["state_machine_id"], machine["initial_leaf"]
         ))
         if any("after_ticks" in transition for transition in machine["transitions"]):
             initial_state.append(_state(
@@ -1239,6 +1247,81 @@ def _validate_action_behaviors(
     return normalized
 
 
+def _validate_state_machine_hierarchy(
+    raw: Any,
+    *,
+    states: set[str],
+    label: str,
+    allow_hierarchy: bool,
+) -> dict[str, dict[str, str]]:
+    """Validate one bounded rooted forest with deterministic compound entry.
+
+    The compiled representation never stores active ancestors. Runtime state
+    remains one active leaf; these two maps only define containment and the
+    leaf selected when a transition targets a compound state.
+    """
+    if not isinstance(raw, dict) or set(raw) != {
+        "parent_by_state", "initial_child_by_state",
+    }:
+        raise CompileError(
+            f"{label}.hierarchy must contain parent_by_state and initial_child_by_state"
+        )
+    parents = raw.get("parent_by_state")
+    initial_children = raw.get("initial_child_by_state")
+    if not isinstance(parents, dict) or not isinstance(initial_children, dict):
+        raise CompileError(f"{label}.hierarchy mappings must be objects")
+    if not allow_hierarchy and (parents or initial_children):
+        raise CompileError(f"{label}.hierarchy requires StateIR v0.5")
+    if len(parents) > STATE_MACHINE_STATE_LIMIT or len(initial_children) > STATE_MACHINE_STATE_LIMIT:
+        raise CompileError(f"{label}.hierarchy exceeds the state limit")
+    for child, parent in parents.items():
+        if (
+            not isinstance(child, str)
+            or not isinstance(parent, str)
+            or child not in states
+            or parent not in states
+            or child == parent
+        ):
+            raise CompileError(f"{label}.hierarchy has an invalid parent edge: {child}/{parent}")
+    direct_children: dict[str, set[str]] = {state: set() for state in states}
+    for child, parent in parents.items():
+        direct_children[parent].add(child)
+    compound_states = {state for state, children in direct_children.items() if children}
+    if set(initial_children) != compound_states:
+        raise CompileError(
+            f"{label}.hierarchy must declare exactly one initial child for every compound state"
+        )
+    for parent, child in initial_children.items():
+        if (
+            not isinstance(parent, str)
+            or not isinstance(child, str)
+            or child not in direct_children.get(parent, set())
+        ):
+            raise CompileError(
+                f"{label}.hierarchy initial child must be a direct child: {parent}/{child}"
+            )
+    for terminal in {"completed", "failed"} & states:
+        if terminal in parents or terminal in compound_states:
+            raise CompileError(f"{label}.hierarchy terminal state must be a root leaf: {terminal}")
+
+    normalized = {
+        "parent_by_state": dict(sorted(parents.items())),
+        "initial_child_by_state": dict(sorted(initial_children.items())),
+    }
+    probe = {"states": sorted(states), "hierarchy": normalized}
+    for state in sorted(states):
+        lineage = state_machine_lineage(probe, state)
+        if not lineage:
+            raise CompileError(f"{label}.hierarchy contains a cycle or exceeds the depth limit")
+        if len(lineage) - 1 > STATE_MACHINE_HIERARCHY_DEPTH_LIMIT:
+            raise CompileError(
+                f"{label}.hierarchy depth exceeds {STATE_MACHINE_HIERARCHY_DEPTH_LIMIT}: {state}"
+            )
+        if state_machine_resolve_leaf(probe, state) is None:
+            raise CompileError(f"{label}.hierarchy compound entry cannot resolve: {state}")
+    return normalized
+
+
 def _validate_scoped_state_machines(
     source: Any,
     *,
@@ -1263,7 +1346,7 @@ def _validate_scoped_state_machines(
     source_format = source.get("format")
     if source_format not in {
         STATE_MACHINE_FORMAT_V1, STATE_MACHINE_FORMAT_V2, STATE_MACHINE_FORMAT_V3,
-        STATE_MACHINE_FORMAT,
+        STATE_MACHINE_FORMAT_V4, STATE_MACHINE_FORMAT,
     }:
         raise CompileError("state_machines.json format 不支援")
     machines = source.get("state_machines")
@@ -1281,6 +1364,8 @@ def _validate_scoped_state_machines(
         "state_machine_id", "title", "owner_scope", "owner_id", "states",
         "initial_state", "persistence", "visibility", "authority", "transitions",
     }
+    if source_format == STATE_MACHINE_FORMAT:
+        allowed.add("hierarchy")
     required = set(allowed)
     for index, machine in enumerate(machines):
         label = f"state_machines.json.state_machines[{index}]"
@@ -1330,8 +1415,20 @@ def _validate_scoped_state_machines(
                 f"{label}.states 必須是 2 到 {STATE_MACHINE_STATE_LIMIT} 個不重複合法 ID"
             )
         initial_state = machine["initial_state"]
+        hierarchy = _validate_state_machine_hierarchy(
+            machine.get("hierarchy", {
+                "parent_by_state": {}, "initial_child_by_state": {},
+            }),
+            states=set(states),
+            label=label,
+            allow_hierarchy=source_format == STATE_MACHINE_FORMAT,
+        )
+        hierarchy_machine = {"states": list(states), "hierarchy": hierarchy}
+        initial_leaf = state_machine_resolve_leaf(hierarchy_machine, initial_state)
         if initial_state not in states:
             raise CompileError(f"{label}.initial_state 不在 states 中")
+        if initial_leaf is None:
+            raise CompileError(f"{label}.initial_state cannot resolve to an active leaf")
         if machine["persistence"] != "runtime":
             raise CompileError(f"{label}.persistence v0.1 只支援 runtime")
         visibility = machine["visibility"]
@@ -1343,10 +1440,17 @@ def _validate_scoped_state_machines(
         transitions = _validate_scoped_transitions(
             machine["transitions"], label, states=set(states), initial_state=initial_state,
             allow_conditions=source_format in {
-                STATE_MACHINE_FORMAT_V2, STATE_MACHINE_FORMAT_V3, STATE_MACHINE_FORMAT,
+                STATE_MACHINE_FORMAT_V2, STATE_MACHINE_FORMAT_V3,
+                STATE_MACHINE_FORMAT_V4, STATE_MACHINE_FORMAT,
             },
-            allow_timers=source_format in {STATE_MACHINE_FORMAT_V3, STATE_MACHINE_FORMAT},
-            allow_nonterminal_chaining=source_format == STATE_MACHINE_FORMAT,
+            allow_timers=source_format in {
+                STATE_MACHINE_FORMAT_V3, STATE_MACHINE_FORMAT_V4, STATE_MACHINE_FORMAT,
+            },
+            allow_nonterminal_chaining=source_format in {
+                STATE_MACHINE_FORMAT_V4, STATE_MACHINE_FORMAT,
+            },
+            allow_hierarchical_payload=source_format == STATE_MACHINE_FORMAT,
+            hierarchy=hierarchy,
         )
         normalized.append({
             "state_machine_id": machine_id,
@@ -1355,12 +1459,14 @@ def _validate_scoped_state_machines(
             "owner_id": owner_id,
             "states": list(states),
             "initial_state": initial_state,
+            "initial_leaf": initial_leaf,
+            "hierarchy": hierarchy,
             "persistence": "runtime",
             "visibility": visibility,
             "authority": "state_machine.core",
             "transitions": transitions,
         })
-    if source_format == STATE_MACHINE_FORMAT:
+    if source_format in {STATE_MACHINE_FORMAT_V4, STATE_MACHINE_FORMAT}:
         _validate_state_machine_reaction_graph(normalized)
     return normalized
 
@@ -1397,6 +1503,9 @@ def _validate_state_machine_reaction_graph(machines: list[dict[str, Any]]) -> No
                 "transition_id": source_transition_id,
                 "from": source_transition["from"],
                 "to": source_transition["to"],
+                "to_leaf": state_machine_resolve_leaf(
+                    source, source_transition["to"],
+                ),
                 "trigger": source_transition.get("on", "fsm.timer_elapsed"),
             }
             mismatched = sorted(
@@ -1406,6 +1515,16 @@ def _validate_state_machine_reaction_graph(machines: list[dict[str, Any]]) -> No
             if mismatched:
                 raise CompileError(
                     f"{label}.event_match 與來源 transition 不一致: {mismatched}"
+                )
+            matched_from_leaf = event_match.get("from_leaf")
+            if matched_from_leaf is not None and not (
+                state_machine_is_active_leaf(source, matched_from_leaf)
+                and state_machine_state_matches(
+                    source, source_transition["from"], matched_from_leaf,
+                )
+            ):
+                raise CompileError(
+                    f"{label}.event_match.from_leaf is outside the source subtree"
                 )
             edges[source_id].add(target_id)
 
@@ -1491,7 +1610,14 @@ def _validate_scoped_transitions(
     allow_conditions: bool,
     allow_timers: bool,
     allow_nonterminal_chaining: bool,
+    allow_hierarchical_payload: bool,
+    hierarchy: dict[str, dict[str, str]],
 ) -> list[dict[str, Any]]:
+    hierarchy_machine = {"states": sorted(states), "hierarchy": hierarchy}
+    initial_leaf = state_machine_resolve_leaf(hierarchy_machine, initial_state)
+    if initial_leaf is None:
+        raise CompileError(f"{label}.initial_state cannot resolve to an active leaf")
+    compound_states = set(hierarchy["initial_child_by_state"])
     if (
         not isinstance(transitions, list)
         or not 1 <= len(transitions) <= STATE_MACHINE_TRANSITION_LIMIT
@@ -1546,12 +1672,19 @@ def _validate_scoped_transitions(
         transition_ids.add(transition_id)
         if from_state not in states or to_state not in states or from_state == to_state:
             raise CompileError(f"{transition_label}.from/to 不在 states 中或未改變狀態")
+        target_leaf = state_machine_resolve_leaf(hierarchy_machine, to_state)
+        if target_leaf is None:
+            raise CompileError(f"{transition_label}.to cannot resolve to an active leaf")
+        if state_machine_state_matches(hierarchy_machine, from_state, target_leaf):
+            raise CompileError(
+                f"{transition_label}.to resolves inside its own source subtree"
+            )
         if from_state in {"completed", "failed"}:
             raise CompileError(f"{transition_label} 不可從終態 {from_state} 再轉移")
         if has_event_trigger and event_type not in STATE_MACHINE_TRIGGER_EVENT_FIELDS:
             raise CompileError(f"{transition_label}.on 不在 StateMachineModule EventIR 白名單中")
         if event_type == "fsm.transitioned" and not allow_nonterminal_chaining:
-            raise CompileError(f"{transition_label}.on fsm.transitioned 僅支援 StateIR v0.4")
+            raise CompileError(f"{transition_label}.on fsm.transitioned 僅支援 StateIR v0.4/v0.5")
         if has_timer_trigger and (
             isinstance(after_ticks, bool)
             or not isinstance(after_ticks, int)
@@ -1560,6 +1693,10 @@ def _validate_scoped_transitions(
             raise CompileError(
                 f"{transition_label}.after_ticks 必須是 1 到 "
                 f"{STATE_MACHINE_TIMER_TICK_LIMIT} 的整數"
+            )
+        if has_timer_trigger and from_state in compound_states:
+            raise CompileError(
+                f"{transition_label}.after_ticks source must be an active leaf"
             )
         if (
             isinstance(priority, bool)
@@ -1596,6 +1733,14 @@ def _validate_scoped_transitions(
                 raise CompileError(
                     f"{transition_label}.event_match 含不屬於 {event_type} 的欄位: "
                     f"{sorted(unknown_match)}"
+                )
+            if (
+                event_type == "fsm.transitioned"
+                and not allow_hierarchical_payload
+                and {"from_leaf", "to_leaf"}.intersection(event_match)
+            ):
+                raise CompileError(
+                    f"{transition_label}.event_match leaf fields require StateIR v0.5"
                 )
             if any(not _json_scalar(value) for value in event_match.values()):
                 raise CompileError(f"{transition_label}.event_match 值必須是 finite JSON 純量")
@@ -1685,21 +1830,56 @@ def _validate_scoped_transitions(
             normalized_transition["after_ticks"] = after_ticks
         normalized.append(normalized_transition)
 
-    _validate_transition_reachability(initial_state, normalized, label)
-    reachable = {initial_state}
-    changed = True
-    while changed:
-        changed = False
-        for transition in normalized:
-            if transition["from"] in reachable and transition["to"] not in reachable:
-                reachable.add(transition["to"])
-                changed = True
-    unreachable_states = states - reachable
+    reachable_leaves = _validate_hierarchical_transition_reachability(
+        initial_leaf, normalized, label, hierarchy_machine,
+    )
+    reachable_states = {
+        state
+        for leaf in reachable_leaves
+        for state in state_machine_lineage(hierarchy_machine, leaf)
+    }
+    unreachable_states = states - reachable_states
     if unreachable_states:
         raise CompileError(
             f"{label}.states 含從 initial_state 不可達狀態: {sorted(unreachable_states)}"
         )
     return normalized
+
+
+def _validate_hierarchical_transition_reachability(
+    initial_leaf: str,
+    transitions: list[dict[str, Any]],
+    label: str,
+    machine: dict[str, Any],
+) -> set[str]:
+    """Return structurally reachable active leaves for one compound machine."""
+    reachable = {initial_leaf}
+    changed = True
+    while changed:
+        changed = False
+        for transition in transitions:
+            if not any(
+                state_machine_state_matches(machine, transition["from"], leaf)
+                for leaf in reachable
+            ):
+                continue
+            target_leaf = state_machine_resolve_leaf(machine, transition["to"])
+            if target_leaf is not None and target_leaf not in reachable:
+                reachable.add(target_leaf)
+                changed = True
+    unreachable = [
+        transition["transition_id"]
+        for transition in transitions
+        if not any(
+            state_machine_state_matches(machine, transition["from"], leaf)
+            for leaf in reachable
+        )
+    ]
+    if unreachable:
+        raise CompileError(
+            f"{label}.transitions are unreachable from initial_state: {sorted(unreachable)}"
+        )
+    return reachable
 
 
 def _validate_quests(

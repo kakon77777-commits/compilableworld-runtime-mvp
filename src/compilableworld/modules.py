@@ -18,6 +18,10 @@ from .state_machine import (
     STATE_MACHINE_TIMER_TICK_LIMIT,
     resolve_state_machine_actor,
     state_machine_condition_matches,
+    state_machine_is_active_leaf,
+    state_machine_lineage,
+    state_machine_resolve_leaf,
+    state_machine_state_matches,
 )
 from .narrative import render_room_description
 
@@ -527,7 +531,7 @@ class StateMachineModule(BaseModule):
 
     def __init__(self) -> None:
         super().__init__(ModuleContract(
-            "state_machine.core", "0.4.0", "TMS", [],
+            "state_machine.core", "0.5.0", "TMS", [],
             ["fsm.timer_elapsed", "fsm.transitioned", "fsm.completed", "fsm.failed"],
             ["fsm.*", "fsm_runtime.*"], ["fsm.*", "fsm_runtime.*"],
             ["state", "event", "clock"],
@@ -600,12 +604,14 @@ class StateMachineModule(BaseModule):
     ) -> dict[str, Any] | None:
         machine_id = machine.get("state_machine_id")
         owner_id = machine.get("owner_id")
-        initial_state = machine.get("initial_state")
+        initial_state = machine.get("initial_leaf", machine.get("initial_state"))
         if not all(isinstance(value, str) and value for value in (
             machine_id, owner_id, initial_state,
         )):
             return None
         current = runtime.state.get(owner_id, "fsm", machine_id, initial_state)
+        if not state_machine_is_active_leaf(machine, current):
+            return None
         missing = object()
         entered_tick = runtime.state.get(
             owner_id, "fsm_runtime", machine_id, missing,
@@ -640,15 +646,25 @@ class StateMachineModule(BaseModule):
         self, machine: dict[str, Any], event: EventIR, runtime: WorldRuntime,
         *, actor_id: str | None,
     ) -> None:
-        machine_id = machine["state_machine_id"]
-        owner_id = machine["owner_id"]
+        machine_id = machine.get("state_machine_id")
+        owner_id = machine.get("owner_id")
+        initial_leaf = machine.get("initial_leaf", machine.get("initial_state"))
+        if not all(
+            isinstance(value, str) and value
+            for value in (machine_id, owner_id, initial_leaf)
+        ):
+            return
         current = runtime.state.get(
-            owner_id, "fsm", machine_id, machine["initial_state"],
+            owner_id, "fsm", machine_id, initial_leaf,
         )
+        if not state_machine_is_active_leaf(machine, current):
+            return
         matches = [
-            transition for transition in machine["transitions"]
-            if transition["from"] == current
+            transition for transition in machine.get("transitions", [])
+            if isinstance(transition, dict)
+            and state_machine_state_matches(machine, transition.get("from"), current)
             and transition.get("on") == event.event_type
+            and isinstance(transition.get("event_match", {}), dict)
             and all(
                 key in event.payload and event.payload[key] == value
                 for key, value in transition.get("event_match", {}).items()
@@ -659,13 +675,14 @@ class StateMachineModule(BaseModule):
         ]
         if not matches:
             return
-        transition = self._select_unique_priority(matches)
+        transition = self._select_event_transition(machine, current, matches)
         if transition is None:
             return
         deltas, events = self._transition_effects(
             machine, transition, runtime, trigger_event=event, tick=runtime.scheduler.tick,
         )
-        runtime.commit_reaction(self, deltas, events)
+        if deltas:
+            runtime.commit_reaction(self, deltas, events)
 
     def _transition_effects(
         self,
@@ -679,9 +696,16 @@ class StateMachineModule(BaseModule):
         machine_id = machine["state_machine_id"]
         owner_id = machine["owner_id"]
         current = runtime.state.get(
-            owner_id, "fsm", machine_id, machine["initial_state"],
+            owner_id, "fsm", machine_id,
+            machine.get("initial_leaf", machine.get("initial_state")),
         )
-        target_state = transition["to"]
+        target_state = state_machine_resolve_leaf(machine, transition.get("to"))
+        if (
+            not state_machine_is_active_leaf(machine, current)
+            or target_state is None
+            or target_state == current
+        ):
+            return [], []
         deltas = [StateDelta(
             owner_id, "fsm", machine_id, "set", target_state,
             source_module=self.contract.module_id,
@@ -697,8 +721,10 @@ class StateMachineModule(BaseModule):
             "owner_scope": machine["owner_scope"],
             "owner_id": owner_id,
             "transition_id": transition["transition_id"],
-            "from": current,
-            "to": target_state,
+            "from": transition["from"],
+            "to": transition["to"],
+            "from_leaf": current,
+            "to_leaf": target_state,
             "trigger": trigger_event.event_type if trigger_event else "fsm.timer_elapsed",
         }
         visibility = self._event_visibility(machine)
@@ -775,6 +801,39 @@ class StateMachineModule(BaseModule):
             return None
         highest = max(candidate["priority"] for candidate in valid)
         selected = [candidate for candidate in valid if candidate["priority"] == highest]
+        return selected[0] if len(selected) == 1 else None
+
+    @staticmethod
+    def _select_event_transition(
+        machine: dict[str, Any],
+        active_leaf: str,
+        matches: list[dict[str, Any]],
+    ) -> dict[str, Any] | None:
+        """Select by priority, then by deepest matching source state."""
+        valid = [
+            candidate for candidate in matches
+            if isinstance(candidate.get("priority"), int)
+            and not isinstance(candidate.get("priority"), bool)
+            and 0 <= candidate["priority"] <= STATE_MACHINE_PRIORITY_LIMIT
+            and state_machine_state_matches(
+                machine, candidate.get("from"), active_leaf,
+            )
+        ]
+        if not valid:
+            return None
+        highest_priority = max(candidate["priority"] for candidate in valid)
+        priority_matches = [
+            candidate for candidate in valid
+            if candidate["priority"] == highest_priority
+        ]
+        deepest = max(
+            len(state_machine_lineage(machine, candidate.get("from")))
+            for candidate in priority_matches
+        )
+        selected = [
+            candidate for candidate in priority_matches
+            if len(state_machine_lineage(machine, candidate.get("from"))) == deepest
+        ]
         return selected[0] if len(selected) == 1 else None
 
     @staticmethod

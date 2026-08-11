@@ -1,5 +1,5 @@
 {
-  "format": "compilableworld.state-machines/v0.4",
+  "format": "compilableworld.state-machines/v0.5",
   "state_machines": [
     {
       "state_machine_id": "fsm.world.vault_seal",
@@ -8,6 +8,7 @@
       "owner_id": "world",
       "states": ["sealed", "completed"],
       "initial_state": "sealed",
+      "hierarchy": {"parent_by_state": {}, "initial_child_by_state": {}},
       "persistence": "runtime",
       "visibility": "public",
       "authority": "state_machine.core",
@@ -55,6 +56,7 @@
       "owner_id": "region.gray_crown",
       "states": ["watchful", "alerted"],
       "initial_state": "watchful",
+      "hierarchy": {"parent_by_state": {}, "initial_child_by_state": {}},
       "persistence": "runtime",
       "visibility": "observable",
       "authority": "state_machine.core",
@@ -80,6 +82,7 @@
       "owner_id": "room.vault",
       "states": ["sealed", "open"],
       "initial_state": "sealed",
+      "hierarchy": {"parent_by_state": {}, "initial_child_by_state": {}},
       "persistence": "runtime",
       "visibility": "observable",
       "authority": "state_machine.core",
@@ -102,6 +105,7 @@
       "owner_id": "npc.guard",
       "states": ["calm", "alerted"],
       "initial_state": "calm",
+      "hierarchy": {"parent_by_state": {}, "initial_child_by_state": {}},
       "persistence": "runtime",
       "visibility": "inferred",
       "authority": "state_machine.core",
@@ -122,8 +126,15 @@
       "title": "安全系統狀態",
       "owner_scope": "system",
       "owner_id": "system.security",
-      "states": ["nominal", "breached", "contained"],
+      "states": ["nominal", "incident", "breached", "contained"],
       "initial_state": "nominal",
+      "hierarchy": {
+        "parent_by_state": {
+          "breached": "incident",
+          "contained": "incident"
+        },
+        "initial_child_by_state": {"incident": "breached"}
+      },
       "persistence": "runtime",
       "visibility": "system_only",
       "authority": "state_machine.core",
@@ -132,7 +143,7 @@
           "transition_id": "fsm.system.security.vault_unlocked",
           "from": "nominal",
           "on": "door.unlocked",
-          "to": "breached",
+          "to": "incident",
           "event_match": {"door": "door.old_vault"},
           "when": [],
           "priority": 100

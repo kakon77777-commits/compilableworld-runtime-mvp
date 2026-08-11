@@ -61,7 +61,7 @@
         "action_behaviors": { "const": "compilableworld.schema/action-behaviors/v0.7" },
         "functions": { "const": "compilableworld.schema/functions/v0.1" },
         "scenarios": { "const": "compilableworld.schema/scenarios/v0.1" },
-        "state_machines": { "const": "compilableworld.schema/state-machines/v0.4" },
+        "state_machines": { "const": "compilableworld.schema/state-machines/v0.5" },
         "runtime_package": { "const": "compilableworld.schema/runtime-package/v0.1" },
         "rooms": { "const": "compilableworld.schema/csv/rooms/v0.1" },
         "exits": { "const": "compilableworld.schema/csv/exits/v0.1" },
@@ -117,7 +117,8 @@
                 "compilableworld.schema/state-machines/v0.1",
                 "compilableworld.schema/state-machines/v0.2",
                 "compilableworld.schema/state-machines/v0.3",
-                "compilableworld.schema/state-machines/v0.4"
+                "compilableworld.schema/state-machines/v0.4",
+                "compilableworld.schema/state-machines/v0.5"
               ]
             }
           }
@@ -378,12 +379,32 @@
         "value": { "type": ["string", "number", "boolean", "null"] }
       }
     },
+    "stateMachineHierarchy": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["parent_by_state", "initial_child_by_state"],
+      "properties": {
+        "parent_by_state": {
+          "type": "object",
+          "maxProperties": 256,
+          "propertyNames": { "pattern": "^[a-z][a-z0-9_.-]*$" },
+          "additionalProperties": { "$ref": "#/$defs/id" }
+        },
+        "initial_child_by_state": {
+          "type": "object",
+          "maxProperties": 256,
+          "propertyNames": { "pattern": "^[a-z][a-z0-9_.-]*$" },
+          "additionalProperties": { "$ref": "#/$defs/id" }
+        }
+      }
+    },
     "stateMachine": {
       "type": "object",
       "additionalProperties": false,
       "required": [
         "state_machine_id", "title", "owner_scope", "owner_id", "states",
-        "initial_state", "persistence", "visibility", "authority", "transitions"
+        "initial_state", "initial_leaf", "hierarchy", "persistence", "visibility",
+        "authority", "transitions"
       ],
       "properties": {
         "state_machine_id": { "$ref": "#/$defs/id" },
@@ -398,6 +419,8 @@
           "items": { "$ref": "#/$defs/id" }
         },
         "initial_state": { "$ref": "#/$defs/id" },
+        "initial_leaf": { "$ref": "#/$defs/id" },
+        "hierarchy": { "$ref": "#/$defs/stateMachineHierarchy" },
         "persistence": { "const": "runtime" },
         "visibility": { "enum": ["public", "observable", "inferred", "private", "system_only"] },
         "authority": { "const": "state_machine.core" },

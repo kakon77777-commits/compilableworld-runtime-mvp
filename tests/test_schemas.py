@@ -80,12 +80,20 @@ class SchemaContractTests(unittest.TestCase):
         self.assertIn("action.branch_selected", event_mapping["properties"]["event_type"]["enum"])
 
         state_machine_schema = json.loads(
-            (ROOT / "schemas" / "state-machines.v0.4.schema.json").read_text(encoding="utf-8")
+            (ROOT / "schemas" / "state-machines.v0.5.schema.json").read_text(encoding="utf-8")
         )
         machine = state_machine_schema["$defs"]["stateMachine"]
         transition = state_machine_schema["$defs"]["transition"]
         self.assertEqual(state_machine_schema["properties"]["state_machines"]["maxItems"], 1024)
         self.assertEqual(machine["properties"]["states"]["maxItems"], 256)
+        self.assertIn("hierarchy", machine["required"])
+        self.assertEqual(
+            set(state_machine_schema["$defs"]["hierarchy"]["required"]),
+            {"parent_by_state", "initial_child_by_state"},
+        )
+        self.assertEqual(
+            state_machine_schema["$defs"]["idMap"]["maxProperties"], 256,
+        )
         self.assertEqual(
             set(machine["properties"]["owner_scope"]["enum"]),
             {"world", "region", "scene", "entity", "system"},
@@ -172,13 +180,15 @@ class SchemaContractTests(unittest.TestCase):
         )
         self.assertEqual(
             runtime_package_schema["properties"]["schema_contracts"]["properties"]["state_machines"]["const"],
-            "compilableworld.schema/state-machines/v0.4",
+            "compilableworld.schema/state-machines/v0.5",
         )
         self.assertEqual(
             runtime_package_schema["$defs"]["stateMachineTransition"]["properties"]["when"]["maxItems"],
             16,
         )
         self.assertEqual(runtime_package_schema["properties"]["state_machines"]["maxItems"], 1024)
+        self.assertIn("initial_leaf", runtime_package_schema["$defs"]["stateMachine"]["required"])
+        self.assertIn("hierarchy", runtime_package_schema["$defs"]["stateMachine"]["required"])
 
     def test_csv_header_contract_rejects_unknown_columns(self) -> None:
         with tempfile.TemporaryDirectory() as temp:

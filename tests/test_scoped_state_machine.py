@@ -32,6 +32,15 @@ def use_legacy_terminal_chain(source: dict) -> None:
     region_transition["event_match"] = {"state_machine_id": "fsm.world.vault_seal"}
 
 
+def use_flat_state_hierarchy(source: dict) -> None:
+    """Downgrade the v0.5 fixture to the flat v0.1-v0.4 source shape."""
+    for machine in source["state_machines"]:
+        machine.pop("hierarchy", None)
+        if machine["state_machine_id"] == "fsm.system.security":
+            machine["states"].remove("incident")
+            machine["transitions"][0]["to"] = "breached"
+
+
 class ScopedStateMachineTests(unittest.TestCase):
     def setUp(self) -> None:
         self.temp = tempfile.TemporaryDirectory()
@@ -60,7 +69,7 @@ class ScopedStateMachineTests(unittest.TestCase):
         self.assertIn("state_machine.core", self.package["manifest"]["modules"])
         self.assertEqual(
             self.package["manifest"]["source_schemas"]["state_machines"],
-            "compilableworld.schema/state-machines/v0.4",
+            "compilableworld.schema/state-machines/v0.5",
         )
 
         cells = {
@@ -84,6 +93,14 @@ class ScopedStateMachineTests(unittest.TestCase):
             machine for machine in self.package["state_machines"]
             if machine["state_machine_id"] == "fsm.system.security"
         )
+        self.assertEqual(system_machine["initial_leaf"], "nominal")
+        self.assertEqual(system_machine["hierarchy"], {
+            "parent_by_state": {
+                "breached": "incident", "contained": "incident",
+            },
+            "initial_child_by_state": {"incident": "breached"},
+        })
+        self.assertEqual(system_machine["transitions"][0]["to"], "incident")
         self.assertEqual(system_machine["transitions"][1]["after_ticks"], 2)
 
     def test_unlock_event_advances_all_scopes_and_preserves_nested_causation(self) -> None:
@@ -120,6 +137,10 @@ class ScopedStateMachineTests(unittest.TestCase):
         )
         self.assertEqual(world_completion.causation_id, door_event.event_id)
         self.assertEqual(security_transition.causation_id, door_event.event_id)
+        self.assertEqual(security_transition.payload["from"], "nominal")
+        self.assertEqual(security_transition.payload["to"], "incident")
+        self.assertEqual(security_transition.payload["from_leaf"], "nominal")
+        self.assertEqual(security_transition.payload["to_leaf"], "breached")
         self.assertEqual(region_transition.causation_id, security_transition.event_id)
         self.assertEqual(world_completion.visibility, "public")
 
@@ -178,6 +199,127 @@ class ScopedStateMachineTests(unittest.TestCase):
         transitioned.source = "test.spoof"
         with self.assertRaisesRegex(RuntimeErrorBase, "authored StateIR lifecycle"):
             WorldRuntime(deepcopy(self.package)).replay(tampered)
+
+        tampered_leaf = deepcopy(self.runtime.event_log.events)
+        transitioned_leaf = next(
+            event for event in tampered_leaf
+            if event.event_type == "fsm.transitioned"
+            and event.payload["transition_id"] == "fsm.system.security.vault_unlocked"
+        )
+        transitioned_leaf.payload["to_leaf"] = "contained"
+        with self.assertRaisesRegex(RuntimeErrorBase, "authored StateIR lifecycle"):
+            WorldRuntime(deepcopy(self.package)).replay(tampered_leaf)
+
+    def test_same_priority_leaf_transition_overrides_compound_transition(self) -> None:
+        with tempfile.TemporaryDirectory() as temp:
+            world = Path(temp) / "world"
+            shutil.copytree(GRAY_CROWN, world)
+            source_path = world / "state_machines.json"
+            source = json.loads(source_path.read_text(encoding="utf-8"))
+            system = next(
+                machine for machine in source["state_machines"]
+                if machine["state_machine_id"] == "fsm.system.security"
+            )
+            system["transitions"].extend([
+                {
+                    "transition_id": "fsm.system.security.incident_reset",
+                    "from": "incident",
+                    "on": "door.opened",
+                    "to": "nominal",
+                    "event_match": {"door": "door.old_vault"},
+                    "when": [],
+                    "priority": 50,
+                },
+                {
+                    "transition_id": "fsm.system.security.breach_contained",
+                    "from": "breached",
+                    "on": "door.opened",
+                    "to": "contained",
+                    "event_match": {"door": "door.old_vault"},
+                    "when": [],
+                    "priority": 50,
+                },
+            ])
+            source_path.write_text(
+                json.dumps(source, ensure_ascii=False, indent=2) + "\n", encoding="utf-8"
+            )
+            runtime = WorldRuntime.from_package(
+                compile_world(world, Path(temp) / "build")
+            )
+            install_builtin_modules(runtime)
+            unlock_old_vault(runtime)
+            runtime.events.publish(EventIR(
+                "door.opened", "test", {"door": "door.old_vault"},
+                target="door.old_vault",
+            ))
+
+        self.assertEqual(
+            runtime.state.get("system.security", "fsm", "fsm.system.security"),
+            "contained",
+        )
+        selected = [
+            event for event in runtime.event_log.events
+            if event.event_type == "fsm.transitioned"
+            and event.payload.get("transition_id")
+            in {
+                "fsm.system.security.incident_reset",
+                "fsm.system.security.breach_contained",
+            }
+        ]
+        self.assertEqual(
+            [event.payload["transition_id"] for event in selected],
+            ["fsm.system.security.breach_contained"],
+        )
+
+    def test_compound_initial_state_materializes_only_its_initial_leaf(self) -> None:
+        with tempfile.TemporaryDirectory() as temp:
+            world = Path(temp) / "world"
+            shutil.copytree(GRAY_CROWN, world)
+            source_path = world / "state_machines.json"
+            source = json.loads(source_path.read_text(encoding="utf-8"))
+            source["state_machines"].append({
+                "state_machine_id": "fsm.system.compound_probe",
+                "title": "compound probe",
+                "owner_scope": "system",
+                "owner_id": "system.compound_probe",
+                "states": ["operating", "idle", "busy"],
+                "initial_state": "operating",
+                "hierarchy": {
+                    "parent_by_state": {"idle": "operating", "busy": "operating"},
+                    "initial_child_by_state": {"operating": "idle"},
+                },
+                "persistence": "runtime",
+                "visibility": "system_only",
+                "authority": "state_machine.core",
+                "transitions": [{
+                    "transition_id": "fsm.system.compound_probe.activate",
+                    "from": "idle",
+                    "on": "door.opened",
+                    "to": "busy",
+                    "event_match": {"door": "door.old_vault"},
+                    "when": [],
+                    "priority": 1,
+                }],
+            })
+            source_path.write_text(
+                json.dumps(source, ensure_ascii=False, indent=2) + "\n", encoding="utf-8"
+            )
+            package = json.loads(
+                compile_world(world, Path(temp) / "build").read_text(encoding="utf-8")
+            )
+
+        machine = next(
+            item for item in package["state_machines"]
+            if item["state_machine_id"] == "fsm.system.compound_probe"
+        )
+        self.assertEqual(machine["initial_state"], "operating")
+        self.assertEqual(machine["initial_leaf"], "idle")
+        cells = [
+            item for item in package["initial_state"]
+            if item["owner"] == "system.compound_probe"
+            and item["namespace"] == "fsm"
+        ]
+        self.assertEqual([item["value"] for item in cells], ["idle"])
 
     def test_bounded_owner_condition_blocks_transition_without_blocking_other_scopes(self) -> None:
         package = json.loads(json.dumps(self.package))
@@ -660,6 +802,47 @@ class ScopedStateMachineTests(unittest.TestCase):
                 "compilableworld.schema/state-machines/v0.3"
             )
 
+        def v04_with_hierarchy_payload(source: dict, manifest: dict) -> None:
+            use_flat_state_hierarchy(source)
+            source["format"] = "compilableworld.state-machines/v0.4"
+            source["state_machines"][1]["transitions"][0]["event_match"][
+                "to_leaf"
+            ] = "breached"
+            manifest["source_schemas"]["state_machines"] = (
+                "compilableworld.schema/state-machines/v0.4"
+            )
+
+        def hierarchy_cycle(source: dict, manifest: dict) -> None:
+            hierarchy = source["state_machines"][4]["hierarchy"]
+            hierarchy["parent_by_state"]["incident"] = "breached"
+            hierarchy["initial_child_by_state"]["breached"] = "incident"
+
+        def hierarchy_missing_initial_child(source: dict, manifest: dict) -> None:
+            source["state_machines"][4]["hierarchy"][
+                "initial_child_by_state"
+            ].pop("incident")
+
+        def hierarchy_non_direct_initial_child(source: dict, manifest: dict) -> None:
+            source["state_machines"][4]["hierarchy"][
+                "initial_child_by_state"
+            ]["incident"] = "nominal"
+
+        def hierarchy_timer_from_compound(source: dict, manifest: dict) -> None:
+            timer = source["state_machines"][4]["transitions"][1]
+            timer["from"] = "incident"
+            timer["to"] = "nominal"
+
+        def hierarchy_target_inside_source(source: dict, manifest: dict) -> None:
+            source["state_machines"][4]["transitions"].append({
+                "transition_id": "fsm.system.security.invalid_internal_reset",
+                "from": "incident",
+                "on": "door.opened",
+                "to": "contained",
+                "event_match": {"door": "door.old_vault"},
+                "when": [],
+                "priority": 1,
+            })
+
         changes = {
             "invalid_scene": invalid_scene,
             "free_effect": free_effect,
@@ -684,6 +867,12 @@ class ScopedStateMachineTests(unittest.TestCase):
             "nonterminal_dependency_cycle": nonterminal_dependency_cycle,
             "nonterminal_dependency_too_deep": nonterminal_dependency_too_deep,
             "v03_with_nonterminal_chain": v03_with_nonterminal_chain,
+            "v04_with_hierarchy_payload": v04_with_hierarchy_payload,
+            "hierarchy_cycle": hierarchy_cycle,
+            "hierarchy_missing_initial_child": hierarchy_missing_initial_child,
+            "hierarchy_non_direct_initial_child": hierarchy_non_direct_initial_child,
+            "hierarchy_timer_from_compound": hierarchy_timer_from_compound,
+            "hierarchy_target_inside_source": hierarchy_target_inside_source,
         }
         for label, change in changes.items():
             with self.subTest(label=label), tempfile.TemporaryDirectory() as temp:
@@ -712,6 +901,7 @@ class ScopedStateMachineTests(unittest.TestCase):
             source = json.loads(source_path.read_text(encoding="utf-8"))
             manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
             use_legacy_terminal_chain(source)
+            use_flat_state_hierarchy(source)
             source["format"] = "compilableworld.state-machines/v0.1"
             for machine in source["state_machines"]:
                 machine["transitions"] = [
@@ -755,6 +945,7 @@ class ScopedStateMachineTests(unittest.TestCase):
             source = json.loads(source_path.read_text(encoding="utf-8"))
             manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
             use_legacy_terminal_chain(source)
+            use_flat_state_hierarchy(source)
             source["format"] = "compilableworld.state-machines/v0.2"
             for machine in source["state_machines"]:
                 machine["transitions"] = [
@@ -795,6 +986,7 @@ class ScopedStateMachineTests(unittest.TestCase):
             source = json.loads(source_path.read_text(encoding="utf-8"))
             manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
             use_legacy_terminal_chain(source)
+            use_flat_state_hierarchy(source)
             source["format"] = "compilableworld.state-machines/v0.3"
             manifest["source_schemas"]["state_machines"] = (
                 "compilableworld.schema/state-machines/v0.3"
@@ -818,6 +1010,57 @@ class ScopedStateMachineTests(unittest.TestCase):
             for machine in package["state_machines"]
             for transition in machine["transitions"]
         ))
+
+    def test_v04_source_remains_supported_with_flat_nonterminal_chaining(self) -> None:
+        with tempfile.TemporaryDirectory() as temp:
+            world = Path(temp) / "world"
+            shutil.copytree(GRAY_CROWN, world)
+            source_path = world / "state_machines.json"
+            manifest_path = world / "manifest.json"
+            source = json.loads(source_path.read_text(encoding="utf-8"))
+            manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+            use_flat_state_hierarchy(source)
+            source["format"] = "compilableworld.state-machines/v0.4"
+            manifest["source_schemas"]["state_machines"] = (
+                "compilableworld.schema/state-machines/v0.4"
+            )
+            source_path.write_text(
+                json.dumps(source, ensure_ascii=False, indent=2) + "\n", encoding="utf-8"
+            )
+            manifest_path.write_text(
+                json.dumps(manifest, ensure_ascii=False, indent=2) + "\n", encoding="utf-8"
+            )
+            package = json.loads(
+                compile_world(world, Path(temp) / "build").read_text(encoding="utf-8")
+            )
+
+        self.assertEqual(
+            package["manifest"]["source_schemas"]["state_machines"],
+            "compilableworld.schema/state-machines/v0.4",
+        )
+        system = next(
+            machine for machine in package["state_machines"]
+            if machine["state_machine_id"] == "fsm.system.security"
+        )
+        self.assertEqual(system["hierarchy"], {
+            "parent_by_state": {}, "initial_child_by_state": {},
+        })
+        self.assertEqual(system["initial_leaf"], "nominal")
+        self.assertEqual(system["transitions"][0]["to"], "breached")
+
+        legacy_package = deepcopy(package)
+        for machine in legacy_package["state_machines"]:
+            machine.pop("initial_leaf")
+            machine.pop("hierarchy")
+        runtime = WorldRuntime(deepcopy(legacy_package))
+        install_builtin_modules(runtime)
+        unlock_old_vault(runtime)
+        replayed = WorldRuntime(deepcopy(legacy_package))
+        replayed.replay(deepcopy(runtime.event_log.events))
+        self.assertEqual(
+            replayed.state.get("system.security", "fsm", "fsm.system.security"),
+            "breached",
+        )
 
     def test_studio_overview_projects_static_and_current_scoped_state(self) -> None:
         package_view = package_overview(self.package)
@@ -849,6 +1092,8 @@ class ScopedStateMachineTests(unittest.TestCase):
             if item["state_machine_id"] == "fsm.system.security"
         )
         self.assertEqual(live_system["entered_tick"], 0)
+        self.assertEqual(live_system["current_state"], "breached")
+        self.assertEqual(live_system["current_path"], ["incident", "breached"])
         self.assertEqual(live_system["pending_timers"], [{
             "transition_id": "fsm.system.security.auto_contained",
             "after_ticks": 2,
@@ -862,6 +1107,10 @@ class ScopedStateMachineTests(unittest.TestCase):
         )
         self.assertEqual(static_system["transitions"][1]["trigger_kind"], "timer")
         self.assertEqual(static_system["transitions"][1]["after_ticks"], 2)
+        self.assertEqual(static_system["initial_path"], ["nominal"])
+        self.assertEqual(
+            static_system["transitions"][0]["resolved_to_leaf"], "breached",
+        )
 
     def test_state_machine_module_has_no_direct_action_surface(self) -> None:
         contract = self.runtime.modules["state_machine.core"].contract
@@ -880,6 +1129,28 @@ class ScopedStateMachineTests(unittest.TestCase):
             runtime.state.get("gray_crown_demo", "fsm", "fsm.world.vault_seal"),
             "sealed",
         )
+
+    def test_runtime_fails_closed_on_malformed_compound_package(self) -> None:
+        package = deepcopy(self.package)
+        system = next(
+            machine for machine in package["state_machines"]
+            if machine["state_machine_id"] == "fsm.system.security"
+        )
+        system["hierarchy"]["initial_child_by_state"]["incident"] = "nominal"
+        runtime = WorldRuntime(package)
+        install_builtin_modules(runtime)
+
+        unlock_old_vault(runtime)
+
+        self.assertEqual(
+            runtime.state.get("system.security", "fsm", "fsm.system.security"),
+            "nominal",
+        )
+        self.assertFalse(any(
+            event.event_type == "fsm.transitioned"
+            and event.payload.get("state_machine_id") == "fsm.system.security"
+            for event in runtime.event_log.events
+        ))
 
 
 if __name__ == "__main__":

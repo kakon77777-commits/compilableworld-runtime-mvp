@@ -146,4 +146,4 @@ Runtime host 仍擁有時間推進權。v0.7 沒有提供讓玩家或 MCP 任意
 - Studio 視覺化 behavior authoring／直接 write-back；
 - AI 直接寫 StateStore 或自行提交不可逆效果。
 
-驗證基線由 `tests/test_action_behavior.py` 覆蓋 v0.7 static DAG 編譯、v0.1–v0.6 相容、unknown/self/cycle/unreachable 拒絕、長短路徑與 due 收斂、priority／fallback／condition／child fail-closed、sticky branch selection、primitive whitelist／禁止遞迴、retry recovery／exhaustion、Snapshot v0.6／v0.1–v0.5 migration、route-aware Replay 與 transaction rollback、Studio redaction，以及 lifecycle EventIR 驅動 scoped StateIR；MCP scheduled receipt另有整合測試。完整測試為 329/329，另有 58 個 subtests。
+驗證基線由 `tests/test_action_behavior.py` 覆蓋 v0.7 static DAG 編譯、v0.1–v0.6 相容、unknown/self/cycle/unreachable 拒絕、長短路徑與 due 收斂、priority／fallback／condition／child fail-closed、sticky branch selection、primitive whitelist／禁止遞迴、retry recovery／exhaustion、Snapshot v0.6／v0.1–v0.5 migration、route-aware Replay 與 transaction rollback、Studio redaction，以及 lifecycle EventIR 驅動 scoped StateIR；MCP scheduled receipt另有整合測試。完整測試為 333/333，另有 64 個 subtests。

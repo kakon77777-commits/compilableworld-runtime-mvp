@@ -23,11 +23,13 @@ if TYPE_CHECKING:
 STATE_MACHINE_FORMAT_V1 = "compilableworld.state-machines/v0.1"
 STATE_MACHINE_FORMAT_V2 = "compilableworld.state-machines/v0.2"
 STATE_MACHINE_FORMAT_V3 = "compilableworld.state-machines/v0.3"
-STATE_MACHINE_FORMAT = "compilableworld.state-machines/v0.4"
+STATE_MACHINE_FORMAT_V4 = "compilableworld.state-machines/v0.4"
+STATE_MACHINE_FORMAT = "compilableworld.state-machines/v0.5"
 STATE_MACHINE_SCHEMA_ID_V1 = "compilableworld.schema/state-machines/v0.1"
 STATE_MACHINE_SCHEMA_ID_V2 = "compilableworld.schema/state-machines/v0.2"
 STATE_MACHINE_SCHEMA_ID_V3 = "compilableworld.schema/state-machines/v0.3"
-STATE_MACHINE_SCHEMA_ID = "compilableworld.schema/state-machines/v0.4"
+STATE_MACHINE_SCHEMA_ID_V4 = "compilableworld.schema/state-machines/v0.4"
+STATE_MACHINE_SCHEMA_ID = "compilableworld.schema/state-machines/v0.5"
 STATE_MACHINE_EVENT_MATCH_LIMIT = 16
 STATE_MACHINE_DEFINITION_LIMIT = 1024
 STATE_MACHINE_STATE_LIMIT = 256
@@ -35,6 +37,7 @@ STATE_MACHINE_TRANSITION_LIMIT = 4096
 STATE_MACHINE_CONDITION_LIMIT = 16
 STATE_MACHINE_TIMER_TICK_LIMIT = 1_000_000
 STATE_MACHINE_REACTION_DEPTH_LIMIT = 64
+STATE_MACHINE_HIERARCHY_DEPTH_LIMIT = 16
 STATE_MACHINE_REQUIREMENT_LIMIT = 32
 STATE_MACHINE_PRIORITY_LIMIT = 1_000_000
 STATE_MACHINE_REWARD_CURRENCY_LIMIT = 1_000_000_000
@@ -113,18 +116,155 @@ STATE_MACHINE_TRIGGER_EVENT_FIELDS: dict[str, set[str]] = {
     "quest.completed": {"quest_id", "title", "transition_id", "from", "to", "trigger"},
     "quest.failed": {"quest_id", "title", "transition_id", "from", "to", "trigger"},
     "fsm.completed": {
-        "state_machine_id", "title", "owner_scope", "owner_id", "transition_id", "from", "to", "trigger",
+        "state_machine_id", "title", "owner_scope", "owner_id", "transition_id",
+        "from", "to", "from_leaf", "to_leaf", "trigger",
     },
     "fsm.failed": {
-        "state_machine_id", "title", "owner_scope", "owner_id", "transition_id", "from", "to", "trigger",
+        "state_machine_id", "title", "owner_scope", "owner_id", "transition_id",
+        "from", "to", "from_leaf", "to_leaf", "trigger",
     },
     "fsm.transitioned": {
-        "state_machine_id", "title", "owner_scope", "owner_id", "transition_id", "from", "to", "trigger",
+        "state_machine_id", "title", "owner_scope", "owner_id", "transition_id",
+        "from", "to", "from_leaf", "to_leaf", "trigger",
     },
 }
 
 STATE_MACHINE_OWNER_SCOPES = {"world", "region", "scene", "entity", "system"}
 STATE_MACHINE_VISIBILITIES = {"public", "observable", "inferred", "private", "system_only"}
+
+
+def _state_machine_hierarchy_maps(
+    machine: Any,
+) -> tuple[dict[str, str], dict[str, str]] | None:
+    """Parse a flat legacy machine or a structurally complete hierarchy."""
+    if not isinstance(machine, dict):
+        return None
+    states = machine.get("states")
+    if (
+        not isinstance(states, list)
+        or any(not isinstance(state, str) or not state for state in states)
+        or len(states) != len(set(states))
+    ):
+        return None
+    hierarchy = machine.get("hierarchy")
+    if hierarchy is None:
+        return {}, {}
+    if not isinstance(hierarchy, dict) or set(hierarchy) != {
+        "parent_by_state", "initial_child_by_state",
+    }:
+        return None
+    parents = hierarchy.get("parent_by_state")
+    initial_children = hierarchy.get("initial_child_by_state")
+    if not isinstance(parents, dict) or not isinstance(initial_children, dict):
+        return None
+    state_set = set(states)
+    if any(
+        not isinstance(child, str)
+        or not isinstance(parent, str)
+        or child not in state_set
+        or parent not in state_set
+        or child == parent
+        for child, parent in parents.items()
+    ):
+        return None
+    compounds = set(parents.values())
+    if set(initial_children) != compounds or any(
+        not isinstance(parent, str)
+        or not isinstance(child, str)
+        or child not in state_set
+        or parents.get(child) != parent
+        for parent, child in initial_children.items()
+    ):
+        return None
+    return dict(parents), dict(initial_children)
+
+
+def state_machine_parent_by_state(machine: Any) -> dict[str, str]:
+    """Return a defensive copy of the compiled direct-parent mapping."""
+    maps = _state_machine_hierarchy_maps(machine)
+    return dict(maps[0]) if maps is not None else {}
+
+
+def state_machine_initial_child_by_state(machine: Any) -> dict[str, str]:
+    """Return a defensive copy of deterministic compound entry targets."""
+    maps = _state_machine_hierarchy_maps(machine)
+    return dict(maps[1]) if maps is not None else {}
+
+
+def state_machine_lineage(machine: Any, state: Any) -> tuple[str, ...]:
+    """Return ``state -> ... -> root`` or an empty tuple for malformed input."""
+    states = machine.get("states") if isinstance(machine, dict) else None
+    if (
+        not isinstance(state, str)
+        or not isinstance(states, list)
+        or state not in states
+    ):
+        return ()
+    maps = _state_machine_hierarchy_maps(machine)
+    if maps is None:
+        return ()
+    parents = maps[0]
+    lineage: list[str] = []
+    seen: set[str] = set()
+    current = state
+    for _ in range(STATE_MACHINE_HIERARCHY_DEPTH_LIMIT + 1):
+        if current in seen or current not in states:
+            return ()
+        lineage.append(current)
+        seen.add(current)
+        parent = parents.get(current)
+        if parent is None:
+            return tuple(lineage)
+        current = parent
+    return ()
+
+
+def state_machine_state_path(machine: Any, state: Any) -> tuple[str, ...]:
+    """Return the root-to-state path used by read-only Studio projections."""
+    lineage = state_machine_lineage(machine, state)
+    return tuple(reversed(lineage)) if lineage else ()
+
+
+def state_machine_state_matches(machine: Any, source: Any, active_leaf: Any) -> bool:
+    """Whether an authored source state contains the current active leaf."""
+    return isinstance(source, str) and source in state_machine_lineage(machine, active_leaf)
+
+
+def state_machine_is_active_leaf(machine: Any, state: Any) -> bool:
+    """Fail closed unless ``state`` is a declared leaf in the compiled tree."""
+    maps = _state_machine_hierarchy_maps(machine)
+    if maps is None:
+        return False
+    parents, initial_children = maps
+    return bool(
+        state_machine_lineage(machine, state)
+        and state not in initial_children
+        and state not in set(parents.values())
+    )
+
+
+def state_machine_resolve_leaf(machine: Any, target: Any) -> str | None:
+    """Resolve a leaf or compound target through bounded initial-child entry."""
+    states = machine.get("states") if isinstance(machine, dict) else None
+    if not isinstance(target, str) or not isinstance(states, list) or target not in states:
+        return None
+    maps = _state_machine_hierarchy_maps(machine)
+    if maps is None:
+        return None
+    parents, initial_children = maps
+    seen: set[str] = set()
+    current = target
+    for _ in range(STATE_MACHINE_HIERARCHY_DEPTH_LIMIT + 1):
+        if current in seen or current not in states:
+            return None
+        seen.add(current)
+        child = initial_children.get(current)
+        if child is None:
+            return current if state_machine_lineage(machine, current) else None
+        if parents.get(child) != current:
+            return None
+        current = child
+    return None
 
 
 def resolve_state_machine_actor(runtime: "WorldRuntime", event: "EventIR") -> str | None:
@@ -256,6 +396,8 @@ __all__ = [
     "STATE_MACHINE_FORMAT_V1",
     "STATE_MACHINE_FORMAT_V2",
     "STATE_MACHINE_FORMAT_V3",
+    "STATE_MACHINE_FORMAT_V4",
+    "STATE_MACHINE_HIERARCHY_DEPTH_LIMIT",
     "STATE_MACHINE_OWNER_SCOPES",
     "STATE_MACHINE_PRIORITY_LIMIT",
     "STATE_MACHINE_REQUIREMENT_LIMIT",
@@ -264,6 +406,7 @@ __all__ = [
     "STATE_MACHINE_SCHEMA_ID_V1",
     "STATE_MACHINE_SCHEMA_ID_V2",
     "STATE_MACHINE_SCHEMA_ID_V3",
+    "STATE_MACHINE_SCHEMA_ID_V4",
     "STATE_MACHINE_STATE_LIMIT",
     "STATE_MACHINE_TRANSITION_LIMIT",
     "STATE_MACHINE_TIMER_TICK_LIMIT",
@@ -272,4 +415,11 @@ __all__ = [
     "STATE_MACHINE_VISIBILITIES",
     "resolve_state_machine_actor",
     "state_machine_condition_matches",
+    "state_machine_initial_child_by_state",
+    "state_machine_is_active_leaf",
+    "state_machine_lineage",
+    "state_machine_parent_by_state",
+    "state_machine_resolve_leaf",
+    "state_machine_state_matches",
+    "state_machine_state_path",
 ]

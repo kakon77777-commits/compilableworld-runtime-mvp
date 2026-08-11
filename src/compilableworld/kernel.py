@@ -34,6 +34,11 @@ from .models import (
 )
 from .functions import FunctionRegistry
 from .player_generation import GeneratedPlayer, actor_id_for_player, template_records
+from .state_machine import (
+    state_machine_is_active_leaf,
+    state_machine_resolve_leaf,
+    state_machine_state_matches,
+)
 
 
 class RuntimeErrorBase(RuntimeError):
@@ -2645,6 +2650,19 @@ class WorldRuntime:
             "state_machine_id", "title", "owner_scope", "owner_id",
             "transition_id", "from", "to", "trigger",
         }
+        leaf_fields = {"from_leaf", "to_leaf"}
+        hierarchical_payload = (
+            isinstance(machine, dict)
+            and "initial_leaf" in machine
+            and "hierarchy" in machine
+        )
+        if hierarchical_payload:
+            required_fields.update(leaf_fields)
+        payload_has_leaf = leaf_fields.issubset(payload)
+        payload_fields_valid = set(payload) == required_fields or (
+            not hierarchical_payload
+            and set(payload) == required_fields | leaf_fields
+        )
         expected_visibility = None
         expected_target = None
         if isinstance(machine, dict):
@@ -2662,14 +2680,17 @@ class WorldRuntime:
             if isinstance(transition, dict) else None
         )
         terminal_type = (
-            f"fsm.{transition.get('to')}"
-            if isinstance(transition, dict) and transition.get("to") in {"completed", "failed"}
+            f"fsm.{state_machine_resolve_leaf(machine, transition.get('to'))}"
+            if isinstance(machine, dict)
+            and isinstance(transition, dict)
+            and state_machine_resolve_leaf(machine, transition.get("to"))
+            in {"completed", "failed"}
             else None
         )
         if (
             event.source != "state_machine.core"
             or event.authority != "runtime"
-            or set(payload) != required_fields
+            or not payload_fields_valid
             or not isinstance(machine, dict)
             or not isinstance(transition, dict)
             or payload.get("title") != machine.get("title")
@@ -2677,6 +2698,17 @@ class WorldRuntime:
             or payload.get("owner_id") != machine.get("owner_id")
             or payload.get("from") != transition.get("from")
             or payload.get("to") != transition.get("to")
+            or (
+                payload_has_leaf
+                and (
+                    not state_machine_is_active_leaf(machine, payload.get("from_leaf"))
+                    or not state_machine_state_matches(
+                        machine, transition.get("from"), payload.get("from_leaf"),
+                    )
+                    or payload.get("to_leaf")
+                    != state_machine_resolve_leaf(machine, transition.get("to"))
+                )
+            )
             or payload.get("trigger") != expected_trigger
             or event.visibility != expected_visibility
             or event.target != expected_target
@@ -2724,6 +2756,16 @@ class WorldRuntime:
                 entered_tick = payload.get("entered_tick")
                 eligible_at_tick = payload.get("eligible_at_tick")
                 fired_at_tick = payload.get("fired_at_tick")
+                timer_leaf_fields = {"from_leaf", "to_leaf"}
+                timer_payload_has_leaf = timer_leaf_fields.issubset(payload)
+                timer_payload_has_partial_leaf = bool(
+                    timer_leaf_fields.intersection(payload)
+                ) and not timer_payload_has_leaf
+                timer_requires_leaf = (
+                    isinstance(machine, dict)
+                    and "initial_leaf" in machine
+                    and "hierarchy" in machine
+                )
                 if (
                     event.source != "state_machine.core"
                     or not isinstance(machine_id, str)
@@ -2748,6 +2790,24 @@ class WorldRuntime:
                     or payload.get("title") != machine.get("title")
                     or payload.get("from") != transition.get("from")
                     or payload.get("to") != transition.get("to")
+                    or timer_payload_has_partial_leaf
+                    or (timer_requires_leaf and not timer_payload_has_leaf)
+                    or (
+                        timer_payload_has_leaf
+                        and (
+                            not state_machine_is_active_leaf(
+                                machine, payload.get("from_leaf"),
+                            )
+                            or not state_machine_state_matches(
+                                machine, transition.get("from"),
+                                payload.get("from_leaf"),
+                            )
+                            or payload.get("to_leaf")
+                            != state_machine_resolve_leaf(
+                                machine, transition.get("to"),
+                            )
+                        )
+                    )
                     or payload.get("trigger") != "fsm.timer_elapsed"
                     or event.causation_id is not None
                     or event.correlation_id != event.event_id

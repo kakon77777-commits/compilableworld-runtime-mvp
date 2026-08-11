@@ -8,10 +8,10 @@
 | Item | Value |
 |---|---|
 | Local integrated runtime | `0.1.1` |
-| Verified tests | `329/329`, plus `58` subtests |
+| Verified tests | `333/333`, plus `64` subtests |
 | GitHub `master` observed head | `70141f3` (verified 2026-08-11) |
-| Current development branch | `agent/stateir-v04-bounded-chaining` |
-| Remote synchronization status | M12 and Action routing v0.7 are merged; StateIR v0.2 and future-architecture notes remain on draft PR #4; StateIR v0.3 timer and v0.4 bounded chaining work are completed locally and intentionally unpushed |
+| Current development branch | `agent/stateir-v05-bounded-hierarchy` |
+| Remote synchronization status | M12 and Action routing v0.7 are merged; StateIR v0.2 and future-architecture notes remain on draft PR #4; StateIR v0.3 timer, v0.4 bounded chaining and v0.5 bounded hierarchy work are completed locally and intentionally unpushed |
 | Intended next release baseline | `v0.2.0-alpha.1` or equivalent |
 
 ## Current integrated local state
@@ -449,4 +449,38 @@ out_of_scope:
   - arbitrary effects, scripts, free guards and implicit geographic routing
   - treating a cascade halt as a successful normal transition branch
   - distributed EventBus delivery or cross-process exactly-once semantics
+```
+
+### CW-M12-STATEIR-013 — Bounded single-active-leaf hierarchy
+
+```yaml
+owner_environment: codex
+status: completed-locally
+outputs:
+  - schemas/state-machines.v0.5.schema.json
+  - v0.1 through v0.4 source compatibility paths
+  - direct child-to-parent and compound-to-initial-child maps
+  - deterministic compound target and initial-state leaf resolution
+  - priority-then-specificity ancestor transition selection
+  - authored from/to plus actual from_leaf/to_leaf lifecycle provenance
+  - Replay validation and Studio initial/current/source/target path projection
+  - Gray Crown nominal-to-incident-to-breached compound entry slice
+  - tests/test_scoped_state_machine.py and tests/test_schemas.py
+acceptance:
+  - Runtime StateStore retains exactly one authoritative active leaf per machine
+  - every compound state declares exactly one direct initial child
+  - hierarchy cycles, unknown edges and depth beyond 16 fail compilation
+  - timer transitions originate only from active leaves
+  - same-priority leaf transitions override matching ancestor transitions
+  - transition targets resolve deterministically before StateDelta commit
+  - lifecycle EventIR and Replay distinguish authored targets from resolved leaves
+  - v0.1 through v0.4 sources compile into explicit empty hierarchy metadata
+  - AI, Studio, player and MCP still have no direct StateStore write path
+  - 333/333 tests and 64 subtests pass
+out_of_scope:
+  - parallel regions or multiple active leaves
+  - history state or shallow/deep history restoration
+  - arbitrary entry/exit effects and runtime hierarchy mutation
+  - ancestor-authored internal resets that can become child-dependent no-ops
+  - compound-state timers with independent ancestor entry clocks
 ```

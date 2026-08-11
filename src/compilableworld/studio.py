@@ -15,6 +15,7 @@ from typing import TYPE_CHECKING, Any
 
 from .functions import FunctionRegistryError
 from .schema_registry import SCHEMA_CATALOG_FORMAT, schema_catalog as authoring_schema_catalog
+from .state_machine import state_machine_resolve_leaf, state_machine_state_path
 
 if TYPE_CHECKING:
     from .kernel import WorldRuntime
@@ -172,6 +173,13 @@ def _scoped_state_machine_overview(machine: Any, index: int) -> dict[str, Any]:
         "owner_id": machine.get("owner_id"),
         "states": list(machine.get("states", [])) if isinstance(machine.get("states"), list) else [],
         "initial_state": machine.get("initial_state"),
+        "initial_leaf": machine.get("initial_leaf", machine.get("initial_state")),
+        "initial_path": list(state_machine_state_path(
+            machine, machine.get("initial_leaf", machine.get("initial_state")),
+        )),
+        "hierarchy": deepcopy(machine.get("hierarchy", {
+            "parent_by_state": {}, "initial_child_by_state": {},
+        })),
         "persistence": machine.get("persistence"),
         "visibility": machine.get("visibility"),
         "authority": machine.get("authority"),
@@ -184,6 +192,12 @@ def _scoped_state_machine_overview(machine: Any, index: int) -> dict[str, Any]:
                 "on": transition.get("on"),
                 "after_ticks": transition.get("after_ticks"),
                 "to": transition.get("to"),
+                "resolved_to_leaf": state_machine_resolve_leaf(
+                    machine, transition.get("to"),
+                ),
+                "from_path": list(state_machine_state_path(
+                    machine, transition.get("from"),
+                )),
                 "event_match": dict(transition.get("event_match", {})),
                 "when": [
                     dict(condition)
@@ -432,9 +446,13 @@ def runtime_overview(runtime: "WorldRuntime") -> dict[str, Any]:
         machine_id = machine.get("state_machine_id")
         if isinstance(owner_id, str) and isinstance(machine_id, str):
             current_state = runtime.state.get(
-                owner_id, "fsm", machine_id, machine.get("initial_state"),
+                owner_id, "fsm", machine_id,
+                machine.get("initial_leaf", machine.get("initial_state")),
             )
             machine["current_state"] = current_state
+            machine["current_path"] = list(
+                state_machine_state_path(machine, current_state)
+            )
             machine["state_version"] = runtime.state.version(owner_id, "fsm", machine_id)
             entered_tick = runtime.state.get(owner_id, "fsm_runtime", machine_id)
             machine["entered_tick"] = (
