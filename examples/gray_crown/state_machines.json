@@ -1,5 +1,5 @@
 {
-  "format": "compilableworld.state-machines/v0.1",
+  "format": "compilableworld.state-machines/v0.2",
   "state_machines": [
     {
       "state_machine_id": "fsm.world.vault_seal",
@@ -18,6 +18,32 @@
           "on": "door.unlocked",
           "to": "completed",
           "event_match": {"door": "door.old_vault"},
+          "when": [
+            {
+              "condition_id": "world_is_stable",
+              "subject": "owner",
+              "namespace": "fsm",
+              "key": "state",
+              "operator": "equals",
+              "value": "stable"
+            },
+            {
+              "condition_id": "unlocking_actor_is_alive",
+              "subject": "actor",
+              "namespace": "status",
+              "key": "alive",
+              "operator": "equals",
+              "value": true
+            },
+            {
+              "condition_id": "unlocking_actor_currency_is_valid",
+              "subject": "actor",
+              "namespace": "wallet",
+              "key": "currency",
+              "operator": "greater_or_equal",
+              "value": 0
+            }
+          ],
           "priority": 100
         }
       ]
@@ -39,6 +65,7 @@
           "on": "fsm.completed",
           "to": "alerted",
           "event_match": {"state_machine_id": "fsm.world.vault_seal"},
+          "when": [],
           "priority": 50
         }
       ]
@@ -60,6 +87,7 @@
           "on": "door.unlocked",
           "to": "open",
           "event_match": {"door": "door.old_vault"},
+          "when": [],
           "priority": 50
         }
       ]
@@ -81,6 +109,7 @@
           "on": "door.unlocked",
           "to": "alerted",
           "event_match": {"door": "door.old_vault"},
+          "when": [],
           "priority": 25
         }
       ]
@@ -102,6 +131,7 @@
           "on": "door.unlocked",
           "to": "breached",
           "event_match": {"door": "door.old_vault"},
+          "when": [],
           "priority": 100
         }
       ]

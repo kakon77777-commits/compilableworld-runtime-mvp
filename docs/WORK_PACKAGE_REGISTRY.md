@@ -1,17 +1,17 @@
 # CompilableWorld Active Work Package Registry
 
 - **Registry version:** v0.1
-- **Updated:** 2026-08-10
+- **Updated:** 2026-08-11
 
 ## Baseline status
 
 | Item | Value |
 |---|---|
 | Local integrated runtime | `0.1.1` |
-| Verified tests | `316/316` |
-| GitHub `master` observed head | `72334d7` (verified 2026-08-09) |
-| GitHub integration branch before static-routing package | `agent/m12-runtime-mcp-integration` at `61f4273` |
-| Remote synchronization status | Static Action routing v0.7 is the current integration-branch package |
+| Verified tests | `320/320`, plus `46` subtests |
+| GitHub `master` observed head | `70141f3` (verified 2026-08-11) |
+| Current development branch | `agent/stateir-v02-bounded-conditions` |
+| Remote synchronization status | M12 and Action routing v0.7 are merged; StateIR v0.2 is completed locally and not yet published |
 | Intended next release baseline | `v0.2.0-alpha.1` or equivalent |
 
 ## Current integrated local state
@@ -348,5 +348,37 @@ out_of_scope:
   - parallel child execution and synchronizing join
   - loop, history, pause/resume and compensation transactions
   - Studio visual behavior authoring/direct write-back
+  - AI direct StateStore writes
+```
+
+### CW-M12-STATEIR-010 — Bounded owner/actor StateIR conditions
+
+```yaml
+owner_environment: codex
+status: completed-locally
+outputs:
+  - schemas/state-machines.v0.2.schema.json
+  - v0.1 authoring compatibility and explicit source-schema negotiation
+  - compiler-normalized bounded transition when conditions
+  - fail-closed owner/verified-actor StateStore condition evaluator
+  - strict scalar comparison and deterministic priority fallback
+  - Gray Crown owner/actor/numeric AND-condition vertical slice
+  - Studio read-only condition projection
+  - tests/test_scoped_state_machine.py
+acceptance:
+  - each v0.2 transition explicitly declares zero to sixteen AND conditions
+  - condition IDs are machine-unique and all fields use bounded allowlists
+  - actor reads require a verified EventIR causation chain
+  - missing state, unknown provenance, invalid type and non-finite values return false
+  - boolean values are not coerced to zero or one
+  - only condition-matching candidates participate in priority selection
+  - StateIR can still write only its own owner::fsm::<machine_id> cell
+  - Snapshot format is unchanged and Replay still applies committed StateDelta
+  - 320/320 tests and 46 subtests pass
+out_of_scope:
+  - OR/NOT groups and free-form expressions
+  - arbitrary StateStore paths, effects or rewards
+  - implicit geographic event routing
+  - timers, history states, parallel regions and synchronizing joins
   - AI direct StateStore writes
 ```

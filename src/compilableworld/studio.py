@@ -183,6 +183,11 @@ def _scoped_state_machine_overview(machine: Any, index: int) -> dict[str, Any]:
                 "on": transition.get("on"),
                 "to": transition.get("to"),
                 "event_match": dict(transition.get("event_match", {})),
+                "when": [
+                    dict(condition)
+                    for condition in transition.get("when", [])
+                    if isinstance(condition, dict)
+                ],
                 "priority": transition.get("priority", 0),
             }
             for transition in transitions if isinstance(transition, dict)

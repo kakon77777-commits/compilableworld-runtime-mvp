@@ -61,7 +61,7 @@
         "action_behaviors": { "const": "compilableworld.schema/action-behaviors/v0.7" },
         "functions": { "const": "compilableworld.schema/functions/v0.1" },
         "scenarios": { "const": "compilableworld.schema/scenarios/v0.1" },
-        "state_machines": { "const": "compilableworld.schema/state-machines/v0.1" },
+        "state_machines": { "const": "compilableworld.schema/state-machines/v0.2" },
         "runtime_package": { "const": "compilableworld.schema/runtime-package/v0.1" },
         "rooms": { "const": "compilableworld.schema/csv/rooms/v0.1" },
         "exits": { "const": "compilableworld.schema/csv/exits/v0.1" },
@@ -112,7 +112,12 @@
             "items": { "const": "compilableworld.schema/csv/items/v0.1" },
             "functions": { "const": "compilableworld.schema/functions/v0.1" },
             "scenarios": { "const": "compilableworld.schema/scenarios/v0.1" },
-            "state_machines": { "const": "compilableworld.schema/state-machines/v0.1" }
+            "state_machines": {
+              "enum": [
+                "compilableworld.schema/state-machines/v0.1",
+                "compilableworld.schema/state-machines/v0.2"
+              ]
+            }
           }
         },
         "modules": {
@@ -312,7 +317,7 @@
     "stateMachineTransition": {
       "type": "object",
       "additionalProperties": false,
-      "required": ["transition_id", "from", "on", "to", "event_match", "priority"],
+      "required": ["transition_id", "from", "on", "to", "event_match", "when", "priority"],
       "properties": {
         "transition_id": { "$ref": "#/$defs/id" },
         "from": { "$ref": "#/$defs/id" },
@@ -324,7 +329,35 @@
           "propertyNames": { "pattern": "^[A-Za-z_][A-Za-z0-9_.-]*$" },
           "additionalProperties": { "type": ["string", "number", "boolean", "null"] }
         },
+        "when": {
+          "type": "array",
+          "maxItems": 16,
+          "items": { "$ref": "#/$defs/stateMachineCondition" }
+        },
         "priority": { "type": "integer", "minimum": 0, "maximum": 1000000 }
+      }
+    },
+    "stateMachineCondition": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["condition_id", "subject", "namespace", "key", "operator", "value"],
+      "properties": {
+        "condition_id": { "$ref": "#/$defs/id" },
+        "subject": { "enum": ["owner", "actor"] },
+        "namespace": {
+          "enum": [
+            "combat", "door", "exploration", "fsm", "health", "inventory",
+            "magic", "position", "quest", "status", "wallet"
+          ]
+        },
+        "key": { "$ref": "#/$defs/id" },
+        "operator": {
+          "enum": [
+            "equals", "not_equals", "less_than", "less_or_equal",
+            "greater_than", "greater_or_equal"
+          ]
+        },
+        "value": { "type": ["string", "number", "boolean", "null"] }
       }
     },
     "stateMachine": {

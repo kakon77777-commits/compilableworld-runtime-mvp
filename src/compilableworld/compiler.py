@@ -48,12 +48,20 @@ from .functions import FunctionDefinitionError, FunctionRegistry, validate_funct
 from .player_generation import template_records
 from .schema_registry import SchemaContractError, csv_schema_columns, schema_contracts
 from .state_machine import (
+    STATE_MACHINE_CONDITION_LIMIT,
+    STATE_MACHINE_CONDITION_NAMESPACES,
+    STATE_MACHINE_CONDITION_OPERATORS,
+    STATE_MACHINE_CONDITION_SUBJECTS,
     STATE_MACHINE_DEFINITION_LIMIT,
     STATE_MACHINE_EVENT_MATCH_LIMIT,
+    STATE_MACHINE_FORMAT,
+    STATE_MACHINE_FORMAT_V1,
     STATE_MACHINE_OWNER_SCOPES,
     STATE_MACHINE_PRIORITY_LIMIT,
     STATE_MACHINE_REQUIREMENT_LIMIT,
     STATE_MACHINE_REWARD_CURRENCY_LIMIT,
+    STATE_MACHINE_SCHEMA_ID,
+    STATE_MACHINE_SCHEMA_ID_V1,
     STATE_MACHINE_STATE_LIMIT,
     STATE_MACHINE_TRANSITION_LIMIT,
     STATE_MACHINE_TRIGGER_EVENT_FIELDS,
@@ -209,7 +217,7 @@ def compile_world(
     functions = _load_json(resolved["functions"]) if "functions" in resolved else {"functions": []}
     state_machines_source = (
         _load_json(resolved["state_machines"])
-        if "state_machines" in resolved else {"format": "compilableworld.state-machines/v0.1", "state_machines": []}
+        if "state_machines" in resolved else {"format": STATE_MACHINE_FORMAT, "state_machines": []}
     )
     action_behaviors_source = (
         _load_json(resolved["action_behaviors"])
@@ -290,10 +298,16 @@ def compile_world(
         ACTION_BEHAVIOR_FORMAT_V6: ACTION_BEHAVIOR_SCHEMA_ID_V6,
         ACTION_BEHAVIOR_FORMAT: ACTION_BEHAVIOR_SCHEMA_ID,
     }.get(action_behaviors_source.get("format") if isinstance(action_behaviors_source, dict) else None)
+    state_machine_schema_id = {
+        STATE_MACHINE_FORMAT_V1: STATE_MACHINE_SCHEMA_ID_V1,
+        STATE_MACHINE_FORMAT: STATE_MACHINE_SCHEMA_ID,
+    }.get(state_machines_source.get("format") if isinstance(state_machines_source, dict) else None)
     for source_key, declared_schema_id in declared_source_schemas.items():
         expected_schema_id = (
             action_behavior_schema_id
             if source_key == "action_behaviors" and action_behavior_schema_id is not None
+            else state_machine_schema_id
+            if source_key == "state_machines" and state_machine_schema_id is not None
             else contract_ids[source_key]
         )
         if declared_schema_id != expected_schema_id:
@@ -312,6 +326,8 @@ def compile_world(
     }
     if "action_behaviors" in sources and action_behavior_schema_id is not None:
         source_schema_ids["action_behaviors"] = action_behavior_schema_id
+    if "state_machines" in sources and state_machine_schema_id is not None:
+        source_schema_ids["state_machines"] = state_machine_schema_id
 
     for row in exits:
         if row["from_room"] not in room_ids or row["to_room"] not in room_ids:
@@ -1218,16 +1234,18 @@ def _validate_scoped_state_machines(
     """Validate versioned World/Region/Scene/Entity/System StateIR.
 
     These machines are intentionally narrower than quests: a transition may
-    select a bounded EventIR payload and priority, but it has no free-form
-    guard, reward, arbitrary effect, or direct StateStore path.  Its only
-    effect is changing its own ``owner::fsm::state_machine_id`` cell.
+    select a bounded EventIR payload, owner/actor StateStore conditions, and
+    priority, but it has no free-form guard, reward, arbitrary effect, or
+    direct StateStore path. Its only effect is changing its own
+    ``owner::fsm::state_machine_id`` cell.
     """
     if not isinstance(source, dict):
         raise CompileError("state_machines.json 必須是物件")
     unknown_root = set(source) - {"format", "state_machines"}
     if unknown_root:
         raise CompileError(f"state_machines.json 含未知欄位: {sorted(unknown_root)}")
-    if source.get("format") != "compilableworld.state-machines/v0.1":
+    source_format = source.get("format")
+    if source_format not in {STATE_MACHINE_FORMAT_V1, STATE_MACHINE_FORMAT}:
         raise CompileError("state_machines.json format 不支援")
     machines = source.get("state_machines")
     if not isinstance(machines, list):
@@ -1305,6 +1323,7 @@ def _validate_scoped_state_machines(
 
         transitions = _validate_scoped_transitions(
             machine["transitions"], label, states=set(states), initial_state=initial_state,
+            allow_conditions=source_format == STATE_MACHINE_FORMAT,
         )
         normalized.append({
             "state_machine_id": machine_id,
@@ -1358,6 +1377,7 @@ def _validate_scoped_transitions(
     *,
     states: set[str],
     initial_state: str,
+    allow_conditions: bool,
 ) -> list[dict[str, Any]]:
     if (
         not isinstance(transitions, list)
@@ -1370,7 +1390,12 @@ def _validate_scoped_transitions(
     transition_ids: set[str] = set()
     dispatches: set[tuple[str, str, int]] = set()
     allowed = {"transition_id", "from", "on", "to", "event_match", "priority"}
+    if allow_conditions:
+        allowed.add("when")
     required = {"transition_id", "from", "on", "to"}
+    if allow_conditions:
+        required.add("when")
+    condition_ids: set[str] = set()
     for index, transition in enumerate(transitions):
         transition_label = f"{label}.transitions[{index}]"
         if not isinstance(transition, dict):
@@ -1427,12 +1452,72 @@ def _validate_scoped_transitions(
             )
         if any(not _json_scalar(value) for value in event_match.values()):
             raise CompileError(f"{transition_label}.event_match 值必須是 finite JSON 純量")
+        raw_when = transition.get("when", [])
+        if (
+            not isinstance(raw_when, list)
+            or len(raw_when) > STATE_MACHINE_CONDITION_LIMIT
+        ):
+            raise CompileError(
+                f"{transition_label}.when 必須是最多 {STATE_MACHINE_CONDITION_LIMIT} 個條件"
+            )
+        normalized_when: list[dict[str, Any]] = []
+        condition_fields = {
+            "condition_id", "subject", "namespace", "key", "operator", "value",
+        }
+        for condition_index, condition in enumerate(raw_when):
+            condition_label = f"{transition_label}.when[{condition_index}]"
+            if not isinstance(condition, dict):
+                raise CompileError(f"{condition_label} 必須是物件")
+            unknown_condition = set(condition) - condition_fields
+            missing_condition = condition_fields - set(condition)
+            if unknown_condition:
+                raise CompileError(
+                    f"{condition_label} 含未知欄位: {sorted(unknown_condition)}"
+                )
+            if missing_condition:
+                raise CompileError(
+                    f"{condition_label} 缺少必填欄位: {sorted(missing_condition)}"
+                )
+            condition_id = condition["condition_id"]
+            subject = condition["subject"]
+            namespace = condition["namespace"]
+            key = condition["key"]
+            operator = condition["operator"]
+            expected = condition["value"]
+            if not isinstance(condition_id, str) or not ID_RE.match(condition_id):
+                raise CompileError(f"{condition_label}.condition_id 不合法")
+            if condition_id in condition_ids:
+                raise CompileError(f"{label} 含重複 condition_id: {condition_id}")
+            condition_ids.add(condition_id)
+            if subject not in STATE_MACHINE_CONDITION_SUBJECTS:
+                raise CompileError(f"{condition_label}.subject 不支援")
+            if namespace not in STATE_MACHINE_CONDITION_NAMESPACES:
+                raise CompileError(f"{condition_label}.namespace 不支援")
+            if not isinstance(key, str) or not ID_RE.match(key):
+                raise CompileError(f"{condition_label}.key 不合法")
+            if operator not in STATE_MACHINE_CONDITION_OPERATORS:
+                raise CompileError(f"{condition_label}.operator 不支援")
+            if not _json_scalar(expected):
+                raise CompileError(f"{condition_label}.value 必須是 finite JSON 純量")
+            if operator not in {"equals", "not_equals"} and (
+                isinstance(expected, bool) or not isinstance(expected, (int, float))
+            ):
+                raise CompileError(f"{condition_label}.value 數值比較必須使用 number")
+            normalized_when.append({
+                "condition_id": condition_id,
+                "subject": subject,
+                "namespace": namespace,
+                "key": key,
+                "operator": operator,
+                "value": expected,
+            })
         normalized.append({
             "transition_id": transition_id,
             "from": from_state,
             "on": event_type,
             "to": to_state,
             "event_match": dict(event_match),
+            "when": normalized_when,
             "priority": priority,
         })
 

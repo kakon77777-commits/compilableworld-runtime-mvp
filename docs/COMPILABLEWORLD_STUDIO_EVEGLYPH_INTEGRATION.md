@@ -35,14 +35,14 @@ EveGlyph 的 Runtime 面板使用兩個唯讀端點：`GET /api/studio/functions
 
 ## Authoring Schema catalog
 
-正式主線現在把交換邊界外化成 [`schemas/`](../schemas/) 下十八個 current contract；Action behavior 同時保留 v0.1–v0.7：
+正式主線現在把交換邊界外化成 [`schemas/`](../schemas/) 下二十份 schema；catalog 暴露十一個 current authoring/runtime contract，Action behavior 同時保留 v0.1–v0.7，StateIR 保留 v0.1：
 
 - `functions.v0.1.schema.json`：FunctionIR 純數值公式來源。
 - `scenarios.v0.1.schema.json`：ScenarioIR Given／When／Then 來源。
 - `runtime-package.v0.1.schema.json`：Compiler 到 Runtime／Studio 的套件契約。
 - `rooms.v0.1.csv.schema.json`、`exits.v0.1.csv.schema.json`：地圖表格欄位契約。
 - `entities.v0.1.csv.schema.json`、`items.v0.1.csv.schema.json`：實體／物品表格欄位契約。
-- `state-machines.v0.1.schema.json`：五種 owner scope 的可執行 StateIR 與 bounded transition 契約。
+- `state-machines.v0.2.schema.json`：五種 owner scope、EventIR 選邊與 bounded owner／actor StateStore AND conditions；`v0.1` 檔案保留為無條件來源相容邊界。
 - `action-behaviors.v0.7.schema.json`：Action-scope static phase DAG、priority conditional route、編譯期 graph closure、單一路徑 route cursor、非遞迴 primitive child Actions、bounded conditions、fixed-interval retry/deadline、完成模組、並行限制與中斷事件契約；`v0.1`–`v0.6` 檔案保留為來源相容邊界。
 - `studio-world-ir.v0.1.schema.json`：EveGlyph YAML 到共用 Studio World IR 的 migration 契約。
 - `studio-mapping.v0.1.schema.json`：人工確認 World IR 到 Runtime 的 room、table、EventIR 與 guard 映射契約。

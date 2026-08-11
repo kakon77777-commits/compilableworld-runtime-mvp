@@ -43,10 +43,17 @@ class ScopedStateMachineTests(unittest.TestCase):
         self.assertEqual(world_machine["owner_id"], "gray_crown_demo")
         self.assertEqual(world_machine["authority"], "state_machine.core")
         self.assertEqual(world_machine["transitions"][0]["event_match"], {"door": "door.old_vault"})
+        self.assertEqual(
+            [condition["condition_id"] for condition in world_machine["transitions"][0]["when"]],
+            [
+                "world_is_stable", "unlocking_actor_is_alive",
+                "unlocking_actor_currency_is_valid",
+            ],
+        )
         self.assertIn("state_machine.core", self.package["manifest"]["modules"])
         self.assertEqual(
             self.package["manifest"]["source_schemas"]["state_machines"],
-            "compilableworld.schema/state-machines/v0.1",
+            "compilableworld.schema/state-machines/v0.2",
         )
 
         cells = {
@@ -117,6 +124,110 @@ class ScopedStateMachineTests(unittest.TestCase):
         self.assertEqual(
             sum(event.event_type.startswith("fsm.") for event in self.runtime.event_log.events),
             transition_count,
+        )
+
+    def test_bounded_owner_condition_blocks_transition_without_blocking_other_scopes(self) -> None:
+        package = json.loads(json.dumps(self.package))
+        world_seed = next(
+            item for item in package["initial_state"]
+            if item["owner"] == "gray_crown_demo"
+            and item["namespace"] == "fsm"
+            and item["key"] == "state"
+        )
+        world_seed["value"] = "unstable"
+        runtime = WorldRuntime(package)
+        install_builtin_modules(runtime)
+
+        unlock_old_vault(runtime)
+
+        self.assertEqual(
+            runtime.state.get("gray_crown_demo", "fsm", "fsm.world.vault_seal"),
+            "sealed",
+        )
+        self.assertEqual(
+            runtime.state.get("region.gray_crown", "fsm", "fsm.region.gray_crown.alert"),
+            "watchful",
+        )
+        self.assertEqual(
+            runtime.state.get("room.vault", "fsm", "fsm.scene.vault.access"),
+            "open",
+        )
+        self.assertFalse(any(
+            event.event_type == "fsm.transitioned"
+            and event.payload.get("state_machine_id") == "fsm.world.vault_seal"
+            for event in runtime.event_log.events
+        ))
+
+    def test_actor_condition_requires_verified_causation_and_strict_scalar_types(self) -> None:
+        for label, mutate in (
+            (
+                "missing_actor",
+                lambda package: None,
+            ),
+            (
+                "boolean_is_not_one",
+                lambda package: package["state_machines"][0]["transitions"][0]["when"][1].update(
+                    {"value": 1}
+                ),
+            ),
+        ):
+            with self.subTest(label=label):
+                package = json.loads(json.dumps(self.package))
+                mutate(package)
+                runtime = WorldRuntime(package)
+                install_builtin_modules(runtime)
+                if label == "missing_actor":
+                    runtime.events.publish(EventIR(
+                        "door.unlocked", "test", {"door": "door.old_vault"},
+                        target="door.old_vault",
+                    ))
+                else:
+                    unlock_old_vault(runtime)
+                self.assertEqual(
+                    runtime.state.get("gray_crown_demo", "fsm", "fsm.world.vault_seal"),
+                    "sealed",
+                )
+
+    def test_highest_priority_transition_is_selected_only_after_conditions_match(self) -> None:
+        with tempfile.TemporaryDirectory() as temp:
+            world = Path(temp) / "world"
+            shutil.copytree(GRAY_CROWN, world)
+            source_path = world / "state_machines.json"
+            source = json.loads(source_path.read_text(encoding="utf-8"))
+            machine = source["state_machines"][0]
+            machine["states"].append("failed")
+            machine["transitions"][0]["when"][0]["value"] = "unstable"
+            machine["transitions"].append({
+                "transition_id": "fsm.world.vault_seal.fail_closed",
+                "from": "sealed",
+                "on": "door.unlocked",
+                "to": "failed",
+                "event_match": {"door": "door.old_vault"},
+                "when": [],
+                "priority": 0,
+            })
+            source_path.write_text(
+                json.dumps(source, ensure_ascii=False, indent=2) + "\n", encoding="utf-8"
+            )
+            runtime = WorldRuntime.from_package(
+                compile_world(world, Path(temp) / "build")
+            )
+            install_builtin_modules(runtime)
+
+            unlock_old_vault(runtime)
+
+        self.assertEqual(
+            runtime.state.get("gray_crown_demo", "fsm", "fsm.world.vault_seal"),
+            "failed",
+        )
+        failed = next(
+            event for event in runtime.event_log.events
+            if event.event_type == "fsm.failed"
+            and event.payload["state_machine_id"] == "fsm.world.vault_seal"
+        )
+        self.assertEqual(
+            failed.payload["transition_id"],
+            "fsm.world.vault_seal.fail_closed",
         )
 
     def test_snapshot_and_replay_preserve_every_scoped_state_cell(self) -> None:
@@ -219,6 +330,29 @@ class ScopedStateMachineTests(unittest.TestCase):
         def missing_module(source: dict, manifest: dict) -> None:
             manifest["modules"].remove("state_machine.core")
 
+        def invalid_condition_subject(source: dict, manifest: dict) -> None:
+            source["state_machines"][0]["transitions"][0]["when"][0]["subject"] = "target"
+
+        def invalid_numeric_condition(source: dict, manifest: dict) -> None:
+            condition = source["state_machines"][0]["transitions"][0]["when"][0]
+            condition["operator"] = "greater_than"
+            condition["value"] = True
+
+        def duplicate_condition_id(source: dict, manifest: dict) -> None:
+            conditions = source["state_machines"][0]["transitions"][0]["when"]
+            conditions[1]["condition_id"] = conditions[0]["condition_id"]
+
+        def legacy_format_with_conditions(source: dict, manifest: dict) -> None:
+            source["format"] = "compilableworld.state-machines/v0.1"
+            manifest["source_schemas"]["state_machines"] = (
+                "compilableworld.schema/state-machines/v0.1"
+            )
+
+        def mismatched_source_schema(source: dict, manifest: dict) -> None:
+            manifest["source_schemas"]["state_machines"] = (
+                "compilableworld.schema/state-machines/v0.1"
+            )
+
         changes = {
             "invalid_scene": invalid_scene,
             "free_effect": free_effect,
@@ -226,6 +360,11 @@ class ScopedStateMachineTests(unittest.TestCase):
             "duplicate_dispatch": duplicate_dispatch,
             "terminal_outgoing": terminal_outgoing,
             "missing_module": missing_module,
+            "invalid_condition_subject": invalid_condition_subject,
+            "invalid_numeric_condition": invalid_numeric_condition,
+            "duplicate_condition_id": duplicate_condition_id,
+            "legacy_format_with_conditions": legacy_format_with_conditions,
+            "mismatched_source_schema": mismatched_source_schema,
         }
         for label, change in changes.items():
             with self.subTest(label=label), tempfile.TemporaryDirectory() as temp:
@@ -245,6 +384,42 @@ class ScopedStateMachineTests(unittest.TestCase):
                 with self.assertRaises(CompileError):
                     compile_world(world, Path(temp) / "build")
 
+    def test_v01_source_remains_supported_and_normalizes_empty_conditions(self) -> None:
+        with tempfile.TemporaryDirectory() as temp:
+            world = Path(temp) / "world"
+            shutil.copytree(GRAY_CROWN, world)
+            source_path = world / "state_machines.json"
+            manifest_path = world / "manifest.json"
+            source = json.loads(source_path.read_text(encoding="utf-8"))
+            manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+            source["format"] = "compilableworld.state-machines/v0.1"
+            for machine in source["state_machines"]:
+                for transition in machine["transitions"]:
+                    transition.pop("when")
+            manifest["source_schemas"]["state_machines"] = (
+                "compilableworld.schema/state-machines/v0.1"
+            )
+            source_path.write_text(
+                json.dumps(source, ensure_ascii=False, indent=2) + "\n", encoding="utf-8"
+            )
+            manifest_path.write_text(
+                json.dumps(manifest, ensure_ascii=False, indent=2) + "\n", encoding="utf-8"
+            )
+
+            package = json.loads(
+                compile_world(world, Path(temp) / "build").read_text(encoding="utf-8")
+            )
+
+        self.assertEqual(
+            package["manifest"]["source_schemas"]["state_machines"],
+            "compilableworld.schema/state-machines/v0.1",
+        )
+        self.assertTrue(all(
+            transition["when"] == []
+            for machine in package["state_machines"]
+            for transition in machine["transitions"]
+        ))
+
     def test_studio_overview_projects_static_and_current_scoped_state(self) -> None:
         package_view = package_overview(self.package)
         self.assertEqual(len(package_view["state_machines"]), 5)
@@ -254,6 +429,13 @@ class ScopedStateMachineTests(unittest.TestCase):
         )
         self.assertEqual(world_record["owner_scope"], "world")
         self.assertEqual(world_record["initial_state"], "sealed")
+        self.assertEqual(
+            [condition["condition_id"] for condition in world_record["transitions"][0]["when"]],
+            [
+                "world_is_stable", "unlocking_actor_is_alive",
+                "unlocking_actor_currency_is_valid",
+            ],
+        )
 
         unlock_old_vault(self.runtime)
         live_view = runtime_overview(self.runtime)

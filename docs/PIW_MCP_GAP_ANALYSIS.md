@@ -1,7 +1,7 @@
 # Persistent Interactive World MCP Gap Analysis
 
 - **Document version:** v0.1
-- **Runtime baseline:** CompilableWorld `0.1.1`, current local suite `316/316` passing
+- **Runtime baseline:** CompilableWorld `0.1.1`, current local suite `320/320` plus 46 subtests passing
 - **Objective:** define the minimum work required to expose the existing world runtime safely through MCP
 
 ## 1. Executive conclusion
@@ -83,7 +83,7 @@ src/compilableworld_mcp/
 - recent events preserve committed order
 - unknown world/session/actor fails closed
 - output is JSON-serializable and versioned
-- historical 113-test baseline remains green; current local suite is 316/316
+- historical 113-test baseline remains green; current local suite is 320/320 plus 46 subtests
 - new read-only contract tests prove pre/post state hash equality
 
 ## 4. P1 work package: action loop
