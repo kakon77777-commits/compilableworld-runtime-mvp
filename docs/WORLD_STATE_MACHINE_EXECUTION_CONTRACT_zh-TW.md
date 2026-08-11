@@ -99,6 +99,8 @@ quest.transitioned
 `quest.failed`。每個 reaction 都透過 Kernel 的 `commit_reaction()`，不能由 Dialogue
 或 EveGlyph 直接寫入 `quest.*`。
 
+EventBus 會依 EventLog batch 順序同步 FIFO 派送；reaction 事件排在已提交 batch 後方，不會遞迴插隊。每個 root cascade 最多派送 4096 個 EventIR，超限會停止尚未派送事件並留下不可再觸發 reaction 的 audit-only `runtime.reaction_halted`。這個 safety rail 不會把已提交的 Quest／StateIR 交易假裝回滾。
+
 `quest.completed`／`quest.failed` 可以觸發另一個 actor-scoped state machine，形成
 可追蹤的任務鏈。因為來源任務已進入 terminal state 且 terminal state 禁止 outgoing
 transition，這個 chaining 點不會讓來源任務自行重開或重複領取獎勵。

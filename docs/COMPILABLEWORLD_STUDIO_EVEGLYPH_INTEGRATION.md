@@ -12,7 +12,7 @@
 - `examples/studio_village_inn/`：EveGlyph 可視化 World IR 的 Entity／State Machine／故意損壞案例。它是 Studio authoring seed，尚未偽裝成 Python Runtime Package。
 - `src/compilableworld/studio_world_ir.py`：零第三方依賴的 EveGlyph YAML subset importer，輸出診斷保留的共用 Studio World IR JSON，並保留 state machine 的 variables／events／instructions／responses、受控 random 描述、bounded event_match 與 bounded requirements。
 - `src/compilableworld/studio.py`：零第三方依賴的 headless projection，輸出 FMS／SMS／TMS／DMS、Quest graph、靜態 diagnostics 與 Runtime Trace tail。
-- `state_machines.json`：版本化的 World／Region／Scene／Entity／System StateIR；v0.3 支援 EventIR 或 bounded deterministic tick timer。Studio overview 可唯讀顯示 owner、狀態圖、初始／目前 state、entry tick 與 pending timer countdown。
+- `state_machines.json`：版本化的 World／Region／Scene／Entity／System StateIR；v0.4 支援 EventIR、bounded deterministic tick timer，以及明確來源、無循環、最多 64 層的非終態 `fsm.transitioned` DAG。Studio overview 可唯讀顯示 owner、狀態圖、初始／目前 state、entry tick 與 pending timer countdown。
 - `action_behaviors.json`：版本化的 Action-scope 行為來源；v0.7 可宣告 compile-time static phase DAG、priority conditional `next_phase_id` route、唯一 terminal、非遞迴 primitive child Actions、bounded phase-entry conditions 與 fixed-interval retry/deadline。Studio authoring overview 可唯讀顯示 execution model、entry／terminal、完整 branch target／child／條件／policy；player/runtime pending projection只顯示安全 route／visited path／retry progress。正式修改仍回到 authoring source。
 - `scenarios.json`：正式的 ScenarioIR Given／When／Then 來源，編譯後由 `scenario-run` 以正常 Runtime 管線重播。
 - `functions.json`：正式的 FunctionIR 純公式來源；只允許受限 numeric expression tree，編譯後由 `runtime.functions` 評估。
@@ -20,6 +20,8 @@
 ## 契約
 
 `package_overview(package)` 與 `/api/studio/overview` 都是唯讀投影，並會在 `semantic_records.metadata_only: true` 下提供 `package.studio.semantic_records`。它們不能修改 Authoring Layer、Compiled Package 或 Runtime State；任何世界變更仍必須回到來源資料、Compiler 與測試流程。
+
+v0.4 的非終態 `fsm.transitioned` 是 reviewed `state_machines.json` 的直接 StateIR 契約。現行 `studio-compile` 的 state-machine overlay 仍只產生 `target: quest`，因此 mapping validator 會以 `nonterminal_stateir_only` 拒絕把這個事件偽裝成 Quest overlay；EveGlyph 可先顯示與編輯候選，但要由 StateIR write-back／Compiler 完成來源、cycle 與 depth 審查。
 
 目前 EveGlyph 的 `kind: entity`、`kind: entity_list`、`kind: state_machine` YAML 文件仍是 Studio 編輯格式；現在已有正式的 `studio-world-ir/v0.1` migration artifact，但它刻意不直接編譯成 Runtime Package。`cw-runtime studio-import` 會保留來源文件、正規化 entities/state machines（含語義 records）、診斷與 `compile_ready: false`；房間／出口映射與 Runtime QuestModule event mapping 仍需明確 authoring diff，不能由 importer 猜測。
 
@@ -35,14 +37,14 @@ EveGlyph 的 Runtime 面板使用兩個唯讀端點：`GET /api/studio/functions
 
 ## Authoring Schema catalog
 
-正式主線現在把交換邊界外化成 [`schemas/`](../schemas/) 下二十一份 schema；catalog 暴露十一個 current authoring/runtime contract，Action behavior 同時保留 v0.1–v0.7，StateIR 保留 v0.1–v0.3：
+正式主線現在把交換邊界外化成 [`schemas/`](../schemas/) 下二十二份 schema；catalog 暴露十一個 current authoring/runtime contract，Action behavior 同時保留 v0.1–v0.7，StateIR 保留 v0.1–v0.4：
 
 - `functions.v0.1.schema.json`：FunctionIR 純數值公式來源。
 - `scenarios.v0.1.schema.json`：ScenarioIR Given／When／Then 來源。
 - `runtime-package.v0.1.schema.json`：Compiler 到 Runtime／Studio 的套件契約。
 - `rooms.v0.1.csv.schema.json`、`exits.v0.1.csv.schema.json`：地圖表格欄位契約。
 - `entities.v0.1.csv.schema.json`、`items.v0.1.csv.schema.json`：實體／物品表格欄位契約。
-- `state-machines.v0.3.schema.json`：五種 owner scope、EventIR／bounded tick timer 選邊與 owner／actor StateStore AND conditions；timer 只允許 owner conditions，`v0.1`／`v0.2` 檔案保留為事件來源相容邊界。
+- `state-machines.v0.4.schema.json`：五種 owner scope、EventIR／bounded tick timer 選邊與 owner／actor StateStore AND conditions；`fsm.transitioned` 必須鎖定來源 machine + transition，Compiler 驗證來源、靜態 payload、無循環與 64 層深度；`v0.1`–`v0.3` 檔案保留為來源相容邊界。
 - `action-behaviors.v0.7.schema.json`：Action-scope static phase DAG、priority conditional route、編譯期 graph closure、單一路徑 route cursor、非遞迴 primitive child Actions、bounded conditions、fixed-interval retry/deadline、完成模組、並行限制與中斷事件契約；`v0.1`–`v0.6` 檔案保留為來源相容邊界。
 - `studio-world-ir.v0.1.schema.json`：EveGlyph YAML 到共用 Studio World IR 的 migration 契約。
 - `studio-mapping.v0.1.schema.json`：人工確認 World IR 到 Runtime 的 room、table、EventIR 與 guard 映射契約。

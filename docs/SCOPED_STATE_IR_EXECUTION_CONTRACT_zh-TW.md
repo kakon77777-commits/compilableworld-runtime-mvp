@@ -1,10 +1,10 @@
-# Scoped StateIR 執行契約 v0.3
+# Scoped StateIR 執行契約 v0.4
 
-本文件描述 CompilableWorld Runtime 已落地的非 Quest 階層狀態機。它把原本只有初始值的 World／Region／Scene 階層狀態，擴充為 World／Region／Scene／Entity／System 五種可編譯、可執行、可快照與可重播的 StateIR。v0.3 在 v0.2 的 bounded StateStore AND conditions 上加入 deterministic tick timer；沒有加入牆鐘、背景執行緒、自由 guard、任意 effect 或第二個狀態真實來源。
+本文件描述 CompilableWorld Runtime 已落地的非 Quest 階層狀態機。它把原本只有初始值的 World／Region／Scene 階層狀態，擴充為 World／Region／Scene／Entity／System 五種可編譯、可執行、可快照與可重播的 StateIR。v0.4 在 v0.3 deterministic tick timer 上加入明確的非終態 FSM 依賴，並以 FIFO EventBus 與 reaction cascade budget 防止遞迴失控；沒有加入牆鐘、背景執行緒、自由 guard、任意 effect 或第二個狀態真實來源。
 
 ## 1. Authoring 與所有權
 
-新來源檔使用 `compilableworld.state-machines/v0.3`，並由 `schemas/state-machines.v0.3.schema.json` 約束；v0.1 無條件事件來源與 v0.2 bounded-condition 事件來源仍可編譯。Compiler 會將 v0.1 transition 正規化為 `when: []`，但不替舊來源假造 timer。每台機器必須宣告：
+新來源檔使用 `compilableworld.state-machines/v0.4`，並由 `schemas/state-machines.v0.4.schema.json` 約束；v0.1 無條件事件、v0.2 bounded-condition 事件與 v0.3 timer 來源仍可編譯。Compiler 會將 v0.1 transition 正規化為 `when: []`，但不替舊來源假造 timer 或非終態依賴。每台機器必須宣告：
 
 - `state_machine_id`、`title`；
 - `owner_scope` 與 `owner_id`；
@@ -14,7 +14,7 @@
 - `authority: state_machine.core`；
 - 至少一條 bounded transition。
 
-v0.3 transition 必須明確提供 `when` 陣列，並且只能選一種 trigger：正式 EventIR 的 `on`，或 1–1,000,000 的 `after_ticks`。Timer transition 不得同時宣告 `on` 或 `event_match`。每條 transition 最多 16 個條件，採 AND；每個條件固定包含 `condition_id`、`subject`、`namespace`、`key`、`operator` 與 JSON finite scalar `value`。`subject` 只允許：
+v0.4 transition 必須明確提供 `when` 陣列，並且只能選一種 trigger：正式 EventIR 的 `on`，或 1–1,000,000 的 `after_ticks`。Timer transition 不得同時宣告 `on` 或 `event_match`。每條 transition 最多 16 個條件，採 AND；每個條件固定包含 `condition_id`、`subject`、`namespace`、`key`、`operator` 與 JSON finite scalar `value`。`subject` 只允許：
 
 - `owner`：讀取該機器自己的 `owner_id`；
 - `actor`：讀取由觸發 EventIR 的 bounded causation chain 驗證出的 ActionIR actor。
@@ -48,8 +48,10 @@ Compiler 除了確認 JSON 結構，也會驗證：
 - `completed`／`failed` 不可再有 outgoing transition；
 - `on` 必須在共用 EventIR trigger 白名單內；
 - `event_match` 最多 16 個有限 JSON scalar，欄位必須屬於該 EventIR 的 payload 契約；
-- v0.2／v0.3 `when` 最多 16 個條件，`condition_id` 在同一台機器內唯一，subject／namespace／operator 必須在白名單內；
-- v0.3 每條 transition 必須且只能宣告 `on` 或 `after_ticks`；timer tick 必須是 bounded positive integer，且不得搭配 `event_match` 或 actor condition；
+- v0.2–v0.4 `when` 最多 16 個條件，`condition_id` 在同一台機器內唯一，subject／namespace／operator 必須在白名單內；
+- v0.3／v0.4 每條 transition 必須且只能宣告 `on` 或 `after_ticks`；timer tick 必須是 bounded positive integer，且不得搭配 `event_match` 或 actor condition；
+- v0.4 的 `on: fsm.transitioned` 必須在 `event_match` 同時指定來源 `state_machine_id` 與 `transition_id`；來源必須存在，若另寫 title／owner／from／to／trigger，也必須與來源靜態定義一致；
+- `fsm.transitioned` 機器依賴必須是 DAG，不得 self-loop／cross-loop，最長依賴鏈不得超過 64；v0.1–v0.3 不能偷用這個非終態入口；
 - 非等值 operator 的 `value` 必須是有限 number，不能是 boolean；
 - `priority` 介於 0 與 1,000,000；同一 `from/on/priority` 或 `from/timer/priority` 不得有歧義（timer 即使 delay 不同，elapsed 後仍可能重疊）；
 - manifest 必須明確啟用 `state_machine.core`。
@@ -92,20 +94,22 @@ StateDelta(owner_id, "fsm_runtime", state_machine_id, "set", current_tick)  # ti
 
 ## 4. 跨層事件與 causation
 
-不同 scope 不直接修改彼此狀態，只能透過 EventIR 串接。例如 Gray Crown 範例是：
+不同 scope 不直接修改彼此狀態，只能透過 EventIR 串接。例如 Gray Crown 範例同時保留 terminal chain，並新增非終態 chain：
 
 ```text
 ActionIR(unlock)
   -> door.unlocked
-  -> World fsm.completed
-  -> Region fsm.transitioned
+  -> System fsm.transitioned(nominal -> breached)
+  -> Region fsm.transitioned(watchful -> alerted)
 ```
 
-每個 reaction EventIR 的 `causation_id` 指向直接觸發它的前一個 EventIR，`correlation_id` 保留整條行為鏈。當 terminal FSM 觸發 actor quest 時，Runtime 會沿 EventLog 的 causation 鏈做最多 64 層的有界回溯，找回原始 ActionIR actor；循環、缺失或無法驗證的 provenance 會停止，不會猜測玩家。
+每個 reaction EventIR 的 `causation_id` 指向直接觸發它的前一個 EventIR，`correlation_id` 保留整條行為鏈。當 FSM 觸發需要 actor condition 的後續 StateIR，或 terminal FSM 觸發 actor quest 時，Runtime 會依 v0.4 最長 64-edge 依賴界線做有界 EventLog 回溯，找回原始 ActionIR actor；循環、缺失或無法驗證的 provenance 會停止，不會猜測玩家。
 
 Timer 沒有外部 cause。`fsm.timer_elapsed` 以自己的 event ID 建立 correlation root，payload 明確記錄 `after_ticks`、`entered_tick`、`eligible_at_tick` 與 `fired_at_tick`；後續 `fsm.transitioned`／terminal event 的 `causation_id` 指向該 timer event。Replay 會驗證 timer payload 與已編譯 transition 一致。
 
 owner scope 目前只決定狀態所有權與可見性，不是自動事件路由。Runtime 不會因為 `scene: room.vault` 就暗自判定某事件屬於該房間；authoring 必須用正式事件型別與 `event_match` 明確指定。這保留了可重播性，也避免目前尚未標準化的 location payload 被猜測成規則。
+
+EventBus 以同步 FIFO 派送同一筆已提交 EventIR batch；callback 產生的新 EventIR 排到已存在事件後方，不遞迴插隊。每個 root cascade 預設最多派送 4096 個 EventIR。超限時 Runtime 清空尚未派送佇列，將 `runtime.reaction_halted` 直接寫入 EventLog 作為 audit-only 邊界，而且刻意不再發布這個停止事件，避免診斷本身形成新迴圈。已提交的 StateDelta／EventIR 不會被假裝回滾；Replay 會驗證停止 payload 並還原 halt diagnostics。
 
 ## 5. 可見性
 
@@ -132,7 +136,7 @@ StateIR 的 authoring visibility 會保守映射到 EventIR：
 
 Studio 投影仍是唯讀；正式修改必須回到 authoring source、Compiler、review 與部署流程，AI 不能直接寫 StateStore。
 
-## 7. v0.3 明確不包含
+## 7. v0.4 明確不包含
 
 - 本 StateIR 契約內的 Action-scope 狀態；可中斷／取消、compile-time static phase DAG、sticky priority route、單一路徑 merge、非遞迴 primitive child sequence、bounded phase gates 與 fixed-interval retry/deadline 已由獨立 `action-behaviors/v0.7` 契約提供，但 dynamic／recursive／nested Action Graph、resume／補償／平行子步驟與同步 join 仍未包含；
 - 階層父子狀態、parallel region 與 history state；
@@ -140,6 +144,7 @@ Studio 投影仍是唯讀；正式修改必須回到 authoring source、Compiler
 - OR／NOT 條件群組、自由形式 guard、腳本、任意 effect/reward；
 - Runtime 對 Studio bounded random metadata 的自行抽樣；
 - 隱式地理事件路由；
+- 自由回饋環、執行期動態新增依賴，或把 cascade budget 當成正常流程分支；
 - AI 自動採納草稿或直接改寫 Runtime State。
 
-驗證基線由 `tests/test_scoped_state_machine.py` 覆蓋五種 owner、跨層 chaining、terminal FSM 到 Quest、owner／actor AND conditions、嚴格純量型別、event／timer priority、v0.1／v0.2 來源相容、entry tick、延後條件、Snapshot、Replay timer validation、Studio countdown projection、legacy seed 相容與 reaction rollback。完整測試為 324/324，另有 52 個 subtests。
+驗證基線由 `tests/test_scoped_state_machine.py` 覆蓋五種 owner、terminal 與 non-terminal 跨層 chaining、terminal FSM 到 Quest、可信 module source、明確來源與靜態 payload、cycle／depth rejection、owner／actor AND conditions、event／timer priority、v0.1–v0.3 來源相容、Snapshot、Replay lifecycle/timer validation、Studio countdown projection、legacy seed 相容與 reaction rollback；`tests/test_event_bus.py` 覆蓋 batch FIFO、非遞迴有界停止、audit event 與 Replay tamper rejection。完整測試為 329/329，另有 58 個 subtests。

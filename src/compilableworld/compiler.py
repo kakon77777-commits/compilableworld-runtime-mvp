@@ -57,13 +57,16 @@ from .state_machine import (
     STATE_MACHINE_FORMAT,
     STATE_MACHINE_FORMAT_V1,
     STATE_MACHINE_FORMAT_V2,
+    STATE_MACHINE_FORMAT_V3,
     STATE_MACHINE_OWNER_SCOPES,
     STATE_MACHINE_PRIORITY_LIMIT,
+    STATE_MACHINE_REACTION_DEPTH_LIMIT,
     STATE_MACHINE_REQUIREMENT_LIMIT,
     STATE_MACHINE_REWARD_CURRENCY_LIMIT,
     STATE_MACHINE_SCHEMA_ID,
     STATE_MACHINE_SCHEMA_ID_V1,
     STATE_MACHINE_SCHEMA_ID_V2,
+    STATE_MACHINE_SCHEMA_ID_V3,
     STATE_MACHINE_STATE_LIMIT,
     STATE_MACHINE_TRANSITION_LIMIT,
     STATE_MACHINE_TIMER_TICK_LIMIT,
@@ -78,7 +81,11 @@ STATE_CONDITION_READ_NAMESPACES = {
     "position", "inventory", "door", "health", "status", "quest",
     "wallet", "fsm", "combat", "magic",
 }
-QUEST_TRIGGER_EVENT_FIELDS = STATE_MACHINE_TRIGGER_EVENT_FIELDS
+QUEST_TRIGGER_EVENT_FIELDS = {
+    event_type: fields
+    for event_type, fields in STATE_MACHINE_TRIGGER_EVENT_FIELDS.items()
+    if event_type != "fsm.transitioned"
+}
 
 
 class CompileError(ValueError):
@@ -304,6 +311,7 @@ def compile_world(
     state_machine_schema_id = {
         STATE_MACHINE_FORMAT_V1: STATE_MACHINE_SCHEMA_ID_V1,
         STATE_MACHINE_FORMAT_V2: STATE_MACHINE_SCHEMA_ID_V2,
+        STATE_MACHINE_FORMAT_V3: STATE_MACHINE_SCHEMA_ID_V3,
         STATE_MACHINE_FORMAT: STATE_MACHINE_SCHEMA_ID,
     }.get(state_machines_source.get("format") if isinstance(state_machines_source, dict) else None)
     for source_key, declared_schema_id in declared_source_schemas.items():
@@ -1254,7 +1262,8 @@ def _validate_scoped_state_machines(
         raise CompileError(f"state_machines.json 含未知欄位: {sorted(unknown_root)}")
     source_format = source.get("format")
     if source_format not in {
-        STATE_MACHINE_FORMAT_V1, STATE_MACHINE_FORMAT_V2, STATE_MACHINE_FORMAT,
+        STATE_MACHINE_FORMAT_V1, STATE_MACHINE_FORMAT_V2, STATE_MACHINE_FORMAT_V3,
+        STATE_MACHINE_FORMAT,
     }:
         raise CompileError("state_machines.json format 不支援")
     machines = source.get("state_machines")
@@ -1333,8 +1342,11 @@ def _validate_scoped_state_machines(
 
         transitions = _validate_scoped_transitions(
             machine["transitions"], label, states=set(states), initial_state=initial_state,
-            allow_conditions=source_format in {STATE_MACHINE_FORMAT_V2, STATE_MACHINE_FORMAT},
-            allow_timers=source_format == STATE_MACHINE_FORMAT,
+            allow_conditions=source_format in {
+                STATE_MACHINE_FORMAT_V2, STATE_MACHINE_FORMAT_V3, STATE_MACHINE_FORMAT,
+            },
+            allow_timers=source_format in {STATE_MACHINE_FORMAT_V3, STATE_MACHINE_FORMAT},
+            allow_nonterminal_chaining=source_format == STATE_MACHINE_FORMAT,
         )
         normalized.append({
             "state_machine_id": machine_id,
@@ -1348,7 +1360,95 @@ def _validate_scoped_state_machines(
             "authority": "state_machine.core",
             "transitions": transitions,
         })
+    if source_format == STATE_MACHINE_FORMAT:
+        _validate_state_machine_reaction_graph(normalized)
     return normalized
+
+
+def _validate_state_machine_reaction_graph(machines: list[dict[str, Any]]) -> None:
+    """Require explicit, existing, acyclic sources for non-terminal chaining."""
+    by_id = {machine["state_machine_id"]: machine for machine in machines}
+    edges: dict[str, set[str]] = {machine_id: set() for machine_id in by_id}
+    for target in machines:
+        target_id = target["state_machine_id"]
+        for transition in target["transitions"]:
+            if transition.get("on") != "fsm.transitioned":
+                continue
+            event_match = transition["event_match"]
+            source_id = event_match.get("state_machine_id")
+            source_transition_id = event_match.get("transition_id")
+            source = by_id.get(source_id) if isinstance(source_id, str) else None
+            source_transition = next((
+                item for item in source.get("transitions", [])
+                if item.get("transition_id") == source_transition_id
+            ), None) if isinstance(source, dict) else None
+            label = f"state machine {target_id} transition {transition['transition_id']}"
+            if source is None or source_transition is None:
+                raise CompileError(
+                    f"{label} 引用不存在的 fsm.transitioned 來源: "
+                    f"{source_id}/{source_transition_id}"
+                )
+
+            expected = {
+                "state_machine_id": source_id,
+                "title": source["title"],
+                "owner_scope": source["owner_scope"],
+                "owner_id": source["owner_id"],
+                "transition_id": source_transition_id,
+                "from": source_transition["from"],
+                "to": source_transition["to"],
+                "trigger": source_transition.get("on", "fsm.timer_elapsed"),
+            }
+            mismatched = sorted(
+                key for key, value in event_match.items()
+                if key in expected and value != expected[key]
+            )
+            if mismatched:
+                raise CompileError(
+                    f"{label}.event_match 與來源 transition 不一致: {mismatched}"
+                )
+            edges[source_id].add(target_id)
+
+    visiting: list[str] = []
+    visited: set[str] = set()
+
+    def visit(machine_id: str) -> None:
+        if machine_id in visiting:
+            start = visiting.index(machine_id)
+            cycle = [*visiting[start:], machine_id]
+            raise CompileError(
+                "state_machines.json 的 fsm.transitioned 依賴不可形成循環: "
+                + " -> ".join(cycle)
+            )
+        if machine_id in visited:
+            return
+        visiting.append(machine_id)
+        for target_id in sorted(edges[machine_id]):
+            visit(target_id)
+        visiting.pop()
+        visited.add(machine_id)
+
+    for machine_id in sorted(edges):
+        visit(machine_id)
+
+    indegree = {machine_id: 0 for machine_id in edges}
+    for targets in edges.values():
+        for target_id in targets:
+            indegree[target_id] += 1
+    queue = deque(sorted(machine_id for machine_id, degree in indegree.items() if degree == 0))
+    depth = {machine_id: 0 for machine_id in edges}
+    while queue:
+        source_id = queue.popleft()
+        for target_id in sorted(edges[source_id]):
+            depth[target_id] = max(depth[target_id], depth[source_id] + 1)
+            if depth[target_id] > STATE_MACHINE_REACTION_DEPTH_LIMIT:
+                raise CompileError(
+                    "state_machines.json 的 fsm.transitioned 依賴深度不可超過 "
+                    f"{STATE_MACHINE_REACTION_DEPTH_LIMIT}: {target_id}"
+                )
+            indegree[target_id] -= 1
+            if indegree[target_id] == 0:
+                queue.append(target_id)
 
 
 def _resolve_state_machine_owner(
@@ -1390,6 +1490,7 @@ def _validate_scoped_transitions(
     initial_state: str,
     allow_conditions: bool,
     allow_timers: bool,
+    allow_nonterminal_chaining: bool,
 ) -> list[dict[str, Any]]:
     if (
         not isinstance(transitions, list)
@@ -1433,7 +1534,7 @@ def _validate_scoped_transitions(
                     f"{transition_label} 必須且只能宣告 on 或 after_ticks"
                 )
         elif has_timer_trigger:
-            raise CompileError(f"{transition_label}.after_ticks 需要 StateIR v0.3")
+            raise CompileError(f"{transition_label}.after_ticks 需要 StateIR v0.3 或更新版本")
         event_type = transition.get("on")
         after_ticks = transition.get("after_ticks")
         to_state = transition["to"]
@@ -1449,6 +1550,8 @@ def _validate_scoped_transitions(
             raise CompileError(f"{transition_label} 不可從終態 {from_state} 再轉移")
         if has_event_trigger and event_type not in STATE_MACHINE_TRIGGER_EVENT_FIELDS:
             raise CompileError(f"{transition_label}.on 不在 StateMachineModule EventIR 白名單中")
+        if event_type == "fsm.transitioned" and not allow_nonterminal_chaining:
+            raise CompileError(f"{transition_label}.on fsm.transitioned 僅支援 StateIR v0.4")
         if has_timer_trigger and (
             isinstance(after_ticks, bool)
             or not isinstance(after_ticks, int)
@@ -1496,6 +1599,13 @@ def _validate_scoped_transitions(
                 )
             if any(not _json_scalar(value) for value in event_match.values()):
                 raise CompileError(f"{transition_label}.event_match 值必須是 finite JSON 純量")
+            if event_type == "fsm.transitioned" and not {
+                "state_machine_id", "transition_id",
+            }.issubset(event_match):
+                raise CompileError(
+                    f"{transition_label}.event_match fsm.transitioned 必須明確指定 "
+                    "state_machine_id 與 transition_id"
+                )
         raw_when = transition.get("when", [])
         if (
             not isinstance(raw_when, list)

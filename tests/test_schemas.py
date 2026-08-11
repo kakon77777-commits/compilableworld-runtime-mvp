@@ -73,13 +73,14 @@ class SchemaContractTests(unittest.TestCase):
         self.assertIn("combat.actor_defeated", event_mapping["properties"]["event_type"]["enum"])
         self.assertIn("quest.completed", event_mapping["properties"]["event_type"]["enum"])
         self.assertIn("fsm.completed", event_mapping["properties"]["event_type"]["enum"])
+        self.assertIn("fsm.transitioned", event_mapping["properties"]["event_type"]["enum"])
         self.assertIn("action.progressed", event_mapping["properties"]["event_type"]["enum"])
         self.assertIn("action.retry_scheduled", event_mapping["properties"]["event_type"]["enum"])
         self.assertIn("action.child_completed", event_mapping["properties"]["event_type"]["enum"])
         self.assertIn("action.branch_selected", event_mapping["properties"]["event_type"]["enum"])
 
         state_machine_schema = json.loads(
-            (ROOT / "schemas" / "state-machines.v0.3.schema.json").read_text(encoding="utf-8")
+            (ROOT / "schemas" / "state-machines.v0.4.schema.json").read_text(encoding="utf-8")
         )
         machine = state_machine_schema["$defs"]["stateMachine"]
         transition = state_machine_schema["$defs"]["transition"]
@@ -95,6 +96,10 @@ class SchemaContractTests(unittest.TestCase):
         self.assertEqual(transition["properties"]["after_ticks"]["minimum"], 1)
         self.assertEqual(transition["properties"]["after_ticks"]["maximum"], 1000000)
         self.assertEqual(len(transition["oneOf"]), 2)
+        self.assertEqual(
+            transition["allOf"][0]["then"]["properties"]["event_match"]["required"],
+            ["state_machine_id", "transition_id"],
+        )
         self.assertEqual(
             set(state_machine_schema["$defs"]["condition"]["properties"]["subject"]["enum"]),
             {"owner", "actor"},
@@ -167,7 +172,7 @@ class SchemaContractTests(unittest.TestCase):
         )
         self.assertEqual(
             runtime_package_schema["properties"]["schema_contracts"]["properties"]["state_machines"]["const"],
-            "compilableworld.schema/state-machines/v0.3",
+            "compilableworld.schema/state-machines/v0.4",
         )
         self.assertEqual(
             runtime_package_schema["$defs"]["stateMachineTransition"]["properties"]["when"]["maxItems"],

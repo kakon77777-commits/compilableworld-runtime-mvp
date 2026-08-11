@@ -8,10 +8,10 @@
 | Item | Value |
 |---|---|
 | Local integrated runtime | `0.1.1` |
-| Verified tests | `324/324`, plus `52` subtests |
+| Verified tests | `329/329`, plus `58` subtests |
 | GitHub `master` observed head | `70141f3` (verified 2026-08-11) |
-| Current development branch | `agent/stateir-v02-bounded-conditions` |
-| Remote synchronization status | M12 and Action routing v0.7 are merged; StateIR v0.2 and future-architecture notes are on draft PR #4; StateIR v0.3 timer work is completed locally and PR remains intentionally unmerged |
+| Current development branch | `agent/stateir-v04-bounded-chaining` |
+| Remote synchronization status | M12 and Action routing v0.7 are merged; StateIR v0.2 and future-architecture notes remain on draft PR #4; StateIR v0.3 timer and v0.4 bounded chaining work are completed locally and intentionally unpushed |
 | Intended next release baseline | `v0.2.0-alpha.1` or equivalent |
 
 ## Current integrated local state
@@ -415,4 +415,38 @@ out_of_scope:
   - implicit geographic event routing
   - AI, Studio, player or MCP control of authoritative Runtime time
   - AI direct StateStore writes
+```
+
+### CW-M12-STATEIR-012 — Bounded non-terminal StateIR chaining
+
+```yaml
+owner_environment: codex
+status: completed-locally
+outputs:
+  - schemas/state-machines.v0.4.schema.json
+  - v0.1, v0.2 and v0.3 source compatibility paths
+  - explicit fsm.transitioned source machine and transition binding
+  - compile-time source existence and static payload consistency validation
+  - acyclic dependency graph with a maximum depth of 64 edges
+  - synchronous FIFO EventBus batch dispatch with a 4096-event root cascade limit
+  - audit-only runtime.reaction_halted EventIR and Replay validation
+  - Gray Crown breached-to-region-alerted non-terminal vertical slice
+  - tests/test_event_bus.py and tests/test_scoped_state_machine.py
+acceptance:
+  - re-entrant events queue behind every event already present in the committed batch
+  - StateIR v0.4 rejects broad fsm.transitioned listeners without machine and transition IDs
+  - missing source transitions and mismatched authored source payload fields fail compilation
+  - self/cross-machine dependency cycles and chains deeper than 64 edges fail compilation
+  - the Runtime halts pending delivery after 4096 dispatched events without recursive stack growth
+  - cascade halt preserves already committed StateDelta/EventIR and records an audit boundary
+  - the halt audit event is not republished and cannot recursively trigger another reaction
+  - Replay rejects tampered cascade boundaries and restores halt diagnostics
+  - AI, Studio, player and MCP still have no direct StateStore write path
+  - 329/329 tests and 58 subtests pass
+out_of_scope:
+  - cyclic feedback as an authored gameplay mechanism
+  - dynamic runtime subscriptions or dependency graph mutation
+  - arbitrary effects, scripts, free guards and implicit geographic routing
+  - treating a cascade halt as a successful normal transition branch
+  - distributed EventBus delivery or cross-process exactly-once semantics
 ```

@@ -22,16 +22,19 @@ if TYPE_CHECKING:
 
 STATE_MACHINE_FORMAT_V1 = "compilableworld.state-machines/v0.1"
 STATE_MACHINE_FORMAT_V2 = "compilableworld.state-machines/v0.2"
-STATE_MACHINE_FORMAT = "compilableworld.state-machines/v0.3"
+STATE_MACHINE_FORMAT_V3 = "compilableworld.state-machines/v0.3"
+STATE_MACHINE_FORMAT = "compilableworld.state-machines/v0.4"
 STATE_MACHINE_SCHEMA_ID_V1 = "compilableworld.schema/state-machines/v0.1"
 STATE_MACHINE_SCHEMA_ID_V2 = "compilableworld.schema/state-machines/v0.2"
-STATE_MACHINE_SCHEMA_ID = "compilableworld.schema/state-machines/v0.3"
+STATE_MACHINE_SCHEMA_ID_V3 = "compilableworld.schema/state-machines/v0.3"
+STATE_MACHINE_SCHEMA_ID = "compilableworld.schema/state-machines/v0.4"
 STATE_MACHINE_EVENT_MATCH_LIMIT = 16
 STATE_MACHINE_DEFINITION_LIMIT = 1024
 STATE_MACHINE_STATE_LIMIT = 256
 STATE_MACHINE_TRANSITION_LIMIT = 4096
 STATE_MACHINE_CONDITION_LIMIT = 16
 STATE_MACHINE_TIMER_TICK_LIMIT = 1_000_000
+STATE_MACHINE_REACTION_DEPTH_LIMIT = 64
 STATE_MACHINE_REQUIREMENT_LIMIT = 32
 STATE_MACHINE_PRIORITY_LIMIT = 1_000_000
 STATE_MACHINE_REWARD_CURRENCY_LIMIT = 1_000_000_000
@@ -115,6 +118,9 @@ STATE_MACHINE_TRIGGER_EVENT_FIELDS: dict[str, set[str]] = {
     "fsm.failed": {
         "state_machine_id", "title", "owner_scope", "owner_id", "transition_id", "from", "to", "trigger",
     },
+    "fsm.transitioned": {
+        "state_machine_id", "title", "owner_scope", "owner_id", "transition_id", "from", "to", "trigger",
+    },
 }
 
 STATE_MACHINE_OWNER_SCOPES = {"world", "region", "scene", "entity", "system"}
@@ -136,7 +142,7 @@ def resolve_state_machine_actor(runtime: "WorldRuntime", event: "EventIR") -> st
     causation_id = event.causation_id
     seen: set[str] = set()
     event_by_id = {item.event_id: item for item in runtime.event_log.events}
-    for _ in range(64):
+    for _ in range(STATE_MACHINE_REACTION_DEPTH_LIMIT + 4):
         if not causation_id or causation_id in seen:
             break
         seen.add(causation_id)
@@ -249,6 +255,7 @@ __all__ = [
     "STATE_MACHINE_FORMAT",
     "STATE_MACHINE_FORMAT_V1",
     "STATE_MACHINE_FORMAT_V2",
+    "STATE_MACHINE_FORMAT_V3",
     "STATE_MACHINE_OWNER_SCOPES",
     "STATE_MACHINE_PRIORITY_LIMIT",
     "STATE_MACHINE_REQUIREMENT_LIMIT",
@@ -256,9 +263,11 @@ __all__ = [
     "STATE_MACHINE_SCHEMA_ID",
     "STATE_MACHINE_SCHEMA_ID_V1",
     "STATE_MACHINE_SCHEMA_ID_V2",
+    "STATE_MACHINE_SCHEMA_ID_V3",
     "STATE_MACHINE_STATE_LIMIT",
     "STATE_MACHINE_TRANSITION_LIMIT",
     "STATE_MACHINE_TIMER_TICK_LIMIT",
+    "STATE_MACHINE_REACTION_DEPTH_LIMIT",
     "STATE_MACHINE_TRIGGER_EVENT_FIELDS",
     "STATE_MACHINE_VISIBILITIES",
     "resolve_state_machine_actor",

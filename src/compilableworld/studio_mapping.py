@@ -202,6 +202,13 @@ def validate_studio_mapping(world_ir: dict[str, Any], mapping: dict[str, Any]) -
             event_type = event_mapping.get("event_type")
             if event_type not in _ALLOWED_RUNTIME_EVENTS:
                 issues.append(_issue("error", "invalid_runtime_event", f"event_type must be one of {sorted(_ALLOWED_RUNTIME_EVENTS)}", f"{transition_path}.event_type"))
+            if event_type == "fsm.transitioned" and target == "quest":
+                issues.append(_issue(
+                    "error",
+                    "nonterminal_stateir_only",
+                    "fsm.transitioned is executable only in reviewed StateIR v0.4 source, not the current Studio target=quest overlay",
+                    f"{transition_path}.event_type",
+                ))
             source_event_match = transition.get("event_match", {})
             normalized_source_match = validate_studio_event_match(source_event_match, f"{transition_path}.source_event_match", issues)
             mapped_event_match = event_mapping.get("event_match", source_event_match)

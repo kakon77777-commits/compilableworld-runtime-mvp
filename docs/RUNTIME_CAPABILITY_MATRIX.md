@@ -4,7 +4,7 @@
 - **Baseline source:** uploaded integrated local snapshot
 - **Runtime package version:** `0.1.1`
 - **Audit date:** 2026-08-11
-- **Verification:** `PYTHONPATH=src python -m pytest -q` — **324/324 passed, 52 subtests passed**
+- **Verification:** `PYTHONPATH=src python -m pytest -q` — **329/329 passed, 58 subtests passed**
 - **Purpose:** authoritative inventory for PIW-MCP integration planning
 
 > Status meanings: **Implemented** = code and tests exist; **Partial** = usable core exists but stated boundary remains; **Planned** = no production implementation found in this baseline.
@@ -23,7 +23,7 @@
 | Event IR | Implemented | `EventIR` | runtime, dialogue, quest, AMK tests | MCP results should expose filtered event projections |
 | Module Contract | Implemented | `ModuleContract` | permission and module tests | MCP cannot widen module write scopes |
 | Atomic commit | Implemented | `WorldRuntime`, `StateStore` | `test_commit_is_atomic_on_permission_failure` | action result must be derived after commit |
-| Event bus and reactions | Implemented | `EventBus`, `commit_reaction()` | dialogue→quest and quest reward tests | cross-module behavior remains event-driven |
+| Event bus and reactions | Implemented | synchronous FIFO committed batches, re-entrant queue, 4096-event root cascade limit, audit-only `runtime.reaction_halted`, `commit_reaction()` | ordering, halt, Replay tamper, dialogue→quest and quest reward tests | cross-module behavior remains event-driven and bounded; a halt preserves committed facts and stops pending delivery |
 | Event log | Implemented | `EventLog` | replay and AMK adapter tests | MCP recent-events tool can reuse this source |
 | Snapshot/save | Implemented | runtime snapshot methods | round-trip and legacy migration tests | checkpoint tool may wrap existing snapshot boundary |
 | Replay | Implemented | runtime replay path | movement/inventory/door replay tests | MCP session recovery can rely on replay, with version limits |
@@ -51,7 +51,7 @@
 | Quests: simple requirements/rewards | Implemented | Reach and delivery completion |
 | Quests: event transitions | Implemented | action failure, movement, inventory, door, dialogue, combat, magic and terminal quest chaining share one bounded trigger contract |
 | Quests: branch/failure/priority | Implemented | deterministic priority, actor causation, event matching, requirements, graph reachability, terminal-state rejection, ambiguous dispatch rejection and exactly-once terminal reward; see `docs/WORLD_STATE_MACHINE_EXECUTION_CONTRACT_zh-TW.md` |
-| Scoped StateIR: World/Region/Scene/Entity/System | Implemented | v0.3 versioned authoring schema, owner validation, isolated `fsm.*` state plus reserved `fsm_runtime.*` entry tick, deterministic EventIR or 1–1,000,000 tick timer transitions, up to 16 fail-closed owner/verified-actor StateStore AND conditions, owner-only timer guards, strict scalar comparison, eligible priority fallback, v0.1/v0.2 source compatibility, visibility/countdown projection, terminal chaining, Snapshot v0.6 and timer-aware Replay; no wall clock and owner scope is not implicit geographic routing; see `docs/SCOPED_STATE_IR_EXECUTION_CONTRACT_zh-TW.md` |
+| Scoped StateIR: World/Region/Scene/Entity/System | Implemented | v0.4 versioned authoring schema, owner validation, isolated `fsm.*` state plus reserved `fsm_runtime.*` entry tick, deterministic EventIR or 1–1,000,000 tick timer transitions, up to 16 fail-closed owner/verified-actor StateStore AND conditions, owner-only timer guards, strict scalar comparison, eligible priority fallback, explicit source machine+transition non-terminal chaining, static payload consistency, cycle rejection and 64-edge dependency limit, v0.1–v0.3 source compatibility, visibility/countdown projection, Snapshot v0.6 and timer/halt-aware Replay; no wall clock and owner scope is not implicit geographic routing; see `docs/SCOPED_STATE_IR_EXECUTION_CONTRACT_zh-TW.md` |
 | Action-scope state machines | Implemented | v0.7 compile-time validated static phase DAG, one sticky priority-selected active route, unique terminal, unknown/self/cycle/unreachable rejection, actual-path due convergence, non-recursive primitive child Actions, fail-closed actor/target State Cell AND gates, fixed-interval retry/deadline, atomic lifecycle, v0.1–v0.6 compatibility, cancellation, interruption, Snapshot v0.6 and route-aware pending Replay; dynamic/recursive/nested graph, resume, compensation, parallel/synchronizing join, free backoff/jitter and arbitrary guards remain pending; see `docs/ACTION_SCOPE_BEHAVIOR_EXECUTION_CONTRACT_zh-TW.md` |
 | Runtime-generated items/entities | Partial | generated player exists; generic runtime entity spawning remains bounded |
 

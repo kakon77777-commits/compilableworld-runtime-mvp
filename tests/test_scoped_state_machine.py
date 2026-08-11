@@ -4,11 +4,12 @@ import json
 import shutil
 import tempfile
 import unittest
+from copy import deepcopy
 from pathlib import Path
 from unittest.mock import patch
 
 from compilableworld.compiler import CompileError, compile_world
-from compilableworld.kernel import KernelTransactionError, WorldRuntime
+from compilableworld.kernel import KernelTransactionError, RuntimeErrorBase, WorldRuntime
 from compilableworld.models import ActionIR, EventIR
 from compilableworld.modules import install_builtin_modules
 from compilableworld.studio import package_overview, runtime_overview
@@ -23,6 +24,12 @@ def unlock_old_vault(runtime: WorldRuntime) -> None:
     runtime.submit(ActionIR(actor, "take", "item.old_key"))
     runtime.submit(ActionIR(actor, "move", args={"direction": "north"}))
     runtime.submit(ActionIR(actor, "unlock", "door.old_vault"))
+
+
+def use_legacy_terminal_chain(source: dict) -> None:
+    region_transition = source["state_machines"][1]["transitions"][0]
+    region_transition["on"] = "fsm.completed"
+    region_transition["event_match"] = {"state_machine_id": "fsm.world.vault_seal"}
 
 
 class ScopedStateMachineTests(unittest.TestCase):
@@ -53,7 +60,7 @@ class ScopedStateMachineTests(unittest.TestCase):
         self.assertIn("state_machine.core", self.package["manifest"]["modules"])
         self.assertEqual(
             self.package["manifest"]["source_schemas"]["state_machines"],
-            "compilableworld.schema/state-machines/v0.3",
+            "compilableworld.schema/state-machines/v0.4",
         )
 
         cells = {
@@ -106,8 +113,14 @@ class ScopedStateMachineTests(unittest.TestCase):
             if event.event_type == "fsm.transitioned"
             and event.payload["state_machine_id"] == "fsm.region.gray_crown.alert"
         )
+        security_transition = next(
+            event for event in self.runtime.event_log.events
+            if event.event_type == "fsm.transitioned"
+            and event.payload["transition_id"] == "fsm.system.security.vault_unlocked"
+        )
         self.assertEqual(world_completion.causation_id, door_event.event_id)
-        self.assertEqual(region_transition.causation_id, world_completion.event_id)
+        self.assertEqual(security_transition.causation_id, door_event.event_id)
+        self.assertEqual(region_transition.causation_id, security_transition.event_id)
         self.assertEqual(world_completion.visibility, "public")
 
         entity_transition = next(
@@ -135,6 +148,37 @@ class ScopedStateMachineTests(unittest.TestCase):
             transition_count,
         )
 
+    def test_nonterminal_chain_rejects_spoofed_source_and_replay_tampering(self) -> None:
+        self.runtime.events.publish(EventIR(
+            "fsm.transitioned",
+            "test.spoof",
+            {
+                "state_machine_id": "fsm.system.security",
+                "title": "安全系統狀態",
+                "owner_scope": "system",
+                "owner_id": "system.security",
+                "transition_id": "fsm.system.security.vault_unlocked",
+                "from": "nominal",
+                "to": "breached",
+                "trigger": "door.unlocked",
+            },
+        ))
+        self.assertEqual(
+            self.runtime.state.get("region.gray_crown", "fsm", "fsm.region.gray_crown.alert"),
+            "watchful",
+        )
+
+        unlock_old_vault(self.runtime)
+        tampered = deepcopy(self.runtime.event_log.events)
+        transitioned = next(
+            event for event in tampered
+            if event.event_type == "fsm.transitioned"
+            and event.payload["transition_id"] == "fsm.system.security.vault_unlocked"
+        )
+        transitioned.source = "test.spoof"
+        with self.assertRaisesRegex(RuntimeErrorBase, "authored StateIR lifecycle"):
+            WorldRuntime(deepcopy(self.package)).replay(tampered)
+
     def test_bounded_owner_condition_blocks_transition_without_blocking_other_scopes(self) -> None:
         package = json.loads(json.dumps(self.package))
         world_seed = next(
@@ -155,7 +199,7 @@ class ScopedStateMachineTests(unittest.TestCase):
         )
         self.assertEqual(
             runtime.state.get("region.gray_crown", "fsm", "fsm.region.gray_crown.alert"),
-            "watchful",
+            "alerted",
         )
         self.assertEqual(
             runtime.state.get("room.vault", "fsm", "fsm.scene.vault.access"),
@@ -440,6 +484,25 @@ class ScopedStateMachineTests(unittest.TestCase):
             runtime = WorldRuntime.from_package(compile_world(world, Path(temp) / "build"))
             install_builtin_modules(runtime)
 
+            runtime.events.publish(EventIR(
+                "fsm.completed",
+                "test.spoof",
+                {
+                    "state_machine_id": "fsm.world.vault_seal",
+                    "title": "舊王室庫房封印",
+                    "owner_scope": "world",
+                    "owner_id": "gray_crown_demo",
+                    "transition_id": "fsm.world.vault_seal.unlocked",
+                    "from": "sealed",
+                    "to": "completed",
+                    "trigger": "door.unlocked",
+                },
+                target="player.neo",
+            ))
+            self.assertEqual(
+                runtime.state.get("player.neo", "quest", "quest.vault_revealed"),
+                "waiting",
+            )
             unlock_old_vault(runtime)
 
             self.assertEqual(
@@ -540,6 +603,63 @@ class ScopedStateMachineTests(unittest.TestCase):
                 "compilableworld.schema/state-machines/v0.2"
             )
 
+        def nonterminal_missing_explicit_source(source: dict, manifest: dict) -> None:
+            source["state_machines"][1]["transitions"][0]["event_match"].pop("transition_id")
+
+        def nonterminal_unknown_source_transition(source: dict, manifest: dict) -> None:
+            source["state_machines"][1]["transitions"][0]["event_match"]["transition_id"] = (
+                "fsm.system.security.missing"
+            )
+
+        def nonterminal_mismatched_source_payload(source: dict, manifest: dict) -> None:
+            source["state_machines"][1]["transitions"][0]["event_match"]["to"] = "contained"
+
+        def nonterminal_dependency_cycle(source: dict, manifest: dict) -> None:
+            transition = source["state_machines"][4]["transitions"][0]
+            transition["on"] = "fsm.transitioned"
+            transition["event_match"] = {
+                "state_machine_id": "fsm.region.gray_crown.alert",
+                "transition_id": "fsm.region.gray_crown.vault_revealed",
+            }
+
+        def nonterminal_dependency_too_deep(source: dict, manifest: dict) -> None:
+            previous_machine = "fsm.system.security"
+            previous_transition = "fsm.system.security.vault_unlocked"
+            for index in range(65):
+                machine_id = f"fsm.system.chain.{index}"
+                transition_id = f"fsm.system.chain.{index}.advance"
+                source["state_machines"].append({
+                    "state_machine_id": machine_id,
+                    "title": f"chain {index}",
+                    "owner_scope": "system",
+                    "owner_id": f"system.chain.{index}",
+                    "states": ["idle", "done"],
+                    "initial_state": "idle",
+                    "persistence": "runtime",
+                    "visibility": "system_only",
+                    "authority": "state_machine.core",
+                    "transitions": [{
+                        "transition_id": transition_id,
+                        "from": "idle",
+                        "on": "fsm.transitioned",
+                        "to": "done",
+                        "event_match": {
+                            "state_machine_id": previous_machine,
+                            "transition_id": previous_transition,
+                        },
+                        "when": [],
+                        "priority": 0,
+                    }],
+                })
+                previous_machine = machine_id
+                previous_transition = transition_id
+
+        def v03_with_nonterminal_chain(source: dict, manifest: dict) -> None:
+            source["format"] = "compilableworld.state-machines/v0.3"
+            manifest["source_schemas"]["state_machines"] = (
+                "compilableworld.schema/state-machines/v0.3"
+            )
+
         changes = {
             "invalid_scene": invalid_scene,
             "free_effect": free_effect,
@@ -558,6 +678,12 @@ class ScopedStateMachineTests(unittest.TestCase):
             "timer_with_actor_condition": timer_with_actor_condition,
             "duplicate_timer_priority": duplicate_timer_priority,
             "v02_with_timer": v02_with_timer,
+            "nonterminal_missing_explicit_source": nonterminal_missing_explicit_source,
+            "nonterminal_unknown_source_transition": nonterminal_unknown_source_transition,
+            "nonterminal_mismatched_source_payload": nonterminal_mismatched_source_payload,
+            "nonterminal_dependency_cycle": nonterminal_dependency_cycle,
+            "nonterminal_dependency_too_deep": nonterminal_dependency_too_deep,
+            "v03_with_nonterminal_chain": v03_with_nonterminal_chain,
         }
         for label, change in changes.items():
             with self.subTest(label=label), tempfile.TemporaryDirectory() as temp:
@@ -585,6 +711,7 @@ class ScopedStateMachineTests(unittest.TestCase):
             manifest_path = world / "manifest.json"
             source = json.loads(source_path.read_text(encoding="utf-8"))
             manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+            use_legacy_terminal_chain(source)
             source["format"] = "compilableworld.state-machines/v0.1"
             for machine in source["state_machines"]:
                 machine["transitions"] = [
@@ -627,6 +754,7 @@ class ScopedStateMachineTests(unittest.TestCase):
             manifest_path = world / "manifest.json"
             source = json.loads(source_path.read_text(encoding="utf-8"))
             manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+            use_legacy_terminal_chain(source)
             source["format"] = "compilableworld.state-machines/v0.2"
             for machine in source["state_machines"]:
                 machine["transitions"] = [
@@ -653,6 +781,39 @@ class ScopedStateMachineTests(unittest.TestCase):
             "compilableworld.schema/state-machines/v0.2",
         )
         self.assertFalse(any(
+            "after_ticks" in transition
+            for machine in package["state_machines"]
+            for transition in machine["transitions"]
+        ))
+
+    def test_v03_source_remains_supported_with_timers_but_without_nonterminal_chaining(self) -> None:
+        with tempfile.TemporaryDirectory() as temp:
+            world = Path(temp) / "world"
+            shutil.copytree(GRAY_CROWN, world)
+            source_path = world / "state_machines.json"
+            manifest_path = world / "manifest.json"
+            source = json.loads(source_path.read_text(encoding="utf-8"))
+            manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+            use_legacy_terminal_chain(source)
+            source["format"] = "compilableworld.state-machines/v0.3"
+            manifest["source_schemas"]["state_machines"] = (
+                "compilableworld.schema/state-machines/v0.3"
+            )
+            source_path.write_text(
+                json.dumps(source, ensure_ascii=False, indent=2) + "\n", encoding="utf-8"
+            )
+            manifest_path.write_text(
+                json.dumps(manifest, ensure_ascii=False, indent=2) + "\n", encoding="utf-8"
+            )
+            package = json.loads(
+                compile_world(world, Path(temp) / "build").read_text(encoding="utf-8")
+            )
+
+        self.assertEqual(
+            package["manifest"]["source_schemas"]["state_machines"],
+            "compilableworld.schema/state-machines/v0.3",
+        )
+        self.assertTrue(any(
             "after_ticks" in transition
             for machine in package["state_machines"]
             for transition in machine["transitions"]

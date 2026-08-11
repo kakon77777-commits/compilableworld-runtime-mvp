@@ -1,5 +1,5 @@
 {
-  "format": "compilableworld.state-machines/v0.3",
+  "format": "compilableworld.state-machines/v0.4",
   "state_machines": [
     {
       "state_machine_id": "fsm.world.vault_seal",
@@ -62,9 +62,12 @@
         {
           "transition_id": "fsm.region.gray_crown.vault_revealed",
           "from": "watchful",
-          "on": "fsm.completed",
+          "on": "fsm.transitioned",
           "to": "alerted",
-          "event_match": {"state_machine_id": "fsm.world.vault_seal"},
+          "event_match": {
+            "state_machine_id": "fsm.system.security",
+            "transition_id": "fsm.system.security.vault_unlocked"
+          },
           "when": [],
           "priority": 50
         }

@@ -255,6 +255,34 @@ class StudioMappingTests(unittest.TestCase):
         self.assertTrue(report["mapping_complete"])
         self.assertTrue(report["runtime_ready"])
 
+    def test_nonterminal_fsm_event_stays_out_of_quest_overlay(self) -> None:
+        world_ir = import_eveglyph_text(
+            """
+            kind: state_machine
+            id: quest.observe_breach
+            initial: waiting
+            states: [waiting, completed]
+            transitions:
+              - from: waiting
+                to: completed
+                on: fsm.transitioned
+                event_match:
+                  state_machine_id: fsm.system.security
+                  transition_id: fsm.system.security.vault_unlocked
+            """,
+            "observe-breach.yaml",
+        )
+        mapping = suggest_studio_mapping(world_ir)
+
+        report = validate_studio_mapping(world_ir, mapping)
+
+        self.assertFalse(report["mapping_complete"])
+        self.assertFalse(report["runtime_ready"])
+        self.assertIn(
+            "nonterminal_stateir_only",
+            {issue["code"] for issue in report["diagnostics"]["issues"]},
+        )
+
 
 if __name__ == "__main__":
     unittest.main()

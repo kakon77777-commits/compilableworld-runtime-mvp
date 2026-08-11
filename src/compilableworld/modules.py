@@ -527,7 +527,7 @@ class StateMachineModule(BaseModule):
 
     def __init__(self) -> None:
         super().__init__(ModuleContract(
-            "state_machine.core", "0.3.0", "TMS", [],
+            "state_machine.core", "0.4.0", "TMS", [],
             ["fsm.timer_elapsed", "fsm.transitioned", "fsm.completed", "fsm.failed"],
             ["fsm.*", "fsm_runtime.*"], ["fsm.*", "fsm_runtime.*"],
             ["state", "event", "clock"],
@@ -551,6 +551,8 @@ class StateMachineModule(BaseModule):
     def _on_event(self, event: EventIR) -> None:
         runtime = self._runtime
         assert runtime is not None
+        if event.event_type.startswith("fsm.") and event.source != self.contract.module_id:
+            return
         actor_id = resolve_state_machine_actor(runtime, event)
         for machine in runtime.package.get("state_machines", []):
             self._apply_transition(machine, event, runtime, actor_id=actor_id)
@@ -825,6 +827,8 @@ class QuestModule(BaseModule):
     def _on_progress_event(self, event: EventIR) -> None:
         runtime = self._runtime
         assert runtime is not None
+        if event.event_type.startswith("fsm.") and event.source != "state_machine.core":
+            return
         actor_id = resolve_state_machine_actor(runtime, event)
         if actor_id is None:
             return

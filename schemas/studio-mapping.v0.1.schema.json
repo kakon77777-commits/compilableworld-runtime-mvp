@@ -61,6 +61,7 @@
                     "exploration.searched",
                     "fsm.completed",
                     "fsm.failed",
+                    "fsm.transitioned",
                     "inventory.item_added",
                     "inventory.item_given",
                     "inventory.item_removed",

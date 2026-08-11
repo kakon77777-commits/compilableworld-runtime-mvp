@@ -6,7 +6,7 @@ import json
 import math
 import os
 from copy import deepcopy
-from collections import Counter, defaultdict
+from collections import Counter, defaultdict, deque
 from dataclasses import asdict
 from pathlib import Path
 from typing import Any, Callable, Iterable, Protocol
@@ -53,6 +53,7 @@ SNAPSHOT_FORMAT_V4 = "compilableworld.snapshot/v0.4"
 SNAPSHOT_FORMAT_V5 = "compilableworld.snapshot/v0.5"
 SNAPSHOT_FORMAT = "compilableworld.snapshot/v0.6"
 SNAPSHOT_VERSION = 6
+EVENT_CASCADE_LIMIT = 4096
 
 
 class ConflictError(RuntimeErrorBase):
@@ -167,17 +168,111 @@ class StateStore:
 
 
 class EventBus:
-    def __init__(self) -> None:
+    """Synchronous FIFO EventIR dispatcher with one bounded root cascade.
+
+    Re-entrant publications are queued behind events that were already
+    committed.  This preserves batch/EventLog order and prevents a reaction
+    chain from growing the Python call stack.  A halted cascade never dispatches
+    the remaining queued events; the Runtime records the boundary separately.
+    """
+
+    def __init__(
+        self,
+        max_events_per_cascade: int = EVENT_CASCADE_LIMIT,
+        on_halt: Callable[[dict[str, Any]], None] | None = None,
+    ) -> None:
         self._subscribers: dict[str, list[Callable[[EventIR], None]]] = defaultdict(list)
+        self._queue: deque[EventIR] = deque()
+        self._dispatching = False
+        self.max_events_per_cascade = max_events_per_cascade
+        self._on_halt = on_halt
+        self.halt_count = 0
+        self.last_cascade: dict[str, Any] | None = None
+
+    @property
+    def max_events_per_cascade(self) -> int:
+        return self._max_events_per_cascade
+
+    @max_events_per_cascade.setter
+    def max_events_per_cascade(self, value: int) -> None:
+        if isinstance(value, bool) or not isinstance(value, int) or value < 1:
+            raise ValueError("max_events_per_cascade must be a positive integer")
+        self._max_events_per_cascade = value
 
     def subscribe(self, event_pattern: str, callback: Callable[[EventIR], None]) -> None:
         self._subscribers[event_pattern].append(callback)
 
     def publish(self, event: EventIR) -> None:
-        for pattern, callbacks in self._subscribers.items():
-            if fnmatch.fnmatch(event.event_type, pattern):
-                for callback in callbacks:
-                    callback(event)
+        self.publish_batch([event])
+
+    def publish_batch(self, events: Iterable[EventIR]) -> None:
+        batch = list(events)
+        if not batch:
+            return
+        self._queue.extend(batch)
+        if self._dispatching:
+            return
+
+        root = self._queue[0]
+        processed = 0
+        last_event: EventIR | None = None
+        self._dispatching = True
+        try:
+            while self._queue and processed < self.max_events_per_cascade:
+                event = self._queue.popleft()
+                last_event = event
+                processed += 1
+                for pattern, callbacks in tuple(self._subscribers.items()):
+                    if fnmatch.fnmatch(event.event_type, pattern):
+                        for callback in tuple(callbacks):
+                            callback(event)
+            if self._queue:
+                first_undispatched = self._queue[0]
+                halted = {
+                    "halted": True,
+                    "reason": "event_cascade_limit",
+                    "limit": self.max_events_per_cascade,
+                    "dispatched_events": processed,
+                    "undispatched_events": len(self._queue),
+                    "root_event_id": root.event_id,
+                    "root_event_type": root.event_type,
+                    "root_correlation_id": root.correlation_id,
+                    "last_dispatched_event_id": last_event.event_id if last_event else None,
+                    "last_dispatched_event_type": last_event.event_type if last_event else None,
+                    "first_undispatched_event_id": first_undispatched.event_id,
+                    "first_undispatched_event_type": first_undispatched.event_type,
+                }
+                self._queue.clear()
+                self.halt_count += 1
+                self.last_cascade = halted
+                if self._on_halt is not None:
+                    self._on_halt(dict(halted))
+            else:
+                self.last_cascade = {
+                    "halted": False,
+                    "limit": self.max_events_per_cascade,
+                    "dispatched_events": processed,
+                    "undispatched_events": 0,
+                    "root_event_id": root.event_id,
+                    "root_event_type": root.event_type,
+                    "root_correlation_id": root.correlation_id,
+                    "last_dispatched_event_id": last_event.event_id if last_event else None,
+                    "last_dispatched_event_type": last_event.event_type if last_event else None,
+                }
+        except Exception:
+            self._queue.clear()
+            raise
+        finally:
+            self._dispatching = False
+
+    def diagnostics(self) -> dict[str, Any]:
+        return {
+            "max_events_per_cascade": self.max_events_per_cascade,
+            "dispatching": self._dispatching,
+            "queued_events": len(self._queue),
+            "halt_count": self.halt_count,
+            "last_cascade": deepcopy(self.last_cascade),
+        }
 
 
 class EventLog:
@@ -343,13 +438,13 @@ class WorldRuntime:
         self.functions = FunctionRegistry.from_package(package)
         self.registry = EntityRegistry()
         self.state = StateStore()
-        self.events = EventBus()
         self.event_log = EventLog(event_log_path)
         self.scheduler = Scheduler()
         self.modules: dict[str, RuntimeModule] = {}
         self.actions: dict[str, ActionIR] = {}
         self.action_runtime: dict[str, dict[str, Any]] = {}
         self.metrics: Counter[str] = Counter()
+        self.events = EventBus(on_halt=self._record_event_cascade_halt)
         self.dynamic_entities: set[str] = set()
         self.player_profiles: dict[str, dict[str, Any]] = {}
         self.active_player_id: str | None = None
@@ -473,6 +568,31 @@ class WorldRuntime:
         if callable(on_register):
             on_register(self)
 
+    def _publish_committed_events(self, events: Iterable[EventIR]) -> None:
+        """Dispatch one durable EventLog batch in its recorded FIFO order."""
+        batch = list(events)
+        for event in batch:
+            self.metrics[f"event:{event.event_type}"] += 1
+        self.events.publish_batch(batch)
+
+    def _record_event_cascade_halt(self, record: dict[str, Any]) -> None:
+        """Persist an audit-only boundary without feeding it back into the bus."""
+        event = EventIR(
+            event_type="runtime.reaction_halted",
+            source="kernel",
+            timestamp_tick=self.scheduler.tick,
+            causation_id=record.get("last_dispatched_event_id"),
+            correlation_id=record.get("root_correlation_id"),
+            visibility="audit",
+            payload={
+                key: value for key, value in record.items()
+                if key != "root_correlation_id"
+            },
+        )
+        self.event_log.append(event)
+        self.metrics["event_cascades_halted"] += 1
+        self.metrics[f"event:{event.event_type}"] += 1
+
     def commit_reaction(
         self, module: RuntimeModule, deltas: list[StateDelta], events: list[EventIR],
     ) -> list[dict[str, Any]]:
@@ -497,9 +617,7 @@ class WorldRuntime:
         except KernelTransactionError:
             self.state.import_state(state_before)
             raise
-        for event in emitted:
-            self.events.publish(event)
-            self.metrics[f"event:{event.event_type}"] += 1
+        self._publish_committed_events(emitted)
         return applied
 
     def module_for(self, verb: str) -> RuntimeModule:
@@ -548,9 +666,8 @@ class WorldRuntime:
                 self.action_runtime.pop(action.action_id, None)
                 action.status = ActionStatus.PARSED
                 raise
-            self.events.publish(event)
+            self._publish_committed_events([event])
             self.metrics["actions_scheduled"] += 1
-            self.metrics[f"event:{event.event_type}"] += 1
             title = behavior["title"] if behavior else action.verb
             return ActionReceipt(
                 action.action_id, action.status,
@@ -607,9 +724,7 @@ class WorldRuntime:
         action.status = ActionStatus.COMPLETED
         self.action_runtime.pop(action.action_id, None)
         self.metrics["actions_completed"] += 1
-        for event in emitted:
-            self.events.publish(event)
-            self.metrics[f"event:{event.event_type}"] += 1
+        self._publish_committed_events(emitted)
         return ActionReceipt(
             action.action_id, action.status, result.message,
             [event.event_id for event in emitted], [item["path"] for item in applied],
@@ -645,9 +760,7 @@ class WorldRuntime:
             self.action_runtime.pop(action.action_id, None)
             raise
         self.action_runtime.pop(action.action_id, None)
-        for emitted_event in emitted:
-            self.events.publish(emitted_event)
-            self.metrics[f"event:{emitted_event.event_type}"] += 1
+        self._publish_committed_events(emitted)
         return ActionReceipt(
             action.action_id, action.status, message,
             [emitted_event.event_id for emitted_event in emitted],
@@ -979,9 +1092,8 @@ class WorldRuntime:
             self.scheduler.restore(removed)
             raise
         self.action_runtime.pop(action.action_id, None)
-        self.events.publish(event)
+        self._publish_committed_events([event])
         self.metrics[f"actions_{status.value}"] += 1
-        self.metrics[f"event:{event.event_type}"] += 1
         return ActionReceipt(action.action_id, action.status, reason, [event.event_id])
 
     def _child_lifecycle_event(
@@ -1376,8 +1488,7 @@ class WorldRuntime:
                         self.metrics["child_actions_completed"] += 1
                     elif event.event_type == "action.child_failed":
                         self.metrics["child_actions_failed"] += 1
-                    self.events.publish(event)
-                    self.metrics[f"event:{event.event_type}"] += 1
+                self._publish_committed_events(events)
             # StateIR timers observe the committed checkpoint state at this
             # tick and run before terminal scheduled Actions. The hook is
             # module-owned and can only commit through StateDelta/EventIR.
@@ -2518,6 +2629,68 @@ class WorldRuntime:
         self.actions = next_actions
         self.action_runtime = next_action_runtime
 
+    def _validate_replayed_fsm_lifecycle(self, event: EventIR) -> None:
+        payload = event.payload
+        machine = next((
+            item for item in self.package.get("state_machines", [])
+            if isinstance(item, dict)
+            and item.get("state_machine_id") == payload.get("state_machine_id")
+        ), None)
+        transition = next((
+            item for item in machine.get("transitions", [])
+            if isinstance(item, dict)
+            and item.get("transition_id") == payload.get("transition_id")
+        ), None) if isinstance(machine, dict) else None
+        required_fields = {
+            "state_machine_id", "title", "owner_scope", "owner_id",
+            "transition_id", "from", "to", "trigger",
+        }
+        expected_visibility = None
+        expected_target = None
+        if isinstance(machine, dict):
+            visibility = machine.get("visibility")
+            expected_visibility = (
+                "public" if visibility in {"public", "observable"}
+                else "private" if visibility == "private" and machine.get("owner_scope") == "entity"
+                else "audit"
+            )
+            expected_target = (
+                machine.get("owner_id") if machine.get("owner_scope") == "entity" else None
+            )
+        expected_trigger = (
+            transition.get("on", "fsm.timer_elapsed")
+            if isinstance(transition, dict) else None
+        )
+        terminal_type = (
+            f"fsm.{transition.get('to')}"
+            if isinstance(transition, dict) and transition.get("to") in {"completed", "failed"}
+            else None
+        )
+        if (
+            event.source != "state_machine.core"
+            or event.authority != "runtime"
+            or set(payload) != required_fields
+            or not isinstance(machine, dict)
+            or not isinstance(transition, dict)
+            or payload.get("title") != machine.get("title")
+            or payload.get("owner_scope") != machine.get("owner_scope")
+            or payload.get("owner_id") != machine.get("owner_id")
+            or payload.get("from") != transition.get("from")
+            or payload.get("to") != transition.get("to")
+            or payload.get("trigger") != expected_trigger
+            or event.visibility != expected_visibility
+            or event.target != expected_target
+            or not isinstance(event.causation_id, str)
+            or not event.causation_id
+            or (
+                event.event_type in {"fsm.completed", "fsm.failed"}
+                and event.event_type != terminal_type
+            )
+        ):
+            raise RuntimeErrorBase(
+                f"EventLog {event.event_type} violates authored StateIR lifecycle"
+            )
+
     def replay(self, events: Iterable[EventIR]) -> None:
         pending_actions: dict[str, tuple[int, int, ActionIR]] = {}
         pending_action_runtime: dict[str, dict[str, Any]] = {}
@@ -2525,6 +2698,8 @@ class WorldRuntime:
         lifecycle_tick = 0
         lifecycle_order = 0
         for event in events:
+            if event.event_type in {"fsm.transitioned", "fsm.completed", "fsm.failed"}:
+                self._validate_replayed_fsm_lifecycle(event)
             if event.event_type == "state.committed":
                 for item in event.payload.get("applied", []):
                     self.state.seed(
@@ -2578,6 +2753,53 @@ class WorldRuntime:
                     or event.correlation_id != event.event_id
                 ):
                     raise RuntimeErrorBase("EventLog fsm.timer_elapsed violates authored timer")
+                lifecycle_seen = True
+                lifecycle_tick = max(lifecycle_tick, event.timestamp_tick)
+            if event.event_type == "runtime.reaction_halted":
+                payload = event.payload
+                required_fields = {
+                    "halted", "reason", "limit", "dispatched_events", "undispatched_events",
+                    "root_event_id", "root_event_type", "last_dispatched_event_id",
+                    "last_dispatched_event_type", "first_undispatched_event_id",
+                    "first_undispatched_event_type",
+                }
+                required_strings = {
+                    "reason", "root_event_id", "root_event_type",
+                    "last_dispatched_event_id", "last_dispatched_event_type",
+                    "first_undispatched_event_id", "first_undispatched_event_type",
+                }
+                required_ints = {"limit", "dispatched_events", "undispatched_events"}
+                if (
+                    event.source != "kernel"
+                    or event.visibility != "audit"
+                    or event.target is not None
+                    or set(payload) != required_fields
+                    or isinstance(event.timestamp_tick, bool)
+                    or not isinstance(event.timestamp_tick, int)
+                    or event.timestamp_tick < 0
+                    or payload.get("halted") is not True
+                    or payload.get("reason") != "event_cascade_limit"
+                    or any(
+                        not isinstance(payload.get(key), str) or not payload[key]
+                        for key in required_strings
+                    )
+                    or any(
+                        isinstance(payload.get(key), bool)
+                        or not isinstance(payload.get(key), int)
+                        or payload[key] < 1
+                        for key in required_ints
+                    )
+                    or payload["dispatched_events"] != payload["limit"]
+                    or event.causation_id != payload["last_dispatched_event_id"]
+                ):
+                    raise RuntimeErrorBase(
+                        "EventLog runtime.reaction_halted violates event cascade boundary"
+                    )
+                self.events.halt_count += 1
+                self.events.last_cascade = {
+                    **dict(payload),
+                    "root_correlation_id": event.correlation_id,
+                }
                 lifecycle_seen = True
                 lifecycle_tick = max(lifecycle_tick, event.timestamp_tick)
             if event.event_type == "action.scheduled":
@@ -3014,6 +3236,7 @@ class WorldRuntime:
             "function_cache": self.functions.cache_stats(),
             "queued_actions": self.scheduler.queued,
             "events": len(self.event_log.events),
+            "event_dispatch": self.events.diagnostics(),
             "active_player_id": self.active_player_id,
             "generated_players": sorted(self.player_profiles),
             "metrics": dict(self.metrics),
