@@ -12,7 +12,7 @@ from .combat_formulas import (
 from .dialogue import select_dialogue
 from .kernel import WorldRuntime
 from .models import ActionIR, EventIR, ModuleContract, StateDelta, TransitionResult
-from .state_machine import resolve_state_machine_actor
+from .state_machine import resolve_state_machine_actor, state_machine_condition_matches
 from .narrative import render_room_description
 
 
@@ -512,13 +512,14 @@ class StateMachineModule(BaseModule):
     """Execute compiled non-Quest StateIR for hierarchical world scopes.
 
     A machine can only write its own ``owner::fsm::state_machine_id`` cell.
-    Event payload equality and priority are compiled ahead of time; this module
-    does not evaluate prose guards, arbitrary effects, or Python expressions.
+    Event payload equality, bounded StateStore conditions, and priority are
+    compiled ahead of time; this module does not evaluate prose guards,
+    arbitrary effects, or Python expressions.
     """
 
     def __init__(self) -> None:
         super().__init__(ModuleContract(
-            "state_machine.core", "0.1.0", "TMS", [],
+            "state_machine.core", "0.2.0", "TMS", [],
             ["fsm.transitioned", "fsm.completed", "fsm.failed"],
             ["fsm.*"], ["fsm.*"], ["state", "event"],
         ))
@@ -540,11 +541,13 @@ class StateMachineModule(BaseModule):
     def _on_event(self, event: EventIR) -> None:
         runtime = self._runtime
         assert runtime is not None
+        actor_id = resolve_state_machine_actor(runtime, event)
         for machine in runtime.package.get("state_machines", []):
-            self._apply_transition(machine, event, runtime)
+            self._apply_transition(machine, event, runtime, actor_id=actor_id)
 
     def _apply_transition(
         self, machine: dict[str, Any], event: EventIR, runtime: WorldRuntime,
+        *, actor_id: str | None,
     ) -> None:
         machine_id = machine["state_machine_id"]
         owner_id = machine["owner_id"]
@@ -558,6 +561,12 @@ class StateMachineModule(BaseModule):
             and all(
                 key in event.payload and event.payload[key] == value
                 for key, value in transition["event_match"].items()
+            )
+            and all(
+                state_machine_condition_matches(
+                    runtime, machine, condition, actor_id=actor_id,
+                )
+                for condition in transition.get("when", [])
             )
         ]
         if not matches:

@@ -3,8 +3,8 @@
 - **Document version:** v0.1
 - **Baseline source:** uploaded integrated local snapshot
 - **Runtime package version:** `0.1.1`
-- **Audit date:** 2026-08-09
-- **Verification:** `PYTHONPATH=src python -m pytest -q` — **316/316 passed**
+- **Audit date:** 2026-08-11
+- **Verification:** `PYTHONPATH=src python -m pytest -q` — **320/320 passed, 46 subtests passed**
 - **Purpose:** authoritative inventory for PIW-MCP integration planning
 
 > Status meanings: **Implemented** = code and tests exist; **Partial** = usable core exists but stated boundary remains; **Planned** = no production implementation found in this baseline.
@@ -51,7 +51,7 @@
 | Quests: simple requirements/rewards | Implemented | Reach and delivery completion |
 | Quests: event transitions | Implemented | action failure, movement, inventory, door, dialogue, combat, magic and terminal quest chaining share one bounded trigger contract |
 | Quests: branch/failure/priority | Implemented | deterministic priority, actor causation, event matching, requirements, graph reachability, terminal-state rejection, ambiguous dispatch rejection and exactly-once terminal reward; see `docs/WORLD_STATE_MACHINE_EXECUTION_CONTRACT_zh-TW.md` |
-| Scoped StateIR: World/Region/Scene/Entity/System | Implemented | versioned authoring schema, owner validation, isolated `fsm.*` cells, deterministic EventIR transitions, visibility projection, terminal chaining, Snapshot and Replay; owner scope is not implicit geographic event routing; see `docs/SCOPED_STATE_IR_EXECUTION_CONTRACT_zh-TW.md` |
+| Scoped StateIR: World/Region/Scene/Entity/System | Implemented | v0.2 versioned authoring schema, owner validation, isolated `fsm.*` cells, deterministic EventIR transitions, up to 16 fail-closed owner/verified-actor StateStore AND conditions, strict scalar comparison, priority fallback, v0.1 source compatibility, visibility projection, terminal chaining, Snapshot and Replay; owner scope is not implicit geographic event routing; see `docs/SCOPED_STATE_IR_EXECUTION_CONTRACT_zh-TW.md` |
 | Action-scope state machines | Implemented | v0.7 compile-time validated static phase DAG, one sticky priority-selected active route, unique terminal, unknown/self/cycle/unreachable rejection, actual-path due convergence, non-recursive primitive child Actions, fail-closed actor/target State Cell AND gates, fixed-interval retry/deadline, atomic lifecycle, v0.1–v0.6 compatibility, cancellation, interruption, Snapshot v0.6 and route-aware pending Replay; dynamic/recursive/nested graph, resume, compensation, parallel/synchronizing join, free backoff/jitter and arbitrary guards remain pending; see `docs/ACTION_SCOPE_BEHAVIOR_EXECUTION_CONTRACT_zh-TW.md` |
 | Runtime-generated items/entities | Partial | generated player exists; generic runtime entity spawning remains bounded |
 
@@ -91,7 +91,7 @@
 
 | Capability | Status | Notes |
 |---|---|---|
-| Runtime Studio overview | Implemented | FMS/TMS/entity/state/quest graph, scoped StateIR static/current state, Action behavior definitions/pending progress and trace tail |
+| Runtime Studio overview | Implemented | FMS/TMS/entity/state/quest graph, scoped StateIR static/current state and authored condition projection, Action behavior definitions/pending progress and trace tail |
 | Read-only Studio HTTP APIs | Implemented | overview, functions, schemas, import |
 | EveGlyph YAML parser | Implemented | nested lists and quoted scalars supported |
 | Studio World IR normalization | Implemented | entities, entity lists, state machines, diagnostics |

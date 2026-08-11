@@ -12,20 +12,34 @@ versioned, bounded Runtime contract.
 
 from __future__ import annotations
 
-from typing import TYPE_CHECKING
+import math
+from typing import TYPE_CHECKING, Any
 
 if TYPE_CHECKING:
     from .kernel import WorldRuntime
     from .models import EventIR
 
 
+STATE_MACHINE_FORMAT_V1 = "compilableworld.state-machines/v0.1"
+STATE_MACHINE_FORMAT = "compilableworld.state-machines/v0.2"
+STATE_MACHINE_SCHEMA_ID_V1 = "compilableworld.schema/state-machines/v0.1"
+STATE_MACHINE_SCHEMA_ID = "compilableworld.schema/state-machines/v0.2"
 STATE_MACHINE_EVENT_MATCH_LIMIT = 16
 STATE_MACHINE_DEFINITION_LIMIT = 1024
 STATE_MACHINE_STATE_LIMIT = 256
 STATE_MACHINE_TRANSITION_LIMIT = 4096
+STATE_MACHINE_CONDITION_LIMIT = 16
 STATE_MACHINE_REQUIREMENT_LIMIT = 32
 STATE_MACHINE_PRIORITY_LIMIT = 1_000_000
 STATE_MACHINE_REWARD_CURRENCY_LIMIT = 1_000_000_000
+STATE_MACHINE_CONDITION_SUBJECTS = {"owner", "actor"}
+STATE_MACHINE_CONDITION_OPERATORS = {
+    "equals", "not_equals", "less_than", "less_or_equal", "greater_than", "greater_or_equal",
+}
+STATE_MACHINE_CONDITION_NAMESPACES = {
+    "combat", "door", "exploration", "fsm", "health", "inventory", "magic",
+    "position", "quest", "status", "wallet",
+}
 
 # Every value is a field emitted by the corresponding built-in module.  Actor
 # ownership is resolved separately from ActionIR causation and is therefore not
@@ -143,16 +157,104 @@ def resolve_state_machine_actor(runtime: "WorldRuntime", event: "EventIR") -> st
     return None
 
 
+def state_machine_condition_matches(
+    runtime: "WorldRuntime",
+    machine: dict[str, Any],
+    condition: Any,
+    *,
+    actor_id: str | None,
+) -> bool:
+    """Evaluate one compiled StateIR condition without coercion or side effects.
+
+    ``owner`` reads the machine's own authoritative owner. ``actor`` reads the
+    bounded actor resolved from the triggering EventIR causation chain. Missing
+    state, unknown fields, type mismatches, and non-finite numbers all fail
+    closed. The Compiler normally prevents malformed conditions, but the
+    Runtime repeats these checks because a package is still untrusted input.
+    """
+    if not isinstance(condition, dict):
+        return False
+    condition_id = condition.get("condition_id")
+    subject = condition.get("subject")
+    namespace = condition.get("namespace")
+    key = condition.get("key")
+    operator = condition.get("operator")
+    if (
+        not isinstance(condition_id, str)
+        or not condition_id
+        or subject not in STATE_MACHINE_CONDITION_SUBJECTS
+        or namespace not in STATE_MACHINE_CONDITION_NAMESPACES
+        or not isinstance(key, str)
+        or not key
+        or operator not in STATE_MACHINE_CONDITION_OPERATORS
+    ):
+        return False
+
+    owner_id = machine.get("owner_id") if subject == "owner" else actor_id
+    if not isinstance(owner_id, str) or not owner_id:
+        return False
+    missing = object()
+    actual = runtime.state.get(owner_id, namespace, key, missing)
+    expected = condition.get("value")
+    if (
+        actual is missing
+        or not _finite_condition_scalar(actual)
+        or not _finite_condition_scalar(expected)
+    ):
+        return False
+    if operator in {"equals", "not_equals"}:
+        equal = _strict_scalar_equal(actual, expected)
+        return equal if operator == "equals" else not equal
+    if (
+        isinstance(actual, bool)
+        or isinstance(expected, bool)
+        or not isinstance(actual, (int, float))
+        or not isinstance(expected, (int, float))
+    ):
+        return False
+    return {
+        "less_than": actual < expected,
+        "less_or_equal": actual <= expected,
+        "greater_than": actual > expected,
+        "greater_or_equal": actual >= expected,
+    }[operator]
+
+
+def _strict_scalar_equal(actual: Any, expected: Any) -> bool:
+    if isinstance(actual, bool) or isinstance(expected, bool):
+        return type(actual) is type(expected) and actual == expected
+    if isinstance(actual, (int, float)) and isinstance(expected, (int, float)):
+        return actual == expected
+    return type(actual) is type(expected) and actual == expected
+
+
+def _finite_condition_scalar(value: Any) -> bool:
+    return (
+        value is None
+        or isinstance(value, (str, bool, int))
+        or (isinstance(value, float) and math.isfinite(value))
+    )
+
+
 __all__ = [
+    "STATE_MACHINE_CONDITION_LIMIT",
+    "STATE_MACHINE_CONDITION_NAMESPACES",
+    "STATE_MACHINE_CONDITION_OPERATORS",
+    "STATE_MACHINE_CONDITION_SUBJECTS",
     "STATE_MACHINE_DEFINITION_LIMIT",
     "STATE_MACHINE_EVENT_MATCH_LIMIT",
+    "STATE_MACHINE_FORMAT",
+    "STATE_MACHINE_FORMAT_V1",
     "STATE_MACHINE_OWNER_SCOPES",
     "STATE_MACHINE_PRIORITY_LIMIT",
     "STATE_MACHINE_REQUIREMENT_LIMIT",
     "STATE_MACHINE_REWARD_CURRENCY_LIMIT",
+    "STATE_MACHINE_SCHEMA_ID",
+    "STATE_MACHINE_SCHEMA_ID_V1",
     "STATE_MACHINE_STATE_LIMIT",
     "STATE_MACHINE_TRANSITION_LIMIT",
     "STATE_MACHINE_TRIGGER_EVENT_FIELDS",
     "STATE_MACHINE_VISIBILITIES",
     "resolve_state_machine_actor",
+    "state_machine_condition_matches",
 ]
