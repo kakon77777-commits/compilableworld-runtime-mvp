@@ -99,7 +99,7 @@ Checked-in schemas:
 5. `exits.v0.1.csv.schema.json`
 6. `entities.v0.1.csv.schema.json`
 7. `items.v0.1.csv.schema.json`
-8. `state-machines.v0.1.schema.json`
+8. `state-machines.v0.2.schema.json`（Compiler 仍接受保留的 v0.1 無條件來源）
 9. `action-behaviors.v0.7.schema.json`（Compiler 仍接受保留的 v0.1 單階段、v0.2 sequential、v0.3 condition-gated、v0.4 retry-bounded、v0.5 direct-child 與 v0.6 implicit-linear-branch 來源）
 10. `studio-world-ir.v0.1.schema.json`
 11. `studio-mapping.v0.1.schema.json`
@@ -295,3 +295,12 @@ INTERNAL_RUNTIME_ERROR
 ```
 
 Before remote write tools are enabled, Action IR, Event IR and Projection should gain explicit serializable contract IDs rather than rely only on Python dataclass shape.
+
+## 10. Non-normative future architecture proposal
+
+The repository preserves the following long-term platform proposal without treating it as a current Runtime contract or implementation authorization:
+
+- [`whitepapers/10-compilableworld-executable-world-platform-v0.1-zh-TW.md`](whitepapers/10-compilableworld-executable-world-platform-v0.1-zh-TW.md) — original Executable World Platform／WGBP whitepaper;
+- [`EXECUTABLE_WORLD_PLATFORM_FUTURE_ARCHITECTURE_REVIEW_zh-TW.md`](EXECUTABLE_WORLD_PLATFORM_FUTURE_ARCHITECTURE_REVIEW_zh-TW.md) — compatibility review, blockers and staged adoption gates.
+
+Until a separately versioned work package is approved, WGBP, EngineCapability, EntityBinding, Projection streaming, multi-rate clocks, SaveBarrier, engine authority delegation, Bakin/Godot adapters and Direct Renderer remain proposals. Existing schemas, Compiler behavior, Runtime tests and authority boundaries remain normative.
