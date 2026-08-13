@@ -10,8 +10,8 @@
           "equals": "completed"
         }
       ],
-      "text": "老鐵收下柴薪，將工錢放到你掌心；這座城暫時承認了你的存在。",
-      "mode": "append"
+      "text": "苦役場的石板地仍響著搬運聲。老鐵已收下柴薪、結清十五枚銅幣的工錢；他朝你點了點頭，這座城暫時承認了你的存在。",
+      "mode": "replace"
     },
     {
       "room_id": "room.north_garrison",

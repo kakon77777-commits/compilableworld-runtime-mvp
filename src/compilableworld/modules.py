@@ -94,7 +94,12 @@ class DoorModule(BaseModule):
             key = runtime.state.get(door, "door", "key_id")
             if key and runtime.state.get(key, "inventory", "carrier") != action.actor_id:
                 return TransitionResult(False, message="你沒有正確的鑰匙")
-            return TransitionResult(True, [StateDelta(door, "door", "locked", "set", False, source_module=self.contract.module_id)], [self.event("door.unlocked", action, {"door": door}, door)], "你解開了門鎖。")
+            key_note = (
+                f"你用{runtime.registry.get(key).name}解開了{runtime.registry.get(door).name}。"
+                if key and runtime.registry.contains(key)
+                else f"你解開了{runtime.registry.get(door).name}。"
+            )
+            return TransitionResult(True, [StateDelta(door, "door", "locked", "set", False, source_module=self.contract.module_id)], [self.event("door.unlocked", action, {"door": door}, door)], key_note)
         if runtime.state.get(door, "door", "locked", False):
             return TransitionResult(False, message="門被鎖住了")
         if runtime.state.get(door, "door", "open", False):
@@ -108,8 +113,15 @@ class InventoryModule(BaseModule):
 
     def evaluate(self, action: ActionIR, runtime: WorldRuntime) -> TransitionResult:
         if action.verb == "inventory":
-            items = [e.entity_id for e in runtime.registry.values() if runtime.state.get(e.entity_id, "inventory", "carrier") == action.actor_id]
-            return TransitionResult(True, events=[self.event("inventory.observed", action, {"items": items})], message="物品欄: " + (", ".join(items) or "空"))
+            items = [e for e in runtime.registry.values() if runtime.state.get(e.entity_id, "inventory", "carrier") == action.actor_id]
+            item_ids = [item.entity_id for item in items]
+            currency = runtime.state.get(action.actor_id, "wallet", "currency", 0)
+            return TransitionResult(
+                True,
+                events=[self.event("inventory.observed", action, {"items": item_ids})],
+                message="物品欄：" + ("、".join(item.name for item in items) or "空")
+                + f"｜貨幣：{currency}",
+            )
         item = action.target_id
         if not item or not runtime.registry.contains(item) or runtime.registry.get(item).entity_type != "item":
             return TransitionResult(False, message="找不到物品")
@@ -150,12 +162,28 @@ class InventoryModule(BaseModule):
 
 class HealthModule(BaseModule):
     def __init__(self) -> None:
-        super().__init__(ModuleContract("health.core", "0.1.0", "TMS", ["status"], ["health.observed"], ["health.*", "status.*"], [], ["entity", "state", "event"]))
+        super().__init__(ModuleContract("health.core", "0.1.0", "TMS", ["status"], ["health.observed"], ["health.*", "status.*", "wallet.*", "magic.*"], [], ["entity", "state", "event"]))
 
     def evaluate(self, action: ActionIR, runtime: WorldRuntime) -> TransitionResult:
         current = runtime.state.get(action.actor_id, "health", "current")
         maximum = runtime.state.get(action.actor_id, "health", "max")
-        return TransitionResult(True, events=[self.event("health.observed", action, {"current": current, "max": maximum})], message=f"生命值: {current}/{maximum}")
+        currency = runtime.state.get(action.actor_id, "wallet", "currency", 0)
+        mp = runtime.state.get(action.actor_id, "magic", "mp_current")
+        mp_max = runtime.state.get(action.actor_id, "magic", "mp_max")
+        fp = runtime.state.get(action.actor_id, "magic", "fp_current")
+        fp_max = runtime.state.get(action.actor_id, "magic", "fp_max")
+        payload = {
+            "current": current, "max": maximum, "currency": currency,
+            "mp_current": mp, "mp_max": mp_max, "fp_current": fp, "fp_max": fp_max,
+        }
+        resources = ""
+        if mp is not None and fp is not None:
+            resources = f"｜MP: {mp}/{mp_max}｜FP: {fp}/{fp_max}"
+        return TransitionResult(
+            True,
+            events=[self.event("health.observed", action, payload)],
+            message=f"生命值: {current}/{maximum}｜貨幣: {currency}{resources}",
+        )
 
 
 class CombatModule(BaseModule):
@@ -473,7 +501,12 @@ class DialogueModule(BaseModule):
         line = select_dialogue(runtime, action.actor_id, speaker_id, topic)
         if line is None:
             return TransitionResult(False, message="這個話題暫時得不到回應")
-        response = f"{speaker.name}：{line['text']}"
+        fallback = topic != line["topic"]
+        fallback_note = (
+            f"（對方沒有回應「{requested_topic}」，轉而談起別的事。）\n"
+            if fallback else ""
+        )
+        response = f"{fallback_note}{speaker.name}：{line['text']}"
         event = self.event("dialogue.responded", action, {
             "speaker_id": speaker_id,
             "speaker_name": speaker.name,
@@ -864,9 +897,14 @@ class QuestModule(BaseModule):
 
     def evaluate(self, action: ActionIR, runtime: WorldRuntime) -> TransitionResult:
         summaries = []
+        state_labels = {
+            "unstarted": "尚未開始", "available": "進行中",
+            "completed": "已完成", "failed": "失敗",
+        }
         for quest in runtime.package.get("quests", []):
             state = runtime.state.get(action.actor_id, "quest", quest["quest_id"], quest.get("initial_state", "available"))
-            summaries.append(f"{quest['title']}[{state}]")
+            label = state_labels.get(state, state)
+            summaries.append(f"{quest['title']}[{label} / {state}]")
         return TransitionResult(True, events=[self.event("quest.observed", action, {"quests": summaries})], message="任務: " + (", ".join(summaries) or "無"))
 
     def on_register(self, runtime: WorldRuntime) -> None:

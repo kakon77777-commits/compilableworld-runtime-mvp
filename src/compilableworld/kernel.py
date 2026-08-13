@@ -34,7 +34,9 @@ from .models import (
     StateCell, StateDelta, TransitionResult, new_id,
 )
 from .functions import FunctionRegistry
-from .player_generation import GeneratedPlayer, actor_id_for_player, template_records
+from .player_generation import (
+    GeneratedPlayer, actor_id_for_player, generate_character, template_records,
+)
 from .schema_registry import schema_contracts
 from .state_machine import (
     state_machine_is_active_leaf,
@@ -651,56 +653,211 @@ class WorldRuntime:
             if default_id:
                 replacement_ids.add(default_id)
         carried_items = [
-            (entity.entity_id, self.state.version(entity.entity_id, "inventory", "carrier"))
+            {
+                "item_id": entity.entity_id,
+                "carrier_version": self.state.version(
+                    entity.entity_id, "inventory", "carrier",
+                ),
+            }
             for entity in self.registry.values()
             if entity.entity_id not in replacement_ids
             and self.state.get(entity.entity_id, "inventory", "carrier") in replacement_ids
         ]
         if self.registry.contains(candidate) and candidate not in replacement_ids:
             raise RuntimeErrorBase(f"player actor id already exists: {candidate}")
-        for old_id in replacement_ids:
-            if old_id == candidate or not self.registry.contains(old_id):
-                continue
-            self.registry.remove(old_id)
-            self.state.remove_owner(old_id)
-            self.dynamic_entities.discard(old_id)
-            self.player_profiles.pop(old_id, None)
-        if self.registry.contains(candidate):
-            self.registry.remove(candidate)
-            self.state.remove_owner(candidate)
-            self.dynamic_entities.discard(candidate)
-            self.player_profiles.pop(candidate, None)
-
         spawn = self.package.get("world", {}).get("player_spawn")
         if not spawn:
             raise RuntimeErrorBase("world.player_spawn is required for generated players")
-        self.registry.add(Entity(
+        entity = Entity(
             entity_id=candidate,
             entity_type="character",
             name=profile.name,
             components=["position", "health", "inventory", "quest", "combatant", "magic"],
             metadata={"provenance": "player_generated", "generation": profile.to_dict()},
-        ))
-        self.dynamic_entities.add(candidate)
-        self.player_profiles[candidate] = profile.to_dict()
-        self.active_player_id = candidate
-        self.state.seed(candidate, "position", "room", spawn)
-        for attr, value in profile.attributes.items():
-            self.state.seed(candidate, "combat", attr, value)
-        self.state.seed(candidate, "combat", "phase_tier", profile.phase_tier)
-        self.state.seed(candidate, "health", "current", profile.hp_max)
-        self.state.seed(candidate, "health", "max", profile.hp_max)
-        self.state.seed(candidate, "status", "alive", True)
-        self.state.seed(candidate, "magic", "mp_current", profile.mp_max)
-        self.state.seed(candidate, "magic", "mp_max", profile.mp_max)
-        self.state.seed(candidate, "magic", "fp_current", profile.fp_max)
-        self.state.seed(candidate, "magic", "fp_max", profile.fp_max)
-        self.state.seed(candidate, "wallet", "currency", 0)
-        for quest in self.package.get("quests", []):
-            self.state.seed(candidate, "quest", quest["quest_id"], quest["initial_state"])
-        for item_id, version in carried_items:
-            self.state.seed(item_id, "inventory", "carrier", candidate, version)
+        )
+        materialized = EventIR(
+            "player.materialized",
+            "kernel",
+            {
+                "actor_id": candidate,
+                "entity": asdict(entity),
+                "profile": profile.to_dict(),
+                "replaced_actor_ids": sorted(
+                    actor_id for actor_id in replacement_ids
+                    if actor_id != candidate and self.registry.contains(actor_id)
+                ),
+                "transferred_items": sorted(
+                    carried_items, key=lambda item: item["item_id"],
+                ),
+            },
+            target=candidate,
+            timestamp_tick=self.scheduler.tick,
+            visibility="private",
+        )
+        materialized.correlation_id = materialized.event_id
+
+        # Player generation is authoritative Runtime state, so its durable
+        # EventLog record and the in-memory materialization succeed or roll
+        # back together.  Without this root event, Snapshot can restore a
+        # generated actor while EventLog Replay silently loses its registry,
+        # profile, and active-player provenance.
+        before_entities = dict(self.registry._entities)
+        before_cells = dict(self.state._cells)
+        before_dynamic = set(self.dynamic_entities)
+        before_profiles = deepcopy(self.player_profiles)
+        before_active = self.active_player_id
+        try:
+            self._apply_player_materialized_event(materialized)
+            self.event_log.append(materialized)
+        except Exception:
+            self.registry._entities = before_entities
+            self.state._cells = before_cells
+            self.dynamic_entities = before_dynamic
+            self.player_profiles = before_profiles
+            self.active_player_id = before_active
+            raise
         return candidate
+
+    def _generated_profile_from_record(self, record: Any) -> GeneratedPlayer:
+        """Rebuild and verify one deterministic generated-player record."""
+        if not isinstance(record, dict):
+            raise RuntimeErrorBase("EventLog player.materialized profile is invalid")
+        try:
+            mode = record["mode"]
+            overrides = (
+                record.get("formula", {}).get("override_attributes", {})
+                if mode == "custom" else None
+            )
+            candidates = [
+                generate_character(
+                    template_id=record["template_id"],
+                    name=record["name"],
+                    seed=record["seed"],
+                    randomize=mode == "random",
+                    attribute_overrides=overrides,
+                    package=package,
+                )
+                for package in (self.package, None)
+            ]
+        except (KeyError, TypeError, ValueError) as exc:
+            raise RuntimeErrorBase(
+                "EventLog player.materialized profile is invalid"
+            ) from exc
+        expected = next(
+            (candidate for candidate in candidates if record == candidate.to_dict()),
+            None,
+        )
+        if mode not in {"template", "random", "custom"} or expected is None:
+            raise RuntimeErrorBase(
+                "EventLog player.materialized profile is not reproducible"
+            )
+        return expected
+
+    def _apply_player_materialized_event(self, event: EventIR) -> None:
+        """Validate and apply the durable root event for a generated actor."""
+        payload = event.payload
+        required_fields = {
+            "actor_id", "entity", "profile", "replaced_actor_ids", "transferred_items",
+        }
+        actor_id = payload.get("actor_id")
+        if (
+            event.source != "kernel"
+            or event.authority != "runtime"
+            or event.visibility != "private"
+            or event.target != actor_id
+            or event.causation_id is not None
+            or event.correlation_id != event.event_id
+            or set(payload) != required_fields
+            or not isinstance(actor_id, str)
+            or re.fullmatch(r"[a-z][a-z0-9_.-]*", actor_id) is None
+        ):
+            raise RuntimeErrorBase("EventLog player.materialized envelope is invalid")
+
+        profile = self._generated_profile_from_record(payload.get("profile"))
+        expected_entity = Entity(
+            entity_id=actor_id,
+            entity_type="character",
+            name=profile.name,
+            components=["position", "health", "inventory", "quest", "combatant", "magic"],
+            metadata={"provenance": "player_generated", "generation": profile.to_dict()},
+        )
+        if payload.get("entity") != asdict(expected_entity):
+            raise RuntimeErrorBase("EventLog player.materialized entity is invalid")
+
+        replacement_ids = payload.get("replaced_actor_ids")
+        transferred_items = payload.get("transferred_items")
+        if (
+            not isinstance(replacement_ids, list)
+            or replacement_ids != sorted(replacement_ids)
+            or len(replacement_ids) != len(set(replacement_ids))
+            or any(not isinstance(item, str) or item == actor_id for item in replacement_ids)
+            or not isinstance(transferred_items, list)
+        ):
+            raise RuntimeErrorBase("EventLog player.materialized replacement data is invalid")
+
+        default_actor = self.package.get("world", {}).get("default_player_entity")
+        allowed_replacements = set(self.dynamic_entities)
+        if isinstance(default_actor, str):
+            allowed_replacements.add(default_actor)
+        if any(
+            old_id not in allowed_replacements or not self.registry.contains(old_id)
+            for old_id in replacement_ids
+        ):
+            raise RuntimeErrorBase("EventLog player.materialized replacement actor is invalid")
+        if self.registry.contains(actor_id) or any(
+            path.startswith(f"{actor_id}::") for path in self.state._cells
+        ):
+            raise RuntimeErrorBase("EventLog player.materialized actor already exists")
+
+        expected_transfers = sorted(
+            (
+                {
+                    "item_id": entity.entity_id,
+                    "carrier_version": self.state.version(
+                        entity.entity_id, "inventory", "carrier",
+                    ),
+                }
+                for entity in self.registry.values()
+                if entity.entity_id not in replacement_ids
+                and self.state.get(entity.entity_id, "inventory", "carrier")
+                in replacement_ids
+            ),
+            key=lambda item: item["item_id"],
+        )
+        if transferred_items != expected_transfers:
+            raise RuntimeErrorBase("EventLog player.materialized transfer data is invalid")
+
+        spawn = self.package.get("world", {}).get("player_spawn")
+        if not isinstance(spawn, str) or not spawn:
+            raise RuntimeErrorBase("world.player_spawn is required for generated players")
+        for old_id in replacement_ids:
+            self.registry.remove(old_id)
+            self.state.remove_owner(old_id)
+            self.dynamic_entities.discard(old_id)
+            self.player_profiles.pop(old_id, None)
+        self.registry.add(expected_entity)
+        self.dynamic_entities.add(actor_id)
+        self.player_profiles[actor_id] = profile.to_dict()
+        self.active_player_id = actor_id
+        self.state.seed(actor_id, "position", "room", spawn)
+        for attr, value in profile.attributes.items():
+            self.state.seed(actor_id, "combat", attr, value)
+        self.state.seed(actor_id, "combat", "phase_tier", profile.phase_tier)
+        self.state.seed(actor_id, "health", "current", profile.hp_max)
+        self.state.seed(actor_id, "health", "max", profile.hp_max)
+        self.state.seed(actor_id, "status", "alive", True)
+        self.state.seed(actor_id, "magic", "mp_current", profile.mp_max)
+        self.state.seed(actor_id, "magic", "mp_max", profile.mp_max)
+        self.state.seed(actor_id, "magic", "fp_current", profile.fp_max)
+        self.state.seed(actor_id, "magic", "fp_max", profile.fp_max)
+        self.state.seed(actor_id, "wallet", "currency", 0)
+        for quest in self.package.get("quests", []):
+            self.state.seed(actor_id, "quest", quest["quest_id"], quest["initial_state"])
+        for item in transferred_items:
+            self.state.seed(
+                item["item_id"], "inventory", "carrier", actor_id,
+                item["carrier_version"],
+            )
 
     def register_module(self, module: RuntimeModule) -> None:
         contract = module.contract
@@ -2889,6 +3046,8 @@ class WorldRuntime:
             replay_tick = max(replay_tick, event.timestamp_tick)
             if event.event_type in {"fsm.transitioned", "fsm.completed", "fsm.failed"}:
                 self._validate_replayed_fsm_lifecycle(event)
+            if event.event_type == "player.materialized":
+                self._apply_player_materialized_event(event)
             if event.event_type == "state.committed":
                 for item in event.payload.get("applied", []):
                     self.state.seed(

@@ -67,6 +67,8 @@ PYTHONPATH=src python3 -m compilableworld play build/mingyun_zhiyu_peace_city/wo
 
 第一版生成規則沿用整合文件與 Runtime 已驗證的公式：五維地板值為 10，預設 `attribute = 10 + cumulative_power × weight`（新手 cumulative power=15）；HP=`CON×8`、MP=`MAG×5`、FP=`(MAG+DEX)×2`。自訂值會被記錄為 override；隨機生成只改變模板選擇與 seed，不會另開一套戰鬥公式。若要完全沿用舊版固定實體，可加 `--legacy-default`，或明確指定 `--actor`。
 
+角色實體化現在會先由 Runtime 產生 private `player.materialized` 根事件，再以同一交易邊界寫入 EventLog；事件保存可重現 profile、動態 Entity、被替換玩家與攜帶物轉移資料。Replay 會重新驗證 seed／模板／公式結果與替換邊界後才重建 registry、`active_player_id`、profile 與初始 State，遭竄改或無法重現的角色事件會直接拒絕。Snapshot 仍保存完整 checkpoint；兩者是互補的恢復證據，不再只有 Snapshot 知道動態玩家存在。
+
 網頁入口也提供 `/api/character/templates` 與 `POST /api/character/create`，建立後會替換目前瀏覽器 actor，並回傳完整生成資料與新的 View Model。
 
 ## 測試
@@ -242,7 +244,7 @@ Gray Crown 的 `search` 保留為 v0.6 相容切片：第一 tick 依 actor aliv
 
 ### Snapshot 與排程恢復
 
-`save_snapshot` 使用 `compilableworld.snapshot/v0.6`，除了 Runtime State、動態玩家、生成 profile、目前 tick 與排程 Action，也保存 pending Action 的 route cursor、retry attempt／deadline、`selected_branches` 與實際路徑 `completed_steps`。載入時會驗證 route node、visited edge、active retry target、phase／queue due tick 與 authored branch；舊 `v0.1`–`v0.5` 仍有明確 migration，legacy Action 的 route 為 null。
+`save_snapshot` 使用 `compilableworld.snapshot/v0.6`，除了 Runtime State、動態玩家、生成 profile、目前 tick 與排程 Action，也保存 pending Action 的 route cursor、retry attempt／deadline、`selected_branches` 與實際路徑 `completed_steps`。載入時會驗證 route node、visited edge、active retry target、phase／queue due tick 與 authored branch；舊 `v0.1`–`v0.5` 仍有明確 migration，legacy Action 的 route 為 null。終端 `save`／`load` 接受裸路徑或一對單／雙引號包住的 Windows 路徑；檔案錯誤會留在互動 session 內回報，不再讓整個 CLI 退出。
 
 ### AMK v0.1（可選的受治理記憶核心）
 
@@ -273,13 +275,13 @@ PYTHONPATH=src python3 -m compilableworld play build/gray_crown/world.package.js
 - Intent Parser 是確定性參考實作；AI Adapter 必須輸出同一 `ActionIR` 並接受 Kernel 驗證。
 - Module Contract 的寫入範圍已由 Kernel 強制檢查；讀取範圍與 Action authority 的強制隔離留待 v0.2。
 - 核心 JSON／CSV Schema 已外部化為 `schemas/` 下二十四份契約檔（含 Action behavior v0.1–v0.7 與 StateIR v0.1–v0.6 相容契約）；CSV header、scoped StateIR、Action-scope behavior、EveGlyph World IR migration 與人工 mapping validation 已接入，跨檔案引用與其他語意規則仍由 Compiler 驗證。
-- Replay 重放已提交 Delta；跨版本重放仍需 migration registry。
+- Replay 重放已提交 Delta、動態玩家實體化與 Action／StateIR lifecycle；跨版本重放仍需 migration registry。
 - 戰鬥有兩條判定路徑，同一場戰鬥不會混用：(1) **簡易路徑**——命中率 85%、傷害區間 3-7、`combatant` component 存活反擊機率 75%（區間 1-3），取材自對真實 LPC MUD（mhsj）戰鬥系統的研究，見 `docs/whitepapers/`；(2) **公式路徑**——當雙方都在 `entities.csv` 填了完整五維屬性（`str/con/mag/agi/dex` + 選填 `phase_tier`）時自動啟用，直接還原 `worlds/mingyun_zhiyu/data/drafts/combat_resolution_system.json`（Neo 已審閱核准）的比率制命中/傷害/突破門檻公式**與交鋒（Exchange）先攻回合制**——一次 `attack` 指令＝一次交鋒，`IV=AGI+0.5×DEX` 決定雙方各自的行動次數（`clamp(round(IV_己方/IV_對方),1,4)`），較快一方的行動全部先解算完才輪到較慢一方（來源文件是敘事上的交錯描寫，這裡簡化成「先攻方全部行動完再輪下一方」，非逐拍交錯，有明確記錄不是隱藏簡化）。見 `src/compilableworld/combat_formulas.py`，`tests/test_combat_formulas.py` 用該文件自己的 worked example（露芙緹雅 vs 格洛森、IV比值3.2→3次行動）逐位數比對回歸測試。`examples/mingyun_zhiyu_peace_city` 的 `player.newcomer`（地板值屬性，tier0）與 `npc.woerkan`（真實 canon 數值，tier1）雙方都已授權屬性，實際觸發公式路徑；`creature.sewer_rat`／`npc.guard` 等舊有戰鬥實體刻意留在簡易路徑——公式常數（HP=CON×8、傷害×0.1縮放）是為數百點屬性的正式 canon 角色校準的，硬套在地板值內容上會異常緩慢/肉質過厚（實際算過，不是猜測）。五維屬性欄位為全有全無（部分填寫會編譯失敗），且與舊版 `health` 欄位互斥（HP 改由 CON 推導）。
 - 規則魔法施法系統（同一份 `combat_resolution_system.json` 的 `rule_magic_casting_system`）已實作 MP/FP 資源池（由 MAG/DEX 在編譯期自動推導，五維屬性齊全的實體都會有）與 `cast <法術名>` 指令，目前接了兩個法術：`護盾術`（5 符號，MP40/FP25，temp_HP=施法者MAG×2，優先於真實生命值承受傷害，且與其他狀態一樣持續 3 次交鋒——耗盡或到期兩者先到者為準）、`疾風步`（3 符號，MP24/FP15，IV×1.5 持續 3 次交鋒；symbol_count=3 是本專案自己從 `combo_home` 標籤數推斷的，來源文件沒有給這個法術的具體數字，跟 `護盾術` 是文件自己給的範例不同）。異常狀態現在是一個真正通用、會隨交鋒衰減的機制（`combat.status_effects`，見 `combat_formulas.py` 的 `refresh_status`／`decay_status_effects`），不是只為了護盾寫死的一次性欄位——`疾風步` 直接證明這點：它改的是先攻回合制的行動次數，不是傷害或血量。**刻意未實作**：多交鋒引導詠唱（`cast_time_exchanges>1` 的高階法術，需要在交鋒之間插入「引導中斷判定」，目前交鋒已實作但引導/中斷邏輯還沒有——本輪也刻意簡化成「施法本身不消耗交鋒」，跟來源文件嚴格定義有落差，已記錄）；完整的異常狀態框架其餘 9 種（麻痺/破綻/凍傷/束縛/靜默等，目前只做了 shield_buff／haste_疾風 兩種，通用的衰減/刷新機制已就位，加新狀態的邊際成本應該不高）；近戰以外招式（`ranged_precision_physical`／`mental_spiritual` 這兩種攻擊類型公式已在來源文件定義好，尚未接線）。這些是該檔案裡份量最大的剩餘部分，留待未來階段。
 - Web Gateway 是單一 actor、單一瀏覽器分頁假設下的 request/response API（無 WebSocket、無帳號/session），與已知的單程序/單世界限制一致；`/api/action` 與 `/api/state` 共用同一把 lock 序列化存取，避免併發提交造成的版本衝突，但不是為多人設計的。
 - AMK v0.1 已提供本機 Raw/Clean、治理與 CompilableWorld EventIR 唯讀擷取；它目前沒有向量／圖／時間索引、真正網路同步、加密副本、背景自我改寫或直接程式碼／權重寫入。它不是 Runtime State，也不會自動把遊戲事件升格為 Clean truth。
 - （已修復，記錄供參考）CLI 曾在非 UTF-8 系統 locale（例如繁體中文 Windows 的 cp950）下對含中文標點的 `say` 輸入拋出編碼錯誤；`cli.py` 現在會在啟動時強制 stdin/stdout 為 UTF-8。
-- （已修復，源自真實的 AI 玩家試玩）指令目標現在可以用場景內可見的顯示名稱（例如「老鐵」）指定，不再強制要求內部 ID（`npc.foreman_laotie`）——`DeterministicIntentParser` 會在目前房間與玩家物品欄中做名稱解析，找不到或有歧義時一律不猜測、原樣傳給下層模組，讓玩家看到正常的「找不到」訊息，不會誤觸錯的目標。試玩也讓 `give` 增加仍在使用中的鑰匙保護；Gray Crown 市集改成正確的向下出口並依鎖定／解鎖／開門狀態投影文字；和平之城支援工作話題別名、先交柴再問工作的自由順序，並明示十五枚銅幣與身份牌通行規則；終端 `help` 只列出世界實際安裝的行動，`tick` 分開顯示執行 Action 數與世界產生 Event 數。另外修正：裸方向詞（`north`）現在可直接使用；`unlock` 對非門實體會給出正確訊息；戰鬥現在有反擊傷害與獨立的擊殺訊息。
+- （已修復，源自真實的 AI 玩家試玩）指令目標現在可以用場景內可見的顯示名稱（例如「老鐵」）指定，不再強制要求內部 ID（`npc.foreman_laotie`）——`DeterministicIntentParser` 會在目前房間與玩家物品欄中做名稱解析，找不到或有歧義時一律不猜測、原樣傳給下層模組，讓玩家看到正常的「找不到」訊息，不會誤觸錯的目標。試玩也讓 `give` 增加仍在使用中的鑰匙保護；Gray Crown 市集改成正確的向下出口並依鎖定／解鎖／開門狀態投影文字；和平之城支援工作話題別名、先交柴再問工作的自由順序，並明示十五枚銅幣與身份牌通行規則；終端 `help` 只列出世界實際安裝的行動，`tick` 分開顯示執行 Action 數與世界產生 Event 數。後續實玩再補上：房間列出可走出口與即時門狀態、`tick` 顯示完成行為敘述、物品欄以名稱顯示並附貨幣、`status` 顯示貨幣／MP／FP、未知話題明示 fallback、帶引號的存讀檔路徑不再造成退出，以及動態玩家的 EventLog Replay。另有基礎修正：裸方向詞（`north`）可直接使用；`unlock` 對非門實體會給出正確訊息；戰鬥有反擊傷害與獨立的擊殺訊息。
 
 ## Read-only MCP 世界介面（M0）
 

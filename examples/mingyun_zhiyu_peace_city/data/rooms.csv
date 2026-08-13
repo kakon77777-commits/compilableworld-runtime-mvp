@@ -3,5 +3,5 @@ room.registration_office,登記所,灰撲撲的木造建築，牆上釘著密密
 room.slum_alley,賤民區·聚居巷,違建層層疊疊，蜂巢般的巷弄裡曬著補丁衣物，孩童在污水溝間追逐。空氣裡混著合成糧食與煤煙的氣味，這裡是三十萬人擠出來的縫隙。,region.slum_district
 room.labor_yard,苦役場,苦役場的石板地被踩得發亮，工頭老鐵扠腰站在木堆前，嗓門大得蓋過整條巷子：「肯幹活的，來搬柴！」,region.slum_district
 room.slum_sewers,賤民區·地下水道,下水道低矮潮濕，水聲裡夾雜著細碎的爪聲——巨鼠在黑暗中窺伺，牠們的獠牙在協會的收購名單上標著F級。,region.slum_district
-room.checkpoint_north_gate,北境關卡,一道生鏽的鐵柵欄隔開賤民區與軍營，守衛指向柵欄：「有臨時身份牌就自行開門；北面軍營不是給你觀光的。」,region.slum_district
+room.checkpoint_north_gate,北境關卡,一道生鏽的鐵柵欄隔開賤民區與軍營，守衛指向柵欄：「臨時身份牌可通行；北面是正式軍營，進去後自己留神。」,region.slum_district
 room.north_garrison,北境軍營,整齊排列的營帳延伸至視線盡頭，甲冑碰撞聲與操練口令此起彼落——這裡是和平之城北防線五千正規軍的駐地。營帳中央，一名矮人將領獨自擦拭著巨盾，甲面映著他沉默的側臉，對周遭的喧鬧恍若未聞。,region.north_garrison

@@ -414,6 +414,54 @@ class RuntimeTests(unittest.TestCase):
         self.assertIn("actions_executed=0", summaries[0])
         self.assertRegex(summaries[0], r"events_emitted=[1-9]")
 
+    def test_terminal_snapshot_accepts_quoted_windows_path_and_loads_without_exit(self) -> None:
+        snapshot = Path(self.temp.name) / "save files" / "quoted snapshot.json"
+        snapshot.parent.mkdir()
+        gateway = TerminalGateway(self.runtime, "player.neo")
+        commands = [
+            f'save "{snapshot}"',
+            "north",
+            f'load "{snapshot}"',
+            "status",
+            "quit",
+        ]
+        with patch("builtins.input", side_effect=commands), patch("builtins.print") as output:
+            gateway.run()
+
+        self.assertTrue(snapshot.exists())
+        self.assertEqual(
+            self.runtime.state.get("player.neo", "position", "room"),
+            "room.south_gate",
+        )
+        messages = [str(call.args[0]) for call in output.call_args_list if call.args]
+        self.assertTrue(any("Snapshot 已儲存" in message for message in messages))
+        self.assertTrue(any("Snapshot 已載入" in message for message in messages))
+        self.assertTrue(any("貨幣" in message for message in messages))
+
+    def test_terminal_snapshot_error_is_reported_without_crashing_session(self) -> None:
+        directory = Path(self.temp.name) / "not-a-file"
+        directory.mkdir()
+        gateway = TerminalGateway(self.runtime, "player.neo")
+        with patch(
+            "builtins.input", side_effect=[f'save "{directory}"', "quit"],
+        ), patch("builtins.print") as output:
+            gateway.run()
+        messages = [str(call.args[0]) for call in output.call_args_list if call.args]
+        self.assertTrue(any("Snapshot 儲存失敗" in message for message in messages))
+
+    def test_terminal_room_projection_lists_directions_and_live_door_state(self) -> None:
+        gateway = TerminalGateway(self.runtime, "player.neo")
+        with patch("builtins.print") as output:
+            gateway._render_room()
+        messages = [str(call.args[0]) for call in output.call_args_list if call.args]
+        self.assertIn("出口：north", messages)
+
+        self.runtime.submit(ActionIR("player.neo", "move", args={"direction": "north"}))
+        with patch("builtins.print") as output:
+            gateway._render_room()
+        messages = [str(call.args[0]) for call in output.call_args_list if call.args]
+        self.assertTrue(any("down（舊王室庫門：已上鎖）" in message for message in messages))
+
     def test_bare_direction_word_parses_as_move(self) -> None:
         action = DeterministicIntentParser().parse("north", "player.neo", self.runtime)
         self.assertEqual(action.verb, "move")
@@ -490,6 +538,13 @@ class PeaceCityQuestTests(unittest.TestCase):
         self.assertEqual(self.runtime.state.get("item.firewood_bundle", "inventory", "carrier"), "npc.foreman_laotie")
         self.assertEqual(self.runtime.state.get(actor, "quest", "quest.find_work"), "completed")
         self.assertEqual(self.runtime.state.get(actor, "wallet", "currency"), 15)
+        look = self.runtime.submit(ActionIR(actor, "look"))
+        self.assertIn("已收下柴薪", look.message)
+        self.assertNotIn("來搬柴", look.message)
+
+        inventory = self.runtime.submit(ActionIR(actor, "inventory"))
+        self.assertIn("貨幣：15", inventory.message)
+        self.assertNotIn("item.", inventory.message)
 
     def test_delivering_before_accepting_still_completes_and_pays_reward(self) -> None:
         actor = "player.newcomer"
@@ -513,6 +568,7 @@ class PeaceCityQuestTests(unittest.TestCase):
         reply = self.runtime.submit(ActionIR(actor, "talk", "npc.foreman_laotie", args={"topic": "工作"}))
         self.assertEqual(reply.status.value, "completed")
         self.assertIn("十五枚銅幣", reply.message)
+        self.assertNotIn("轉而談起別的事", reply.message)
         response = [e for e in self.runtime.event_log.events if e.event_type == "dialogue.responded"][-1]
         self.assertEqual(response.payload["topic"], "工作")
         self.assertEqual(response.payload["resolved_topic"], "work")

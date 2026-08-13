@@ -3,10 +3,12 @@ from __future__ import annotations
 import json
 import tempfile
 import unittest
+from copy import deepcopy
 from pathlib import Path
+from unittest.mock import patch
 
 from compilableworld.compiler import compile_world
-from compilableworld.kernel import WorldRuntime
+from compilableworld.kernel import KernelTransactionError, WorldRuntime
 from compilableworld.models import ActionIR
 from compilableworld.modules import install_builtin_modules
 from compilableworld.player_generation import generate_character, template_catalog
@@ -82,6 +84,74 @@ class PlayerGenerationTests(unittest.TestCase):
             self.assertEqual(restored.state.get(actor, "position", "room"), "room.registration_office")
             self.assertEqual(restored.player_profiles[actor]["seed"], 11)
 
+    def test_generated_player_and_gameplay_are_reconstructed_by_event_replay(self) -> None:
+        with tempfile.TemporaryDirectory() as temp:
+            package_path = compile_world(PEACE_CITY, temp)
+            event_log = Path(temp) / "generated-events.jsonl"
+            runtime = WorldRuntime.from_package(package_path, event_log)
+            install_builtin_modules(runtime)
+            profile = generate_character(
+                template_id="vanguard", seed=813, name="Replay旅者",
+                package=runtime.package,
+            )
+            actor = runtime.create_player(profile)
+            runtime.submit(ActionIR(actor, "take", "item.provisional_id_tag"))
+            runtime.submit(ActionIR(actor, "move", args={"direction": "north"}))
+
+            self.assertEqual(runtime.event_log.events[0].event_type, "player.materialized")
+            replayed = WorldRuntime.from_package(package_path)
+            replayed.replay(runtime.event_log.events)
+
+            self.assertTrue(replayed.registry.contains(actor))
+            self.assertFalse(replayed.registry.contains("player.newcomer"))
+            self.assertEqual(replayed.dynamic_entities, {actor})
+            self.assertEqual(replayed.active_player_id, actor)
+            self.assertEqual(replayed.player_profiles[actor], profile.to_dict())
+            self.assertEqual(replayed.state.export(), runtime.state.export())
+
+    def test_tampered_player_materialization_fails_closed(self) -> None:
+        with tempfile.TemporaryDirectory() as temp:
+            package_path = compile_world(PEACE_CITY, temp)
+            runtime = WorldRuntime.from_package(package_path)
+            actor = runtime.create_player(generate_character(
+                seed=19, name="完整性旅者", package=runtime.package,
+            ))
+            tampered = deepcopy(runtime.event_log.events)
+            tampered[0].payload["profile"]["hp_max"] += 1
+            replayed = WorldRuntime.from_package(package_path)
+
+            with self.assertRaisesRegex(RuntimeError, "not reproducible"):
+                replayed.replay(tampered)
+
+            self.assertFalse(replayed.registry.contains(actor))
+            self.assertEqual(replayed.dynamic_entities, set())
+            self.assertIsNone(replayed.active_player_id)
+
+    def test_player_materialization_rolls_back_when_event_log_fails(self) -> None:
+        with tempfile.TemporaryDirectory() as temp:
+            package_path = compile_world(PEACE_CITY, temp)
+            runtime = WorldRuntime.from_package(package_path)
+            before_state = runtime.state.export()
+            before_entities = {entity.entity_id for entity in runtime.registry.values()}
+
+            with patch.object(
+                runtime.event_log, "append",
+                side_effect=KernelTransactionError("simulated player event failure"),
+            ):
+                with self.assertRaises(KernelTransactionError):
+                    runtime.create_player(generate_character(
+                        seed=20, name="Rollback旅者", package=runtime.package,
+                    ))
+
+            self.assertEqual(runtime.state.export(), before_state)
+            self.assertEqual(
+                {entity.entity_id for entity in runtime.registry.values()},
+                before_entities,
+            )
+            self.assertEqual(runtime.dynamic_entities, set())
+            self.assertEqual(runtime.player_profiles, {})
+            self.assertIsNone(runtime.active_player_id)
+
     def test_replacing_generated_player_transfers_carried_inventory(self) -> None:
         with tempfile.TemporaryDirectory() as temp:
             package_path = compile_world(ROOT / "examples" / "gray_crown", temp)
@@ -101,6 +171,16 @@ class PlayerGenerationTests(unittest.TestCase):
             self.assertTrue(runtime.registry.contains(new_actor))
             self.assertEqual(
                 runtime.state.get("item.old_key", "inventory", "carrier"),
+                new_actor,
+            )
+
+            replayed = WorldRuntime.from_package(package_path)
+            replayed.replay(runtime.event_log.events)
+            self.assertFalse(replayed.registry.contains(old_actor))
+            self.assertTrue(replayed.registry.contains(new_actor))
+            self.assertEqual(replayed.active_player_id, new_actor)
+            self.assertEqual(
+                replayed.state.get("item.old_key", "inventory", "carrier"),
                 new_actor,
             )
 

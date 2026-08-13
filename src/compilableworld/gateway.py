@@ -84,6 +84,11 @@ class DeterministicIntentParser:
 
 
 class TerminalGateway:
+    _opposite_directions = {
+        "north": "south", "south": "north", "east": "west", "west": "east",
+        "up": "down", "down": "up",
+    }
+
     def __init__(self, runtime: WorldRuntime, actor_id: str, parser: IntentParser | None = None) -> None:
         self.runtime = runtime
         self.actor_id = actor_id
@@ -172,15 +177,24 @@ class TerminalGateway:
             if text == "help":
                 print(self._help_text())
                 continue
-            if text.startswith("tick"):
-                parts = text.split()
-                before_events = len(self.runtime.event_log.events)
-                receipts = self.runtime.advance(int(parts[1]) if len(parts) > 1 else 1)
-                emitted_events = len(self.runtime.event_log.events) - before_events
-                print(
-                    f"tick={self.runtime.scheduler.tick}; "
-                    f"actions_executed={len(receipts)}; events_emitted={emitted_events}"
-                )
+            if text == "tick" or text.startswith("tick "):
+                try:
+                    parts = text.split()
+                    ticks = int(parts[1]) if len(parts) > 1 else 1
+                    if len(parts) > 2 or ticks < 0:
+                        raise ValueError("tick 必須是非負整數")
+                    before_events = len(self.runtime.event_log.events)
+                    receipts = self.runtime.advance(ticks)
+                    emitted_events = len(self.runtime.event_log.events) - before_events
+                    for receipt in receipts:
+                        if receipt.message:
+                            print(f">> {receipt.message}")
+                    print(
+                        f"tick={self.runtime.scheduler.tick}; "
+                        f"actions_executed={len(receipts)}; events_emitted={emitted_events}"
+                    )
+                except (RuntimeErrorBase, ValueError) as exc:
+                    print(f"時間推進失敗：{exc}")
                 continue
             if text == "events":
                 for event in self.runtime.event_log.events[-10:]:
@@ -201,14 +215,34 @@ class TerminalGateway:
                 print(json.dumps(self.runtime.diagnostics(), ensure_ascii=False, indent=2))
                 continue
             if text.startswith("save "):
-                self.runtime.save_snapshot(text[5:].strip())
-                print("Snapshot 已儲存。")
+                try:
+                    path = self._snapshot_path(text[5:])
+                    self.runtime.save_snapshot(path)
+                    print(f"Snapshot 已儲存：{path}")
+                except (RuntimeErrorBase, OSError, ValueError) as exc:
+                    print(f"Snapshot 儲存失敗：{exc}")
                 continue
             if text.startswith("load "):
-                self.runtime.load_snapshot(text[5:].strip())
-                print("Snapshot 已載入。")
+                try:
+                    path = self._snapshot_path(text[5:])
+                    self.runtime.load_snapshot(path)
+                    if self.runtime.active_player_id:
+                        self.actor_id = self.runtime.active_player_id
+                    print(f"Snapshot 已載入：{path}")
+                except (RuntimeErrorBase, OSError, ValueError) as exc:
+                    print(f"Snapshot 載入失敗：{exc}")
                 continue
             self._execute(text)
+
+    @staticmethod
+    def _snapshot_path(raw: str) -> str:
+        """Accept a bare or one-pair-quoted Windows snapshot path."""
+        path = raw.strip()
+        if len(path) >= 2 and path[0] == path[-1] and path[0] in {'"', "'"}:
+            path = path[1:-1].strip()
+        if not path:
+            raise ValueError("請提供 Snapshot 檔案路徑")
+        return path
 
     def _help_text(self) -> str:
         """Describe only the verbs provided by this Runtime Package."""
@@ -248,7 +282,8 @@ class TerminalGateway:
         try:
             action = self.parser.parse(text, self.actor_id, self.runtime)
             receipt = self.runtime.submit(action)
-            print(receipt.message)
+            if action.verb != "look" or receipt.status.value != "completed":
+                print(receipt.message)
             if action.verb in {"look", "move"} and receipt.status.value == "completed":
                 self._render_room()
         except (ValueError, IndexError) as exc:
@@ -266,3 +301,32 @@ class TerminalGateway:
         print(f"\n== {room['name']} ==\n{render_room_description(self.runtime, self.actor_id, room)}")
         if visible:
             print("可見：" + "、".join(visible))
+        exits = self._visible_exits(room_id)
+        if exits:
+            print("出口：" + "、".join(exits))
+
+    def _visible_exits(self, room_id: str) -> list[str]:
+        """Project authored exits and current door state without mutating it."""
+        result: list[str] = []
+        for edge in self.runtime.package.get("exits", []):
+            if edge.get("from_room") == room_id:
+                direction = edge.get("direction")
+            elif edge.get("bidirectional") and edge.get("to_room") == room_id:
+                direction = self._opposite_directions.get(edge.get("direction"))
+            else:
+                continue
+            if not isinstance(direction, str) or not direction:
+                continue
+            label = direction
+            door_id = str(edge.get("door_entity") or "").strip()
+            if door_id and self.runtime.registry.contains(door_id):
+                door = self.runtime.registry.get(door_id)
+                if self.runtime.state.get(door_id, "door", "locked", False):
+                    state = "已上鎖"
+                elif self.runtime.state.get(door_id, "door", "open", False):
+                    state = "已開啟"
+                else:
+                    state = "已解鎖、尚未開啟"
+                label += f"（{door.name}：{state}）"
+            result.append(label)
+        return result

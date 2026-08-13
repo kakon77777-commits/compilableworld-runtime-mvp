@@ -4,7 +4,7 @@
 - **Baseline source:** uploaded integrated local snapshot
 - **Runtime package version:** `0.1.1`
 - **Audit date:** 2026-08-13
-- **Verification:** `PYTHONPATH=src python -m pytest -q -p no:cacheprovider` — **350/350 passed, 86 subtests passed**
+- **Verification:** `PYTHONPATH=src python -m pytest -q -p no:cacheprovider` — **356/356 passed, 86 subtests passed**
 - **Purpose:** authoritative inventory for PIW-MCP integration planning
 
 > Status meanings: **Implemented** = code and tests exist; **Partial** = usable core exists but stated boundary remains; **Planned** = no production implementation found in this baseline.
@@ -26,7 +26,7 @@
 | Event bus and reactions | Implemented | synchronous FIFO committed batches, re-entrant queue, 4096-event root cascade limit, audit-only `runtime.reaction_halted`, `commit_reaction()` | ordering, halt, Replay tamper, dialogue→quest and quest reward tests | cross-module behavior remains event-driven and bounded; a halt preserves committed facts and stops pending delivery |
 | Event log | Implemented | `EventLog` with append/load ID uniqueness and transaction-class append rejection | append-time, reaction rollback, schedule create/cancel rollback, restart, replay and AMK adapter tests | MCP recent-events tool can reuse this source |
 | Snapshot/save | Implemented | runtime snapshot methods with atomic pre-commit validation | round-trip, conflicting tick rejection and legacy migration tests | checkpoint tool may wrap existing snapshot boundary |
-| Replay | Implemented | runtime replay path with full-log clock restoration | movement/inventory/door, StateIR timer and nonzero-tick continuation tests | MCP session recovery can rely on replay, with version limits |
+| Replay | Implemented | runtime replay path with full-log clock restoration and private `player.materialized` reconstruction | movement/inventory/door, generated actor registry/profile/state, StateIR timer and nonzero-tick continuation tests | MCP session recovery can rely on replay, with version limits |
 | Snapshot version validation | Implemented | runtime migration/version checks | unknown-version rejection test | MCP must return explicit version mismatch errors |
 | Cross-version migration registry | Partial | `compilableworld_mcp.migration_registry`, plus explicit legacy snapshot migration | coordination and legacy migration tests | generic registry exists; Kernel snapshot loader is still a separate adapter |
 | Scheduler | Implemented | `Scheduler`, Action behavior lifecycle | delay, cancellation, interruption, pending Replay and snapshot restore tests | composite actions remain under runtime authority |
@@ -60,14 +60,14 @@
 | Capability | Status | Primary implementation | Boundary |
 |---|---|---|---|
 | Deterministic intent parser | Implemented | `gateway.py` | AI adapter must emit the same Action IR |
-| Terminal gateway | Implemented | `TerminalGateway` | shared kernel; help follows installed verbs and tick distinguishes executed Actions from emitted Events |
+| Terminal gateway | Implemented | `TerminalGateway` | shared kernel; help follows installed verbs, rooms expose state-aware exits, tick distinguishes Actions/Events and reports completed action text, quoted Windows snapshot paths fail without ending the session |
 | Web gateway | Implemented | `WebGateway`, stdlib HTTP server | single browser actor/session assumption |
 | State-aware room narrative | Implemented | `narrative.py`, `narrative.json` | read-only projection; door/quest/actor state can update descriptions without state writes |
 | Data-driven dialogue | Implemented | `dialogue.py`, `DialogueModule` | emits `dialogue.responded`; does not mutate quests |
 | Dialogue topic fallback, aliases and conditions | Implemented | compiler/runtime selection rules | bounded exact aliases plus local-state projection; no free-text semantic execution |
 | Player template catalog | Implemented | `player_generation.py` | templates are suggestions, not canon characters |
 | Deterministic seeded generation | Implemented | seed and override logic | no second combat formula path |
-| Player snapshot persistence | Implemented | materialized generated actor | tested round-trip |
+| Player snapshot and replay persistence | Implemented | materialized generated actor plus private durable root event | Snapshot round-trip, EventLog registry/profile/state reconstruction, replacement transfer, tamper rejection and append rollback tests |
 | LLM semantic intent adapter | Planned | no model dependency in runtime | PIW-MCP/agent layer responsibility |
 | AI narrative renderer | Planned | runtime exposes facts/projections | external adapter responsibility |
 | Actor belief/secret projection | Planned | no generalized belief store found | major PIW-MCP/world-model gap |

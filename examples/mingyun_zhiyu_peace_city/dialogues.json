@@ -74,7 +74,7 @@
       "speaker_id": "npc.checkpoint_guard",
       "topic": "default",
       "when": [],
-      "text": "臨時身份牌就是通行資格；有牌便自行打開鐵柵欄。只是北面的軍營不是觀光的地方，別惹事。"
+      "text": "臨時身份牌就是通行資格；有牌便自行打開鐵柵欄。北面是正式軍營，進去後自己留神。"
     },
     {
       "dialogue_id": "dialogue.woerkan.default",
