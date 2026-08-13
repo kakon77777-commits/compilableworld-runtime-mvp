@@ -1,5 +1,5 @@
 {
-  "format": "compilableworld.state-machines/v0.5",
+  "format": "compilableworld.state-machines/v0.6",
   "state_machines": [
     {
       "state_machine_id": "fsm.world.vault_seal",
@@ -19,7 +19,7 @@
           "on": "door.unlocked",
           "to": "completed",
           "event_match": {"door": "door.old_vault"},
-          "when": [
+          "when": {"all": [
             {
               "condition_id": "world_is_stable",
               "subject": "owner",
@@ -36,15 +36,15 @@
               "operator": "equals",
               "value": true
             },
-            {
-              "condition_id": "unlocking_actor_currency_is_valid",
+            {"not": {
+              "condition_id": "unlocking_actor_currency_is_negative",
               "subject": "actor",
               "namespace": "wallet",
               "key": "currency",
-              "operator": "greater_or_equal",
+              "operator": "less_than",
               "value": 0
-            }
-          ],
+            }}
+          ]},
           "priority": 100
         }
       ]
@@ -70,7 +70,7 @@
             "state_machine_id": "fsm.system.security",
             "transition_id": "fsm.system.security.vault_unlocked"
           },
-          "when": [],
+          "when": {"all": []},
           "priority": 50
         }
       ]
@@ -93,7 +93,7 @@
           "on": "door.unlocked",
           "to": "open",
           "event_match": {"door": "door.old_vault"},
-          "when": [],
+          "when": {"all": []},
           "priority": 50
         }
       ]
@@ -116,7 +116,7 @@
           "on": "door.unlocked",
           "to": "alerted",
           "event_match": {"door": "door.old_vault"},
-          "when": [],
+          "when": {"all": []},
           "priority": 25
         }
       ]
@@ -145,7 +145,7 @@
           "on": "door.unlocked",
           "to": "incident",
           "event_match": {"door": "door.old_vault"},
-          "when": [],
+          "when": {"all": []},
           "priority": 100
         },
         {
@@ -153,7 +153,7 @@
           "from": "breached",
           "after_ticks": 2,
           "to": "contained",
-          "when": [],
+          "when": {"all": []},
           "priority": 100
         }
       ]

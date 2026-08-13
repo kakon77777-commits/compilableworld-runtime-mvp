@@ -48,10 +48,13 @@ from .functions import FunctionDefinitionError, FunctionRegistry, validate_funct
 from .player_generation import template_records
 from .schema_registry import SchemaContractError, csv_schema_columns, schema_contracts
 from .state_machine import (
+    STATE_MACHINE_CONDITION_GROUP_DEPTH_LIMIT,
+    STATE_MACHINE_CONDITION_LEAF_LIMIT,
     STATE_MACHINE_CONDITION_LIMIT,
     STATE_MACHINE_CONDITION_NAMESPACES,
     STATE_MACHINE_CONDITION_OPERATORS,
     STATE_MACHINE_CONDITION_SUBJECTS,
+    STATE_MACHINE_CONDITION_NODE_LIMIT,
     STATE_MACHINE_DEFINITION_LIMIT,
     STATE_MACHINE_EVENT_MATCH_LIMIT,
     STATE_MACHINE_FORMAT,
@@ -59,6 +62,7 @@ from .state_machine import (
     STATE_MACHINE_FORMAT_V2,
     STATE_MACHINE_FORMAT_V3,
     STATE_MACHINE_FORMAT_V4,
+    STATE_MACHINE_FORMAT_V5,
     STATE_MACHINE_HIERARCHY_DEPTH_LIMIT,
     STATE_MACHINE_OWNER_SCOPES,
     STATE_MACHINE_PRIORITY_LIMIT,
@@ -70,6 +74,7 @@ from .state_machine import (
     STATE_MACHINE_SCHEMA_ID_V2,
     STATE_MACHINE_SCHEMA_ID_V3,
     STATE_MACHINE_SCHEMA_ID_V4,
+    STATE_MACHINE_SCHEMA_ID_V5,
     STATE_MACHINE_STATE_LIMIT,
     STATE_MACHINE_TRANSITION_LIMIT,
     STATE_MACHINE_TIMER_TICK_LIMIT,
@@ -320,6 +325,7 @@ def compile_world(
         STATE_MACHINE_FORMAT_V2: STATE_MACHINE_SCHEMA_ID_V2,
         STATE_MACHINE_FORMAT_V3: STATE_MACHINE_SCHEMA_ID_V3,
         STATE_MACHINE_FORMAT_V4: STATE_MACHINE_SCHEMA_ID_V4,
+        STATE_MACHINE_FORMAT_V5: STATE_MACHINE_SCHEMA_ID_V5,
         STATE_MACHINE_FORMAT: STATE_MACHINE_SCHEMA_ID,
     }.get(state_machines_source.get("format") if isinstance(state_machines_source, dict) else None)
     for source_key, declared_schema_id in declared_source_schemas.items():
@@ -1346,7 +1352,7 @@ def _validate_scoped_state_machines(
     source_format = source.get("format")
     if source_format not in {
         STATE_MACHINE_FORMAT_V1, STATE_MACHINE_FORMAT_V2, STATE_MACHINE_FORMAT_V3,
-        STATE_MACHINE_FORMAT_V4, STATE_MACHINE_FORMAT,
+        STATE_MACHINE_FORMAT_V4, STATE_MACHINE_FORMAT_V5, STATE_MACHINE_FORMAT,
     }:
         raise CompileError("state_machines.json format 不支援")
     machines = source.get("state_machines")
@@ -1364,7 +1370,7 @@ def _validate_scoped_state_machines(
         "state_machine_id", "title", "owner_scope", "owner_id", "states",
         "initial_state", "persistence", "visibility", "authority", "transitions",
     }
-    if source_format == STATE_MACHINE_FORMAT:
+    if source_format in {STATE_MACHINE_FORMAT_V5, STATE_MACHINE_FORMAT}:
         allowed.add("hierarchy")
     required = set(allowed)
     for index, machine in enumerate(machines):
@@ -1421,7 +1427,7 @@ def _validate_scoped_state_machines(
             }),
             states=set(states),
             label=label,
-            allow_hierarchy=source_format == STATE_MACHINE_FORMAT,
+            allow_hierarchy=source_format in {STATE_MACHINE_FORMAT_V5, STATE_MACHINE_FORMAT},
         )
         hierarchy_machine = {"states": list(states), "hierarchy": hierarchy}
         initial_leaf = state_machine_resolve_leaf(hierarchy_machine, initial_state)
@@ -1441,15 +1447,19 @@ def _validate_scoped_state_machines(
             machine["transitions"], label, states=set(states), initial_state=initial_state,
             allow_conditions=source_format in {
                 STATE_MACHINE_FORMAT_V2, STATE_MACHINE_FORMAT_V3,
-                STATE_MACHINE_FORMAT_V4, STATE_MACHINE_FORMAT,
+                STATE_MACHINE_FORMAT_V4, STATE_MACHINE_FORMAT_V5, STATE_MACHINE_FORMAT,
             },
             allow_timers=source_format in {
-                STATE_MACHINE_FORMAT_V3, STATE_MACHINE_FORMAT_V4, STATE_MACHINE_FORMAT,
+                STATE_MACHINE_FORMAT_V3, STATE_MACHINE_FORMAT_V4,
+                STATE_MACHINE_FORMAT_V5, STATE_MACHINE_FORMAT,
             },
             allow_nonterminal_chaining=source_format in {
-                STATE_MACHINE_FORMAT_V4, STATE_MACHINE_FORMAT,
+                STATE_MACHINE_FORMAT_V4, STATE_MACHINE_FORMAT_V5, STATE_MACHINE_FORMAT,
             },
-            allow_hierarchical_payload=source_format == STATE_MACHINE_FORMAT,
+            allow_hierarchical_payload=source_format in {
+                STATE_MACHINE_FORMAT_V5, STATE_MACHINE_FORMAT,
+            },
+            allow_condition_groups=source_format == STATE_MACHINE_FORMAT,
             hierarchy=hierarchy,
         )
         normalized.append({
@@ -1466,7 +1476,9 @@ def _validate_scoped_state_machines(
             "authority": "state_machine.core",
             "transitions": transitions,
         })
-    if source_format in {STATE_MACHINE_FORMAT_V4, STATE_MACHINE_FORMAT}:
+    if source_format in {
+        STATE_MACHINE_FORMAT_V4, STATE_MACHINE_FORMAT_V5, STATE_MACHINE_FORMAT,
+    }:
         _validate_state_machine_reaction_graph(normalized)
     return normalized
 
@@ -1601,6 +1613,96 @@ def _resolve_state_machine_owner(
     return owner_id
 
 
+def _flatten_state_machine_condition_expression(
+    expression: Any,
+    transition_label: str,
+) -> tuple[list[dict[str, Any]], Any]:
+    """Validate v0.6 group structure and return leaves plus a safe shape."""
+    leaves: list[dict[str, Any]] = []
+    budget = {"nodes": 0, "leaves": 0}
+    condition_fields = {
+        "condition_id", "subject", "namespace", "key", "operator", "value",
+    }
+
+    def visit(node: Any, *, group_depth: int, path: str) -> Any:
+        budget["nodes"] += 1
+        if budget["nodes"] > STATE_MACHINE_CONDITION_NODE_LIMIT:
+            raise CompileError(
+                f"{transition_label}.when exceeds "
+                f"{STATE_MACHINE_CONDITION_NODE_LIMIT} expression nodes"
+            )
+        if not isinstance(node, dict):
+            raise CompileError(f"{path} must be a condition-expression object")
+        if set(node) == condition_fields:
+            budget["leaves"] += 1
+            if budget["leaves"] > STATE_MACHINE_CONDITION_LEAF_LIMIT:
+                raise CompileError(
+                    f"{transition_label}.when exceeds "
+                    f"{STATE_MACHINE_CONDITION_LEAF_LIMIT} leaf conditions"
+                )
+            leaf_index = len(leaves)
+            leaves.append(node)
+            return {"leaf_index": leaf_index}
+
+        if set(node) not in ({"all"}, {"any"}, {"not"}):
+            raise CompileError(
+                f"{path} must be exactly one condition, all, any, or not expression"
+            )
+        next_depth = group_depth + 1
+        if next_depth > STATE_MACHINE_CONDITION_GROUP_DEPTH_LIMIT:
+            raise CompileError(
+                f"{transition_label}.when exceeds group depth "
+                f"{STATE_MACHINE_CONDITION_GROUP_DEPTH_LIMIT}"
+            )
+        if "not" in node:
+            return {
+                "not": visit(
+                    node["not"], group_depth=next_depth, path=f"{path}.not",
+                )
+            }
+
+        operator = "all" if "all" in node else "any"
+        children = node[operator]
+        if (
+            not isinstance(children, list)
+            or len(children) > STATE_MACHINE_CONDITION_LIMIT
+            or (operator == "any" and not children)
+        ):
+            minimum = 1 if operator == "any" else 0
+            raise CompileError(
+                f"{path}.{operator} must contain {minimum} to "
+                f"{STATE_MACHINE_CONDITION_LIMIT} child expressions"
+            )
+        return {
+            operator: [
+                visit(
+                    child, group_depth=next_depth,
+                    path=f"{path}.{operator}[{index}]",
+                )
+                for index, child in enumerate(children)
+            ]
+        }
+
+    return leaves, visit(expression, group_depth=0, path=f"{transition_label}.when")
+
+
+def _hydrate_state_machine_condition_expression(
+    shape: Any,
+    leaves: list[dict[str, Any]],
+) -> Any:
+    if isinstance(shape, dict) and set(shape) == {"leaf_index"}:
+        return leaves[shape["leaf_index"]]
+    if isinstance(shape, dict) and set(shape) == {"not"}:
+        return {"not": _hydrate_state_machine_condition_expression(shape["not"], leaves)}
+    operator = "all" if "all" in shape else "any"
+    return {
+        operator: [
+            _hydrate_state_machine_condition_expression(child, leaves)
+            for child in shape[operator]
+        ]
+    }
+
+
 def _validate_scoped_transitions(
     transitions: Any,
     label: str,
@@ -1611,6 +1713,7 @@ def _validate_scoped_transitions(
     allow_timers: bool,
     allow_nonterminal_chaining: bool,
     allow_hierarchical_payload: bool,
+    allow_condition_groups: bool,
     hierarchy: dict[str, dict[str, str]],
 ) -> list[dict[str, Any]]:
     hierarchy_machine = {"states": sorted(states), "hierarchy": hierarchy}
@@ -1684,7 +1787,9 @@ def _validate_scoped_transitions(
         if has_event_trigger and event_type not in STATE_MACHINE_TRIGGER_EVENT_FIELDS:
             raise CompileError(f"{transition_label}.on 不在 StateMachineModule EventIR 白名單中")
         if event_type == "fsm.transitioned" and not allow_nonterminal_chaining:
-            raise CompileError(f"{transition_label}.on fsm.transitioned 僅支援 StateIR v0.4/v0.5")
+            raise CompileError(
+                f"{transition_label}.on fsm.transitioned requires StateIR v0.4 or newer"
+            )
         if has_timer_trigger and (
             isinstance(after_ticks, bool)
             or not isinstance(after_ticks, int)
@@ -1752,12 +1857,18 @@ def _validate_scoped_transitions(
                     "state_machine_id 與 transition_id"
                 )
         raw_when = transition.get("when", [])
-        if (
-            not isinstance(raw_when, list)
-            or len(raw_when) > STATE_MACHINE_CONDITION_LIMIT
-        ):
+        condition_shape: Any = None
+        if allow_condition_groups:
+            raw_when, condition_shape = _flatten_state_machine_condition_expression(
+                raw_when, transition_label,
+            )
+        condition_limit = (
+            STATE_MACHINE_CONDITION_LEAF_LIMIT
+            if allow_condition_groups else STATE_MACHINE_CONDITION_LIMIT
+        )
+        if not isinstance(raw_when, list) or len(raw_when) > condition_limit:
             raise CompileError(
-                f"{transition_label}.when 必須是最多 {STATE_MACHINE_CONDITION_LIMIT} 個條件"
+                f"{transition_label}.when 必須是最多 {condition_limit} 個條件"
             )
         normalized_when: list[dict[str, Any]] = []
         condition_fields = {
@@ -1814,6 +1925,10 @@ def _validate_scoped_transitions(
                 "operator": operator,
                 "value": expected,
             })
+        if allow_condition_groups:
+            normalized_when = _hydrate_state_machine_condition_expression(
+                condition_shape, normalized_when,
+            )
         normalized_transition = {
             "transition_id": transition_id,
             "from": from_state,

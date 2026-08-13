@@ -1449,7 +1449,7 @@ class ActionBehaviorTests(unittest.TestCase):
                     "on": "action.completed",
                     "to": "completed",
                     "event_match": {"behavior_id": "behavior.search.careful"},
-                    "when": [],
+                    "when": {"all": []},
                 }],
             })
             machines_path.write_text(
@@ -1490,7 +1490,7 @@ class ActionBehaviorTests(unittest.TestCase):
                         "behavior_id": "behavior.search.careful",
                         "phase_id": "survey",
                     },
-                    "when": [],
+                    "when": {"all": []},
                 }],
             })
             machines_path.write_text(
@@ -1534,7 +1534,7 @@ class ActionBehaviorTests(unittest.TestCase):
                         "condition_id": "actor_alive",
                         "attempt": 1,
                     },
-                    "when": [],
+                    "when": {"all": []},
                 }],
             })
             machines_path.write_text(
@@ -1578,7 +1578,7 @@ class ActionBehaviorTests(unittest.TestCase):
                         "behavior_id": "behavior.search.careful",
                         "step_id": "survey.room",
                     },
-                    "when": [],
+                    "when": {"all": []},
                 }],
             })
             machines_path.write_text(
@@ -1620,7 +1620,7 @@ class ActionBehaviorTests(unittest.TestCase):
                         "branch_id": "survey.alive",
                         "priority": 100,
                     },
-                    "when": [],
+                    "when": {"all": []},
                 }],
             })
             machines_path.write_text(

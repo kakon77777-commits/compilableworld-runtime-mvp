@@ -1,17 +1,17 @@
 # CompilableWorld Active Work Package Registry
 
 - **Registry version:** v0.1
-- **Updated:** 2026-08-11
+- **Updated:** 2026-08-13
 
 ## Baseline status
 
 | Item | Value |
 |---|---|
 | Local integrated runtime | `0.1.1` |
-| Verified tests | `333/333`, plus `64` subtests |
-| GitHub `master` observed head | `70141f3` (verified 2026-08-11) |
-| Current development branch | `agent/stateir-v05-bounded-hierarchy` |
-| Remote synchronization status | M12 and Action routing v0.7 are merged; StateIR v0.2 and future-architecture notes remain on draft PR #4; StateIR v0.3 timer, v0.4 bounded chaining and v0.5 bounded hierarchy work are completed locally and intentionally unpushed |
+| Verified tests | `336/336`, plus `76` subtests |
+| GitHub `master` observed head | `70141f3` (verified 2026-08-13) |
+| Current development branch | `agent/stateir-v06-bounded-condition-groups` |
+| Remote synchronization status | M12 and Action routing v0.7 are merged; StateIR v0.2 and future-architecture notes remain on draft PR #4; StateIR v0.3 timer, v0.4 bounded chaining, v0.5 hierarchy and v0.6 condition-group work are completed locally and intentionally unpushed |
 | Intended next release baseline | `v0.2.0-alpha.1` or equivalent |
 
 ## Current integrated local state
@@ -483,4 +483,39 @@ out_of_scope:
   - arbitrary entry/exit effects and runtime hierarchy mutation
   - ancestor-authored internal resets that can become child-dependent no-ops
   - compound-state timers with independent ancestor entry clocks
+```
+
+### CW-M12-STATEIR-014 — Bounded condition groups
+
+```yaml
+owner_environment: codex
+status: completed-locally
+outputs:
+  - schemas/state-machines.v0.6.schema.json
+  - v0.1 through v0.5 source compatibility paths
+  - exact-shape all, any, not and leaf condition expressions
+  - group-depth, child-count, total-node and leaf-count budgets
+  - three-valued fail-closed Runtime evaluation
+  - Runtime Package compatibility for legacy condition lists and v0.6 expressions
+  - complete condition-expression Studio projection
+  - Gray Crown all plus not vertical slice
+  - tests/test_scoped_state_machine.py and tests/test_schemas.py
+acceptance:
+  - all and any have at most 16 direct children; any cannot be empty
+  - every transition has at most 4 group levels, 64 total nodes and 32 leaves
+  - condition IDs remain unique across each state machine
+  - missing state, actor provenance and invalid scalar types evaluate as unknown
+  - not of unknown remains unknown and cannot authorize a transition
+  - malformed or over-budget package expressions fail closed even behind a true any branch
+  - timer transitions still reject actor conditions at compile time
+  - v0.1 through v0.5 sources retain their prior normalized package shapes
+  - Snapshot and Replay retain committed outcomes without re-evaluating expressions
+  - AI, Studio, player and MCP still have no direct StateStore write path
+  - 336/336 tests and 76 subtests pass
+out_of_scope:
+  - free-form guards, scripts and arbitrary boolean expressions
+  - arbitrary StateStore paths, effects, rewards or condition-side writes
+  - random condition evaluation or Runtime sampling of Studio draft metadata
+  - parallel regions, history states or multiple active leaves
+  - AI-authored candidates bypassing Compiler review and Runtime validation
 ```

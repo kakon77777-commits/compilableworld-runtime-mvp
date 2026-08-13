@@ -32,8 +32,47 @@ def use_legacy_terminal_chain(source: dict) -> None:
     region_transition["event_match"] = {"state_machine_id": "fsm.world.vault_seal"}
 
 
+def condition_leaves(expression: object) -> list[dict]:
+    if not isinstance(expression, dict):
+        return []
+    if "condition_id" in expression:
+        return [expression]
+    if "not" in expression:
+        return condition_leaves(expression["not"])
+    children = expression.get("all", expression.get("any", []))
+    return [leaf for child in children for leaf in condition_leaves(child)]
+
+
+def use_legacy_condition_lists(source: dict) -> None:
+    """Downgrade the v0.6 fixture's representable groups to v0.2-v0.5 AND lists."""
+    inverse = {
+        "equals": "not_equals",
+        "not_equals": "equals",
+        "less_than": "greater_or_equal",
+        "less_or_equal": "greater_than",
+        "greater_than": "less_or_equal",
+        "greater_or_equal": "less_than",
+    }
+
+    def flatten(expression: dict) -> list[dict]:
+        if "condition_id" in expression:
+            return [deepcopy(expression)]
+        if "all" in expression:
+            return [leaf for child in expression["all"] for leaf in flatten(child)]
+        if "not" in expression and "condition_id" in expression["not"]:
+            leaf = deepcopy(expression["not"])
+            leaf["operator"] = inverse[leaf["operator"]]
+            return [leaf]
+        raise AssertionError("fixture condition expression cannot be downgraded to legacy AND")
+
+    for machine in source["state_machines"]:
+        for transition in machine["transitions"]:
+            transition["when"] = flatten(transition["when"])
+
+
 def use_flat_state_hierarchy(source: dict) -> None:
-    """Downgrade the v0.5 fixture to the flat v0.1-v0.4 source shape."""
+    """Downgrade the v0.6 fixture to the flat v0.1-v0.4 source shape."""
+    use_legacy_condition_lists(source)
     for machine in source["state_machines"]:
         machine.pop("hierarchy", None)
         if machine["state_machine_id"] == "fsm.system.security":
@@ -60,16 +99,19 @@ class ScopedStateMachineTests(unittest.TestCase):
         self.assertEqual(world_machine["authority"], "state_machine.core")
         self.assertEqual(world_machine["transitions"][0]["event_match"], {"door": "door.old_vault"})
         self.assertEqual(
-            [condition["condition_id"] for condition in world_machine["transitions"][0]["when"]],
+            [
+                condition["condition_id"]
+                for condition in condition_leaves(world_machine["transitions"][0]["when"])
+            ],
             [
                 "world_is_stable", "unlocking_actor_is_alive",
-                "unlocking_actor_currency_is_valid",
+                "unlocking_actor_currency_is_negative",
             ],
         )
         self.assertIn("state_machine.core", self.package["manifest"]["modules"])
         self.assertEqual(
             self.package["manifest"]["source_schemas"]["state_machines"],
-            "compilableworld.schema/state-machines/v0.5",
+            "compilableworld.schema/state-machines/v0.6",
         )
 
         cells = {
@@ -227,7 +269,7 @@ class ScopedStateMachineTests(unittest.TestCase):
                     "on": "door.opened",
                     "to": "nominal",
                     "event_match": {"door": "door.old_vault"},
-                    "when": [],
+                    "when": {"all": []},
                     "priority": 50,
                 },
                 {
@@ -236,7 +278,7 @@ class ScopedStateMachineTests(unittest.TestCase):
                     "on": "door.opened",
                     "to": "contained",
                     "event_match": {"door": "door.old_vault"},
-                    "when": [],
+                    "when": {"all": []},
                     "priority": 50,
                 },
             ])
@@ -297,7 +339,7 @@ class ScopedStateMachineTests(unittest.TestCase):
                     "on": "door.opened",
                     "to": "busy",
                     "event_match": {"door": "door.old_vault"},
-                    "when": [],
+                    "when": {"all": []},
                     "priority": 1,
                 }],
             })
@@ -361,7 +403,9 @@ class ScopedStateMachineTests(unittest.TestCase):
             ),
             (
                 "boolean_is_not_one",
-                lambda package: package["state_machines"][0]["transitions"][0]["when"][1].update(
+                lambda package: condition_leaves(
+                    package["state_machines"][0]["transitions"][0]["when"]
+                )[1].update(
                     {"value": 1}
                 ),
             ),
@@ -383,6 +427,107 @@ class ScopedStateMachineTests(unittest.TestCase):
                     "sealed",
                 )
 
+    def test_any_and_not_groups_preserve_three_valued_fail_closed_semantics(self) -> None:
+        base_transition = self.package["state_machines"][0]["transitions"][0]
+        stable, alive, negative = [
+            deepcopy(condition) for condition in condition_leaves(base_transition["when"])
+        ]
+        missing = deepcopy(stable)
+        missing.update({"condition_id": "missing_owner_state", "key": "missing_state"})
+
+        any_package = deepcopy(self.package)
+        any_package["state_machines"][0]["transitions"][0]["when"] = {
+            "all": [
+                {"any": [missing, stable]},
+                alive,
+                {"not": negative},
+            ]
+        }
+        any_runtime = WorldRuntime(any_package)
+        install_builtin_modules(any_runtime)
+        unlock_old_vault(any_runtime)
+        self.assertEqual(
+            any_runtime.state.get("gray_crown_demo", "fsm", "fsm.world.vault_seal"),
+            "completed",
+        )
+
+        unknown_not_package = deepcopy(self.package)
+        unknown_not_package["state_machines"][0]["transitions"][0]["when"] = {
+            "not": missing,
+        }
+        unknown_not_runtime = WorldRuntime(unknown_not_package)
+        install_builtin_modules(unknown_not_runtime)
+        unlock_old_vault(unknown_not_runtime)
+        self.assertEqual(
+            unknown_not_runtime.state.get(
+                "gray_crown_demo", "fsm", "fsm.world.vault_seal",
+            ),
+            "sealed",
+        )
+
+        false_leaf = deepcopy(stable)
+        false_leaf.update({"condition_id": "world_is_not_unstable", "value": "unstable"})
+        false_not_package = deepcopy(self.package)
+        false_not_package["state_machines"][0]["transitions"][0]["when"] = {
+            "not": false_leaf,
+        }
+        false_not_runtime = WorldRuntime(false_not_package)
+        install_builtin_modules(false_not_runtime)
+        unlock_old_vault(false_not_runtime)
+        self.assertEqual(
+            false_not_runtime.state.get(
+                "gray_crown_demo", "fsm", "fsm.world.vault_seal",
+            ),
+            "completed",
+        )
+
+    def test_runtime_fails_closed_on_malformed_or_overbudget_condition_groups(self) -> None:
+        stable = deepcopy(condition_leaves(
+            self.package["state_machines"][0]["transitions"][0]["when"]
+        )[0])
+        too_deep: dict = deepcopy(stable)
+        for _ in range(5):
+            too_deep = {"not": too_deep}
+        too_many_nodes = {
+            "all": [
+                {"all": [{"all": []} for _ in range(4)]}
+                for _ in range(16)
+            ]
+        }
+        leaf_index = 0
+        leaf_groups = []
+        for _ in range(11):
+            children = []
+            for _ in range(3):
+                leaf = deepcopy(stable)
+                leaf["condition_id"] = f"runtime_leaf_{leaf_index}"
+                children.append(leaf)
+                leaf_index += 1
+            leaf_groups.append({"any": children})
+        too_many_leaves = {"all": leaf_groups}
+
+        expressions = {
+            "empty_any": {"any": []},
+            "malformed_hidden_by_true_any": {"any": [stable, {"xor": []}]},
+            "duplicate_leaf_id": {"all": [stable, deepcopy(stable)]},
+            "too_deep": too_deep,
+            "too_many_nodes": too_many_nodes,
+            "too_many_leaves": too_many_leaves,
+        }
+        for label, expression in expressions.items():
+            with self.subTest(label=label):
+                package = deepcopy(self.package)
+                package["state_machines"][0]["transitions"][0]["when"] = expression
+                runtime = WorldRuntime(package)
+                install_builtin_modules(runtime)
+                unlock_old_vault(runtime)
+                self.assertEqual(
+                    runtime.state.get(
+                        "gray_crown_demo", "fsm", "fsm.world.vault_seal",
+                    ),
+                    "sealed",
+                )
+
     def test_highest_priority_transition_is_selected_only_after_conditions_match(self) -> None:
         with tempfile.TemporaryDirectory() as temp:
             world = Path(temp) / "world"
@@ -391,14 +536,14 @@ class ScopedStateMachineTests(unittest.TestCase):
             source = json.loads(source_path.read_text(encoding="utf-8"))
             machine = source["state_machines"][0]
             machine["states"].append("failed")
-            machine["transitions"][0]["when"][0]["value"] = "unstable"
+            condition_leaves(machine["transitions"][0]["when"])[0]["value"] = "unstable"
             machine["transitions"].append({
                 "transition_id": "fsm.world.vault_seal.fail_closed",
                 "from": "sealed",
                 "on": "door.unlocked",
                 "to": "failed",
                 "event_match": {"door": "door.old_vault"},
-                "when": [],
+                "when": {"all": []},
                 "priority": 0,
             })
             source_path.write_text(
@@ -494,20 +639,20 @@ class ScopedStateMachineTests(unittest.TestCase):
             machine["states"].append("lockdown")
             high = machine["transitions"][1]
             high["to"] = "lockdown"
-            high["when"] = [{
+            high["when"] = {"all": [{
                 "condition_id": "security_is_armed",
                 "subject": "owner",
                 "namespace": "status",
                 "key": "armed",
                 "operator": "equals",
                 "value": True,
-            }]
+            }]}
             machine["transitions"].append({
                 "transition_id": "fsm.system.security.fallback_contained",
                 "from": "breached",
                 "after_ticks": 3,
                 "to": "contained",
-                "when": [],
+                "when": {"all": []},
                 "priority": 0,
             })
             source_path.write_text(
@@ -692,16 +837,64 @@ class ScopedStateMachineTests(unittest.TestCase):
             manifest["modules"].remove("state_machine.core")
 
         def invalid_condition_subject(source: dict, manifest: dict) -> None:
-            source["state_machines"][0]["transitions"][0]["when"][0]["subject"] = "target"
+            condition_leaves(
+                source["state_machines"][0]["transitions"][0]["when"]
+            )[0]["subject"] = "target"
 
         def invalid_numeric_condition(source: dict, manifest: dict) -> None:
-            condition = source["state_machines"][0]["transitions"][0]["when"][0]
+            condition = condition_leaves(
+                source["state_machines"][0]["transitions"][0]["when"]
+            )[0]
             condition["operator"] = "greater_than"
             condition["value"] = True
 
         def duplicate_condition_id(source: dict, manifest: dict) -> None:
-            conditions = source["state_machines"][0]["transitions"][0]["when"]
+            conditions = condition_leaves(
+                source["state_machines"][0]["transitions"][0]["when"]
+            )
             conditions[1]["condition_id"] = conditions[0]["condition_id"]
+
+        def empty_any_group(source: dict, manifest: dict) -> None:
+            source["state_machines"][0]["transitions"][0]["when"] = {"any": []}
+
+        def unknown_condition_group(source: dict, manifest: dict) -> None:
+            source["state_machines"][0]["transitions"][0]["when"] = {"xor": []}
+
+        def condition_group_too_deep(source: dict, manifest: dict) -> None:
+            leaf = condition_leaves(
+                source["state_machines"][0]["transitions"][0]["when"]
+            )[0]
+            expression: dict = deepcopy(leaf)
+            for _ in range(5):
+                expression = {"not": expression}
+            source["state_machines"][0]["transitions"][0]["when"] = expression
+
+        def condition_group_too_many_nodes(source: dict, manifest: dict) -> None:
+            source["state_machines"][0]["transitions"][0]["when"] = {
+                "all": [
+                    {"all": [{"all": []} for _ in range(4)]}
+                    for _ in range(16)
+                ]
+            }
+
+        def condition_group_too_many_leaves(source: dict, manifest: dict) -> None:
+            template = condition_leaves(
+                source["state_machines"][0]["transitions"][0]["when"]
+            )[0]
+            index = 0
+            groups = []
+            for _ in range(11):
+                children = []
+                for _ in range(3):
+                    leaf = deepcopy(template)
+                    leaf["condition_id"] = f"bounded_leaf_{index}"
+                    children.append(leaf)
+                    index += 1
+                groups.append({"any": children})
+            source["state_machines"][0]["transitions"][0]["when"] = {"all": groups}
+
+        def v06_with_legacy_condition_list(source: dict, manifest: dict) -> None:
+            use_legacy_condition_lists(source)
 
         def legacy_format_with_conditions(source: dict, manifest: dict) -> None:
             source["format"] = "compilableworld.state-machines/v0.1"
@@ -724,14 +917,14 @@ class ScopedStateMachineTests(unittest.TestCase):
             source["state_machines"][4]["transitions"][1]["on"] = "door.opened"
 
         def timer_with_actor_condition(source: dict, manifest: dict) -> None:
-            source["state_machines"][4]["transitions"][1]["when"] = [{
+            source["state_machines"][4]["transitions"][1]["when"] = {"all": [{
                 "condition_id": "invalid_timer_actor",
                 "subject": "actor",
                 "namespace": "status",
                 "key": "alive",
                 "operator": "equals",
                 "value": True,
-            }]
+            }]}
 
         def duplicate_timer_priority(source: dict, manifest: dict) -> None:
             duplicate = dict(source["state_machines"][4]["transitions"][1])
@@ -789,7 +982,7 @@ class ScopedStateMachineTests(unittest.TestCase):
                             "state_machine_id": previous_machine,
                             "transition_id": previous_transition,
                         },
-                        "when": [],
+                        "when": {"all": []},
                         "priority": 0,
                     }],
                 })
@@ -839,7 +1032,7 @@ class ScopedStateMachineTests(unittest.TestCase):
                 "on": "door.opened",
                 "to": "contained",
                 "event_match": {"door": "door.old_vault"},
-                "when": [],
+                "when": {"all": []},
                 "priority": 1,
             })
 
@@ -853,6 +1046,12 @@ class ScopedStateMachineTests(unittest.TestCase):
             "invalid_condition_subject": invalid_condition_subject,
             "invalid_numeric_condition": invalid_numeric_condition,
             "duplicate_condition_id": duplicate_condition_id,
+            "empty_any_group": empty_any_group,
+            "unknown_condition_group": unknown_condition_group,
+            "condition_group_too_deep": condition_group_too_deep,
+            "condition_group_too_many_nodes": condition_group_too_many_nodes,
+            "condition_group_too_many_leaves": condition_group_too_many_leaves,
+            "v06_with_legacy_condition_list": v06_with_legacy_condition_list,
             "legacy_format_with_conditions": legacy_format_with_conditions,
             "mismatched_source_schema": mismatched_source_schema,
             "invalid_timer_delay": invalid_timer_delay,
@@ -1062,6 +1261,50 @@ class ScopedStateMachineTests(unittest.TestCase):
             "breached",
         )
 
+    def test_v05_source_remains_supported_with_hierarchy_and_legacy_condition_lists(self) -> None:
+        with tempfile.TemporaryDirectory() as temp:
+            world = Path(temp) / "world"
+            shutil.copytree(GRAY_CROWN, world)
+            source_path = world / "state_machines.json"
+            manifest_path = world / "manifest.json"
+            source = json.loads(source_path.read_text(encoding="utf-8"))
+            manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+            use_legacy_condition_lists(source)
+            source["format"] = "compilableworld.state-machines/v0.5"
+            manifest["source_schemas"]["state_machines"] = (
+                "compilableworld.schema/state-machines/v0.5"
+            )
+            source_path.write_text(
+                json.dumps(source, ensure_ascii=False, indent=2) + "\n", encoding="utf-8"
+            )
+            manifest_path.write_text(
+                json.dumps(manifest, ensure_ascii=False, indent=2) + "\n", encoding="utf-8"
+            )
+            package = json.loads(
+                compile_world(world, Path(temp) / "build").read_text(encoding="utf-8")
+            )
+
+        self.assertEqual(
+            package["manifest"]["source_schemas"]["state_machines"],
+            "compilableworld.schema/state-machines/v0.5",
+        )
+        self.assertIsInstance(package["state_machines"][0]["transitions"][0]["when"], list)
+        system = next(
+            machine for machine in package["state_machines"]
+            if machine["state_machine_id"] == "fsm.system.security"
+        )
+        self.assertEqual(system["initial_leaf"], "nominal")
+        self.assertEqual(system["hierarchy"]["initial_child_by_state"], {
+            "incident": "breached",
+        })
+        runtime = WorldRuntime(package)
+        install_builtin_modules(runtime)
+        unlock_old_vault(runtime)
+        self.assertEqual(
+            runtime.state.get("gray_crown_demo", "fsm", "fsm.world.vault_seal"),
+            "completed",
+        )
+
     def test_studio_overview_projects_static_and_current_scoped_state(self) -> None:
         package_view = package_overview(self.package)
         self.assertEqual(len(package_view["state_machines"]), 5)
@@ -1072,10 +1315,13 @@ class ScopedStateMachineTests(unittest.TestCase):
         self.assertEqual(world_record["owner_scope"], "world")
         self.assertEqual(world_record["initial_state"], "sealed")
         self.assertEqual(
-            [condition["condition_id"] for condition in world_record["transitions"][0]["when"]],
+            [
+                condition["condition_id"]
+                for condition in condition_leaves(world_record["transitions"][0]["when"])
+            ],
             [
                 "world_is_stable", "unlocking_actor_is_alive",
-                "unlocking_actor_currency_is_valid",
+                "unlocking_actor_currency_is_negative",
             ],
         )
 

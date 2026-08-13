@@ -24,17 +24,22 @@ STATE_MACHINE_FORMAT_V1 = "compilableworld.state-machines/v0.1"
 STATE_MACHINE_FORMAT_V2 = "compilableworld.state-machines/v0.2"
 STATE_MACHINE_FORMAT_V3 = "compilableworld.state-machines/v0.3"
 STATE_MACHINE_FORMAT_V4 = "compilableworld.state-machines/v0.4"
-STATE_MACHINE_FORMAT = "compilableworld.state-machines/v0.5"
+STATE_MACHINE_FORMAT_V5 = "compilableworld.state-machines/v0.5"
+STATE_MACHINE_FORMAT = "compilableworld.state-machines/v0.6"
 STATE_MACHINE_SCHEMA_ID_V1 = "compilableworld.schema/state-machines/v0.1"
 STATE_MACHINE_SCHEMA_ID_V2 = "compilableworld.schema/state-machines/v0.2"
 STATE_MACHINE_SCHEMA_ID_V3 = "compilableworld.schema/state-machines/v0.3"
 STATE_MACHINE_SCHEMA_ID_V4 = "compilableworld.schema/state-machines/v0.4"
-STATE_MACHINE_SCHEMA_ID = "compilableworld.schema/state-machines/v0.5"
+STATE_MACHINE_SCHEMA_ID_V5 = "compilableworld.schema/state-machines/v0.5"
+STATE_MACHINE_SCHEMA_ID = "compilableworld.schema/state-machines/v0.6"
 STATE_MACHINE_EVENT_MATCH_LIMIT = 16
 STATE_MACHINE_DEFINITION_LIMIT = 1024
 STATE_MACHINE_STATE_LIMIT = 256
 STATE_MACHINE_TRANSITION_LIMIT = 4096
 STATE_MACHINE_CONDITION_LIMIT = 16
+STATE_MACHINE_CONDITION_GROUP_DEPTH_LIMIT = 4
+STATE_MACHINE_CONDITION_NODE_LIMIT = 64
+STATE_MACHINE_CONDITION_LEAF_LIMIT = 32
 STATE_MACHINE_TIMER_TICK_LIMIT = 1_000_000
 STATE_MACHINE_REACTION_DEPTH_LIMIT = 64
 STATE_MACHINE_HIERARCHY_DEPTH_LIMIT = 16
@@ -321,8 +326,144 @@ def state_machine_condition_matches(
     closed. The Compiler normally prevents malformed conditions, but the
     Runtime repeats these checks because a package is still untrusted input.
     """
-    if not isinstance(condition, dict):
-        return False
+    budget = {"nodes": 0, "leaves": 0, "invalid": False, "condition_ids": set()}
+    result = _state_machine_condition_result(
+        runtime, machine, condition, actor_id=actor_id, budget=budget,
+    )
+    return not budget["invalid"] and result is True
+
+
+def state_machine_when_matches(
+    runtime: "WorldRuntime",
+    machine: dict[str, Any],
+    expression: Any,
+    *,
+    actor_id: str | None,
+) -> bool:
+    """Evaluate a legacy AND list or a bounded v0.6 condition expression.
+
+    Leaf reads use three-valued results: missing or type-invalid state is
+    unknown, and ``not(unknown)`` remains unknown. Structural or budget errors
+    invalidate the whole expression even when another ``any`` branch is true.
+    Only a fully valid expression whose final value is true may transition.
+    """
+    if isinstance(expression, list):
+        if len(expression) > STATE_MACHINE_CONDITION_LIMIT:
+            return False
+        budget = {"nodes": 0, "leaves": 0, "invalid": False, "condition_ids": set()}
+        results = [
+            _state_machine_condition_result(
+                runtime, machine, condition, actor_id=actor_id, budget=budget,
+            )
+            for condition in expression
+        ]
+        return not budget["invalid"] and _all_condition_results(results) is True
+
+    budget = {"nodes": 0, "leaves": 0, "invalid": False, "condition_ids": set()}
+    result = _state_machine_expression_result(
+        runtime, machine, expression, actor_id=actor_id,
+        group_depth=0, budget=budget, active=set(),
+    )
+    return not budget["invalid"] and result is True
+
+
+def _state_machine_expression_result(
+    runtime: "WorldRuntime",
+    machine: dict[str, Any],
+    expression: Any,
+    *,
+    actor_id: str | None,
+    group_depth: int,
+    budget: dict[str, Any],
+    active: set[int],
+) -> bool | None:
+    budget["nodes"] = int(budget["nodes"]) + 1
+    if int(budget["nodes"]) > STATE_MACHINE_CONDITION_NODE_LIMIT:
+        budget["invalid"] = True
+        return None
+    if not isinstance(expression, dict):
+        budget["invalid"] = True
+        return None
+    expression_identity = id(expression)
+    if expression_identity in active:
+        budget["invalid"] = True
+        return None
+
+    condition_fields = {
+        "condition_id", "subject", "namespace", "key", "operator", "value",
+    }
+    if set(expression) == condition_fields:
+        return _state_machine_condition_result(
+            runtime, machine, expression, actor_id=actor_id, budget=budget,
+            count_node=False,
+        )
+
+    if set(expression) not in ({"all"}, {"any"}, {"not"}):
+        budget["invalid"] = True
+        return None
+    next_depth = group_depth + 1
+    if next_depth > STATE_MACHINE_CONDITION_GROUP_DEPTH_LIMIT:
+        budget["invalid"] = True
+        return None
+
+    active.add(expression_identity)
+    try:
+        if "not" in expression:
+            result = _state_machine_expression_result(
+                runtime, machine, expression["not"], actor_id=actor_id,
+                group_depth=next_depth, budget=budget, active=active,
+            )
+            return None if result is None else not result
+
+        operator = "all" if "all" in expression else "any"
+        children = expression[operator]
+        if (
+            not isinstance(children, list)
+            or len(children) > STATE_MACHINE_CONDITION_LIMIT
+            or (operator == "any" and not children)
+        ):
+            budget["invalid"] = True
+            return None
+        results = [
+            _state_machine_expression_result(
+                runtime, machine, child, actor_id=actor_id,
+                group_depth=next_depth, budget=budget, active=active,
+            )
+            for child in children
+        ]
+        return (
+            _all_condition_results(results)
+            if operator == "all"
+            else _any_condition_results(results)
+        )
+    finally:
+        active.remove(expression_identity)
+
+
+def _state_machine_condition_result(
+    runtime: "WorldRuntime",
+    machine: dict[str, Any],
+    condition: Any,
+    *,
+    actor_id: str | None,
+    budget: dict[str, Any],
+    count_node: bool = True,
+) -> bool | None:
+    if count_node:
+        budget["nodes"] = int(budget["nodes"]) + 1
+    budget["leaves"] = int(budget["leaves"]) + 1
+    if (
+        int(budget["nodes"]) > STATE_MACHINE_CONDITION_NODE_LIMIT
+        or int(budget["leaves"]) > STATE_MACHINE_CONDITION_LEAF_LIMIT
+    ):
+        budget["invalid"] = True
+        return None
+    condition_fields = {
+        "condition_id", "subject", "namespace", "key", "operator", "value",
+    }
+    if not isinstance(condition, dict) or set(condition) != condition_fields:
+        budget["invalid"] = True
+        return None
     condition_id = condition.get("condition_id")
     subject = condition.get("subject")
     namespace = condition.get("namespace")
@@ -337,21 +478,30 @@ def state_machine_condition_matches(
         or not key
         or operator not in STATE_MACHINE_CONDITION_OPERATORS
     ):
-        return False
+        budget["invalid"] = True
+        return None
+    if condition_id in budget["condition_ids"]:
+        budget["invalid"] = True
+        return None
+    budget["condition_ids"].add(condition_id)
 
     owner_id = machine.get("owner_id") if subject == "owner" else actor_id
     if not isinstance(owner_id, str) or not owner_id:
-        return False
+        return None
     missing = object()
     actual = runtime.state.get(owner_id, namespace, key, missing)
     expected = condition.get("value")
+    if not _finite_condition_scalar(expected):
+        budget["invalid"] = True
+        return None
     if (
         actual is missing
         or not _finite_condition_scalar(actual)
-        or not _finite_condition_scalar(expected)
     ):
-        return False
+        return None
     if operator in {"equals", "not_equals"}:
+        if not _condition_scalar_types_compatible(actual, expected):
+            return None
         equal = _strict_scalar_equal(actual, expected)
         return equal if operator == "equals" else not equal
     if (
@@ -360,13 +510,37 @@ def state_machine_condition_matches(
         or not isinstance(actual, (int, float))
         or not isinstance(expected, (int, float))
     ):
-        return False
+        return None
     return {
         "less_than": actual < expected,
         "less_or_equal": actual <= expected,
         "greater_than": actual > expected,
         "greater_or_equal": actual >= expected,
     }[operator]
+
+
+def _all_condition_results(results: list[bool | None]) -> bool | None:
+    if any(result is False for result in results):
+        return False
+    if any(result is None for result in results):
+        return None
+    return True
+
+
+def _any_condition_results(results: list[bool | None]) -> bool | None:
+    if any(result is True for result in results):
+        return True
+    if any(result is None for result in results):
+        return None
+    return False
+
+
+def _condition_scalar_types_compatible(actual: Any, expected: Any) -> bool:
+    if isinstance(actual, bool) or isinstance(expected, bool):
+        return type(actual) is type(expected)
+    if isinstance(actual, (int, float)) and isinstance(expected, (int, float)):
+        return True
+    return type(actual) is type(expected)
 
 
 def _strict_scalar_equal(actual: Any, expected: Any) -> bool:
@@ -386,10 +560,13 @@ def _finite_condition_scalar(value: Any) -> bool:
 
 
 __all__ = [
+    "STATE_MACHINE_CONDITION_GROUP_DEPTH_LIMIT",
+    "STATE_MACHINE_CONDITION_LEAF_LIMIT",
     "STATE_MACHINE_CONDITION_LIMIT",
     "STATE_MACHINE_CONDITION_NAMESPACES",
     "STATE_MACHINE_CONDITION_OPERATORS",
     "STATE_MACHINE_CONDITION_SUBJECTS",
+    "STATE_MACHINE_CONDITION_NODE_LIMIT",
     "STATE_MACHINE_DEFINITION_LIMIT",
     "STATE_MACHINE_EVENT_MATCH_LIMIT",
     "STATE_MACHINE_FORMAT",
@@ -397,6 +574,7 @@ __all__ = [
     "STATE_MACHINE_FORMAT_V2",
     "STATE_MACHINE_FORMAT_V3",
     "STATE_MACHINE_FORMAT_V4",
+    "STATE_MACHINE_FORMAT_V5",
     "STATE_MACHINE_HIERARCHY_DEPTH_LIMIT",
     "STATE_MACHINE_OWNER_SCOPES",
     "STATE_MACHINE_PRIORITY_LIMIT",
@@ -407,6 +585,7 @@ __all__ = [
     "STATE_MACHINE_SCHEMA_ID_V2",
     "STATE_MACHINE_SCHEMA_ID_V3",
     "STATE_MACHINE_SCHEMA_ID_V4",
+    "STATE_MACHINE_SCHEMA_ID_V5",
     "STATE_MACHINE_STATE_LIMIT",
     "STATE_MACHINE_TRANSITION_LIMIT",
     "STATE_MACHINE_TIMER_TICK_LIMIT",
@@ -415,6 +594,7 @@ __all__ = [
     "STATE_MACHINE_VISIBILITIES",
     "resolve_state_machine_actor",
     "state_machine_condition_matches",
+    "state_machine_when_matches",
     "state_machine_initial_child_by_state",
     "state_machine_is_active_leaf",
     "state_machine_lineage",

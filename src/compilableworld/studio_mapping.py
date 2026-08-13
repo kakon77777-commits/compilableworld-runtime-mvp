@@ -206,7 +206,7 @@ def validate_studio_mapping(world_ir: dict[str, Any], mapping: dict[str, Any]) -
                 issues.append(_issue(
                     "error",
                     "nonterminal_stateir_only",
-                    "fsm.transitioned is executable only in reviewed StateIR v0.4/v0.5 source, not the current Studio target=quest overlay",
+                    "fsm.transitioned is executable only in reviewed StateIR v0.4+ source, not the current Studio target=quest overlay",
                     f"{transition_path}.event_type",
                 ))
             source_event_match = transition.get("event_match", {})

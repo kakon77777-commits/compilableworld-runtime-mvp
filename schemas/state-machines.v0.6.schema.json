@@ -1,0 +1,189 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "compilableworld.schema/state-machines/v0.6",
+  "title": "CompilableWorld bounded condition-group StateIR source v0.6",
+  "description": "Single-active-leaf compound state machines with bounded deterministic all, any, and not condition expressions.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["format", "state_machines"],
+  "properties": {
+    "format": { "const": "compilableworld.state-machines/v0.6" },
+    "state_machines": {
+      "type": "array",
+      "maxItems": 1024,
+      "items": { "$ref": "#/$defs/stateMachine" }
+    }
+  },
+  "$defs": {
+    "id": {
+      "type": "string",
+      "pattern": "^[a-z][a-z0-9_.-]*$"
+    },
+    "jsonScalar": {
+      "type": ["string", "number", "boolean", "null"]
+    },
+    "idMap": {
+      "type": "object",
+      "maxProperties": 256,
+      "propertyNames": { "pattern": "^[a-z][a-z0-9_.-]*$" },
+      "additionalProperties": { "$ref": "#/$defs/id" }
+    },
+    "hierarchy": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["parent_by_state", "initial_child_by_state"],
+      "properties": {
+        "parent_by_state": { "$ref": "#/$defs/idMap" },
+        "initial_child_by_state": { "$ref": "#/$defs/idMap" }
+      }
+    },
+    "condition": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["condition_id", "subject", "namespace", "key", "operator", "value"],
+      "properties": {
+        "condition_id": { "$ref": "#/$defs/id" },
+        "subject": { "enum": ["owner", "actor"] },
+        "namespace": {
+          "enum": [
+            "combat", "door", "exploration", "fsm", "health", "inventory",
+            "magic", "position", "quest", "status", "wallet"
+          ]
+        },
+        "key": { "$ref": "#/$defs/id" },
+        "operator": {
+          "enum": [
+            "equals", "not_equals", "less_than", "less_or_equal",
+            "greater_than", "greater_or_equal"
+          ]
+        },
+        "value": { "$ref": "#/$defs/jsonScalar" }
+      }
+    },
+    "conditionExpression": {
+      "oneOf": [
+        { "$ref": "#/$defs/condition" },
+        { "$ref": "#/$defs/allGroup" },
+        { "$ref": "#/$defs/anyGroup" },
+        { "$ref": "#/$defs/notGroup" }
+      ]
+    },
+    "allGroup": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["all"],
+      "properties": {
+        "all": {
+          "type": "array",
+          "maxItems": 16,
+          "items": { "$ref": "#/$defs/conditionExpression" }
+        }
+      }
+    },
+    "anyGroup": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["any"],
+      "properties": {
+        "any": {
+          "type": "array",
+          "minItems": 1,
+          "maxItems": 16,
+          "items": { "$ref": "#/$defs/conditionExpression" }
+        }
+      }
+    },
+    "notGroup": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["not"],
+      "properties": {
+        "not": { "$ref": "#/$defs/conditionExpression" }
+      }
+    },
+    "transition": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["transition_id", "from", "to", "when"],
+      "properties": {
+        "transition_id": { "$ref": "#/$defs/id" },
+        "from": { "$ref": "#/$defs/id" },
+        "on": { "$ref": "#/$defs/id" },
+        "after_ticks": { "type": "integer", "minimum": 1, "maximum": 1000000 },
+        "to": { "$ref": "#/$defs/id" },
+        "event_match": {
+          "type": "object",
+          "maxProperties": 16,
+          "propertyNames": { "pattern": "^[A-Za-z_][A-Za-z0-9_.-]*$" },
+          "additionalProperties": { "$ref": "#/$defs/jsonScalar" }
+        },
+        "when": { "$ref": "#/$defs/conditionExpression" },
+        "priority": { "type": "integer", "minimum": 0, "maximum": 1000000 }
+      },
+      "oneOf": [
+        {
+          "required": ["on"],
+          "not": { "required": ["after_ticks"] }
+        },
+        {
+          "required": ["after_ticks"],
+          "not": {
+            "anyOf": [
+              { "required": ["on"] },
+              { "required": ["event_match"] }
+            ]
+          }
+        }
+      ],
+      "allOf": [
+        {
+          "if": {
+            "required": ["on"],
+            "properties": { "on": { "const": "fsm.transitioned" } }
+          },
+          "then": {
+            "required": ["event_match"],
+            "properties": {
+              "event_match": {
+                "required": ["state_machine_id", "transition_id"]
+              }
+            }
+          }
+        }
+      ]
+    },
+    "stateMachine": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "state_machine_id", "title", "owner_scope", "owner_id", "states",
+        "initial_state", "hierarchy", "persistence", "visibility", "authority",
+        "transitions"
+      ],
+      "properties": {
+        "state_machine_id": { "$ref": "#/$defs/id" },
+        "title": { "type": "string", "minLength": 1 },
+        "owner_scope": { "enum": ["world", "region", "scene", "entity", "system"] },
+        "owner_id": { "$ref": "#/$defs/id" },
+        "states": {
+          "type": "array",
+          "minItems": 2,
+          "maxItems": 256,
+          "uniqueItems": true,
+          "items": { "$ref": "#/$defs/id" }
+        },
+        "initial_state": { "$ref": "#/$defs/id" },
+        "hierarchy": { "$ref": "#/$defs/hierarchy" },
+        "persistence": { "const": "runtime" },
+        "visibility": { "enum": ["public", "observable", "inferred", "private", "system_only"] },
+        "authority": { "const": "state_machine.core" },
+        "transitions": {
+          "type": "array",
+          "minItems": 1,
+          "maxItems": 4096,
+          "items": { "$ref": "#/$defs/transition" }
+        }
+      }
+    }
+  }
+}

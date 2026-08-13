@@ -13,11 +13,10 @@ from .dialogue import select_dialogue
 from .kernel import WorldRuntime
 from .models import ActionIR, EventIR, ModuleContract, StateDelta, TransitionResult
 from .state_machine import (
-    STATE_MACHINE_CONDITION_LIMIT,
     STATE_MACHINE_PRIORITY_LIMIT,
     STATE_MACHINE_TIMER_TICK_LIMIT,
     resolve_state_machine_actor,
-    state_machine_condition_matches,
+    state_machine_when_matches,
     state_machine_is_active_leaf,
     state_machine_lineage,
     state_machine_resolve_leaf,
@@ -531,7 +530,7 @@ class StateMachineModule(BaseModule):
 
     def __init__(self) -> None:
         super().__init__(ModuleContract(
-            "state_machine.core", "0.5.0", "TMS", [],
+            "state_machine.core", "0.6.0", "TMS", [],
             ["fsm.timer_elapsed", "fsm.transitioned", "fsm.completed", "fsm.failed"],
             ["fsm.*", "fsm_runtime.*"], ["fsm.*", "fsm_runtime.*"],
             ["state", "event", "clock"],
@@ -775,16 +774,11 @@ class StateMachineModule(BaseModule):
         *,
         actor_id: str | None,
     ) -> bool:
-        conditions = transition.get("when", [])
-        return (
-            isinstance(conditions, list)
-            and len(conditions) <= STATE_MACHINE_CONDITION_LIMIT
-            and all(
-                state_machine_condition_matches(
-                    runtime, machine, condition, actor_id=actor_id,
-                )
-                for condition in conditions
-            )
+        return state_machine_when_matches(
+            runtime,
+            machine,
+            transition.get("when", []),
+            actor_id=actor_id,
         )
 
     @staticmethod
