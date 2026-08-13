@@ -2271,7 +2271,7 @@ def _validate_narrative(narrative: Any, room_ids: set[str]) -> dict[str, list[di
     return {"room_overlays": normalized}
 
 
-def _validate_dialogues(dialogues: Any, entity_types: dict[str, str]) -> dict[str, list[dict[str, Any]]]:
+def _validate_dialogues(dialogues: Any, entity_types: dict[str, str]) -> dict[str, Any]:
     """Validate authored, read-only NPC dialogue variants.
 
     A dialogue script is deliberately not a state machine. It is a
@@ -2283,12 +2283,17 @@ def _validate_dialogues(dialogues: Any, entity_types: dict[str, str]) -> dict[st
     """
     if not isinstance(dialogues, dict):
         raise CompileError("dialogues.json 必須是物件")
-    unknown = set(dialogues) - {"dialogues"}
+    unknown = set(dialogues) - {"dialogues", "topic_aliases"}
     if unknown:
         raise CompileError(f"dialogues.json 含未知欄位: {sorted(unknown)}")
     entries = dialogues.get("dialogues", [])
     if not isinstance(entries, list):
         raise CompileError("dialogues.dialogues 必須是陣列")
+    authored_aliases = dialogues.get("topic_aliases", {})
+    if not isinstance(authored_aliases, dict):
+        raise CompileError("dialogues.topic_aliases 必須是物件")
+    if len(authored_aliases) > 64:
+        raise CompileError("dialogues.topic_aliases 不可超過 64 組")
 
     normalized: list[dict[str, Any]] = []
     dialogue_ids: set[str] = set()
@@ -2329,7 +2334,23 @@ def _validate_dialogues(dialogues: Any, entity_types: dict[str, str]) -> dict[st
             "when": conditions,
             "text": text,
         })
-    return {"dialogues": normalized}
+    known_topics = {entry["topic"] for entry in normalized}
+    topic_aliases: dict[str, str] = {}
+    for authored_alias, authored_topic in authored_aliases.items():
+        if not isinstance(authored_alias, str) or not authored_alias.strip():
+            raise CompileError("dialogues.topic_aliases 的別名必須是非空字串")
+        if len(authored_alias) > 64:
+            raise CompileError("dialogues.topic_aliases 的別名不可超過 64 字元")
+        alias = authored_alias.strip().lower()
+        if alias in topic_aliases:
+            raise CompileError(f"dialogues.topic_aliases 正規化後重複: {alias}")
+        if not isinstance(authored_topic, str) or not ID_RE.match(authored_topic):
+            raise CompileError(f"dialogues.topic_aliases[{authored_alias!r}] 的目標話題不合法")
+        topic = authored_topic.lower()
+        if topic not in known_topics:
+            raise CompileError(f"dialogues.topic_aliases[{authored_alias!r}] 引用不存在話題: {topic}")
+        topic_aliases[alias] = topic
+    return {"topic_aliases": topic_aliases, "dialogues": normalized}
 
 
 def _validate_scenarios(

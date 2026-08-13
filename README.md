@@ -114,6 +114,8 @@ Function Registry 同時提供有上限的 LRU memoization（預設 2048 筆）�
 
 Compiler 會確認這些契約檔的 `$id`，並檢查 CSV header 是否符合必要／可選欄位，再把契約 ID 寫入 `world.package.json` 的 `schema_contracts` 與 manifest 的 `source_schemas`。這些 Schema 負責結構、欄位與版本；重複 ID、跨檔案引用、狀態可達性與事件 payload 等語意規則仍由 Compiler 驗證。Studio 可透過唯讀的 `GET /api/studio/schemas` 取得 catalog，讓 EveGlyph 不需要猜測檔名或版本。
 
+從磁碟載入 package 時，Runtime 仍會獨立重查必要區段、契約 ID、來源 checksum 記錄與 compiled StateIR 的 owner／hierarchy／transition／condition／reaction 邊界；不把先前 Compiler 成功當成目前檔案仍然有效的證據。缺少 provenance、未知規則欄位或無法對應正式契約的 package，會在建立 Runtime State 前被拒絕。
+
 ### EveGlyph World IR migration
 
 EveGlyph 的 `entity`、`entity_list`、`state_machine` YAML 可先匯入成診斷保留的共用 Studio World IR：
@@ -212,7 +214,7 @@ Python 版本用於凍結語言無關契約與快速驗證。後續 Rust 重寫�
 
 ### 資料驅動 NPC 對話
 
-可選的 `dialogues.json` 是和 `narrative.json` 平行的 Authoring Layer 來源。每筆資料固定包含 `dialogue_id`、`speaker_id`、`topic`、`when`、`text`；編譯器會驗證說話者確實是 `character` 或 `creature`、所有條件只讀取白名單狀態，以及 ID／型別沒有漂移。`when: []` 表示該話題的無條件回退行；條件可引用 `$actor`，NPC 自身則可引用 `$speaker`。
+可選的 `dialogues.json` 是和 `narrative.json` 平行的 Authoring Layer 來源。每筆資料固定包含 `dialogue_id`、`speaker_id`、`topic`、`when`、`text`；編譯器會驗證說話者確實是 `character` 或 `creature`、所有條件只讀取白名單狀態，以及 ID／型別沒有漂移。`when: []` 表示該話題的無條件回退行；條件可引用 `$actor`，NPC 自身則可引用 `$speaker`。來源也可宣告最多 64 組 `topic_aliases`，把 `工作`、`差事`、`job` 這類明確詞彙映射到同一個 canonical topic；Compiler 與 Runtime Package loader 都會拒絕不存在的目標話題。這仍是有限、可稽核的別名表，不是把自由文字直接當成規則。
 
 玩家可輸入 `talk 對象 [topic]`（`ask` 是別名）。Runtime 只會在對象存在、同房間、仍能回應時選出對話，依序採用「指定話題 → `default` 話題」與「較多滿足條件優先、同分依來源順序」的固定規則，然後發出 `dialogue.responded` EventIR。這是**唯讀投影**：DialogueModule 不會直接寫入任務、貨幣或角色狀態；若有對話帶來劇情進度，必須由 `quests.json` 明確宣告的 QuestModule EventIR 轉移來寫入。CLI、Web、AMK Raw 捕捉因而共用同一份事件事實。
 
@@ -220,7 +222,7 @@ Python 版本用於凍結語言無關契約與快速驗證。後續 Rust 重寫�
 
 原有任務可維持簡單的 `requirements`／`reward` 格式；新的多階段任務則改用 `transitions`，每條邊含 `transition_id`、`from`、`on`、`to`，並可附加 `event_match`、`requirements`、完成報酬與 bounded `priority`。觸發白名單已涵蓋 action failure、移動、物品、門、對話、戰鬥、魔法與 terminal quest chaining；每種 EventIR 可比對的 payload 欄位都由共用契約限制，並在 Studio mapping 與正常 Compiler 兩層 fail-closed 驗證。完整順序與邊界見 `docs/WORLD_STATE_MACHINE_EXECUTION_CONTRACT_zh-TW.md`。
 
-Runtime 收到事件後只會為該 actor 的目前狀態選邊；較高 `priority` 勝出，同一 `from/on/priority` 則在編譯期直接拒絕，避免用作者列表順序偷偷裁決衝突。進入 `completed` 會發出 `quest.completed`，進入 `failed` 會發出 `quest.failed`，每次轉移都會先發出可追溯的 `quest.transitioned`。這些寫入都走 `WorldRuntime.commit_reaction()` 的原子 Delta+Event 路徑。
+Runtime 收到事件後只會為該 actor 的目前狀態選邊；較高 `priority` 勝出，同一 `from/on/priority` 則在編譯期直接拒絕，避免用作者列表順序偷偷裁決衝突。作者可以為不同起始狀態明確宣告同一結果，例如和平之城的玩家先把柴薪交給工頭、尚未先問工作時，也由 `unstarted + inventory.item_given → completed` 的正式邊完成並領取同額報酬，而不是讓 Runtime 猜測敘事意圖。進入 `completed` 會發出 `quest.completed`，進入 `failed` 會發出 `quest.failed`，每次轉移都會先發出可追溯的 `quest.transitioned`。這些寫入都走 `WorldRuntime.commit_reaction()` 的原子 Delta+Event 路徑。
 
 ### Scoped StateIR 世界狀態機
 
@@ -277,7 +279,7 @@ PYTHONPATH=src python3 -m compilableworld play build/gray_crown/world.package.js
 - Web Gateway 是單一 actor、單一瀏覽器分頁假設下的 request/response API（無 WebSocket、無帳號/session），與已知的單程序/單世界限制一致；`/api/action` 與 `/api/state` 共用同一把 lock 序列化存取，避免併發提交造成的版本衝突，但不是為多人設計的。
 - AMK v0.1 已提供本機 Raw/Clean、治理與 CompilableWorld EventIR 唯讀擷取；它目前沒有向量／圖／時間索引、真正網路同步、加密副本、背景自我改寫或直接程式碼／權重寫入。它不是 Runtime State，也不會自動把遊戲事件升格為 Clean truth。
 - （已修復，記錄供參考）CLI 曾在非 UTF-8 系統 locale（例如繁體中文 Windows 的 cp950）下對含中文標點的 `say` 輸入拋出編碼錯誤；`cli.py` 現在會在啟動時強制 stdin/stdout 為 UTF-8。
-- （已修復，源自一次真實的 AI 玩家試玩）指令目標現在可以用場景內可見的顯示名稱（例如「老鐵」）指定，不再強制要求內部 ID（`npc.foreman_laotie`）——`DeterministicIntentParser` 會在目前房間與玩家物品欄中做名稱解析，找不到或有歧義時一律不猜測、原樣傳給下層模組，讓玩家看到正常的「找不到」訊息，不會誤觸錯的目標。同一輪試玩也發現 `give` 沒有保護機制、可以把仍在使用中的鑰匙道具送給不相關 NPC 且無法復原——現在會在該鑰匙鎖著的門還沒開之前擋下交付。另外修正：裸方向詞（`north`）現在可直接使用；`unlock` 對非門實體會給出正確訊息而非誤導的「門沒有上鎖」；戰鬥現在有反擊傷害與獨立的擊殺訊息。
+- （已修復，源自真實的 AI 玩家試玩）指令目標現在可以用場景內可見的顯示名稱（例如「老鐵」）指定，不再強制要求內部 ID（`npc.foreman_laotie`）——`DeterministicIntentParser` 會在目前房間與玩家物品欄中做名稱解析，找不到或有歧義時一律不猜測、原樣傳給下層模組，讓玩家看到正常的「找不到」訊息，不會誤觸錯的目標。試玩也讓 `give` 增加仍在使用中的鑰匙保護；Gray Crown 市集改成正確的向下出口並依鎖定／解鎖／開門狀態投影文字；和平之城支援工作話題別名、先交柴再問工作的自由順序，並明示十五枚銅幣與身份牌通行規則；終端 `help` 只列出世界實際安裝的行動，`tick` 分開顯示執行 Action 數與世界產生 Event 數。另外修正：裸方向詞（`north`）現在可直接使用；`unlock` 對非門實體會給出正確訊息；戰鬥現在有反擊傷害與獨立的擊殺訊息。
 
 ## Read-only MCP 世界介面（M0）
 

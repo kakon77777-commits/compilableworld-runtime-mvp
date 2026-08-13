@@ -22,8 +22,18 @@
         "to": "completed",
         "reward": {"currency": 15},
         "priority": 0
+      },
+      {
+        "transition_id": "transition.find_work.complete_early",
+        "from": "unstarted",
+        "on": "inventory.item_given",
+        "event_match": {"item": "item.firewood_bundle", "recipient": "npc.foreman_laotie"},
+        "requirements": ["deliver:item.firewood_bundle:npc.foreman_laotie"],
+        "to": "completed",
+        "reward": {"currency": 15},
+        "priority": 0
       }
     ],
-    "note": "reward.currency=15 is grounded in worlds/mingyun_zhiyu/data/economy_income.csv's '普通勞工 5-10銅幣/日' row — slightly more than a day's common-labor wage for a one-off delivery, not an invented number. The task is explicit event-driven state progression: dialogue.foreman_laotie.work.offer causes unstarted→available; giving item.firewood_bundle to npc.foreman_laotie causes available→completed and pays the reward."
+    "note": "reward.currency=15 is grounded in worlds/mingyun_zhiyu/data/economy_income.csv's '普通勞工 5-10銅幣/日' row — slightly more than a day's common-labor wage for a one-off delivery, not an invented number. The task is explicit event-driven state progression: dialogue.foreman_laotie.work.offer causes unstarted→available; giving item.firewood_bundle to npc.foreman_laotie causes available→completed and pays the reward. If the player brings the same required bundle before asking, inventory.item_given deterministically completes the quest from unstarted as well, preserving free action ordering without inferring a prose rule."
   }
 ]

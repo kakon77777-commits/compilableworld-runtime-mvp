@@ -12,6 +12,51 @@
       ],
       "text": "沉默守衛倒在石牆旁，南門只剩風穿過舊旗的聲音。",
       "mode": "append"
+    },
+    {
+      "room_id": "room.market",
+      "when": [
+        {
+          "owner": "door.old_vault",
+          "namespace": "door",
+          "key": "locked",
+          "equals": true
+        }
+      ],
+      "text": "下方石階盡頭的舊王室庫門仍然上鎖。",
+      "mode": "append"
+    },
+    {
+      "room_id": "room.market",
+      "when": [
+        {
+          "owner": "door.old_vault",
+          "namespace": "door",
+          "key": "locked",
+          "equals": false
+        },
+        {
+          "owner": "door.old_vault",
+          "namespace": "door",
+          "key": "open",
+          "equals": false
+        }
+      ],
+      "text": "下方石階盡頭的舊王室庫門已解鎖，但仍然關著。",
+      "mode": "append"
+    },
+    {
+      "room_id": "room.market",
+      "when": [
+        {
+          "owner": "door.old_vault",
+          "namespace": "door",
+          "key": "open",
+          "equals": true
+        }
+      ],
+      "text": "下方石階盡頭的舊王室庫門已經敞開。",
+      "mode": "append"
     }
   ]
 }

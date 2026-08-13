@@ -5,6 +5,7 @@ import heapq
 import json
 import math
 import os
+import re
 from copy import deepcopy
 from collections import Counter, defaultdict, deque
 from dataclasses import asdict
@@ -34,10 +35,12 @@ from .models import (
 )
 from .functions import FunctionRegistry
 from .player_generation import GeneratedPlayer, actor_id_for_player, template_records
+from .schema_registry import schema_contracts
 from .state_machine import (
     state_machine_is_active_leaf,
     state_machine_resolve_leaf,
     state_machine_state_matches,
+    validate_compiled_state_machines,
 )
 
 
@@ -284,6 +287,7 @@ class EventLog:
     def __init__(self, path: str | Path | None = None) -> None:
         self.path = Path(path) if path else None
         self.events: list[EventIR] = []
+        self._event_ids: set[str] = set()
         if self.path:
             self.path.parent.mkdir(parents=True, exist_ok=True)
             self._load_existing()
@@ -314,6 +318,7 @@ class EventLog:
                 raise RuntimeErrorBase(f"EventLog contains duplicate event_id at line {line_number}: {self.path}")
             seen_ids.add(event.event_id)
             self.events.append(event)
+        self._event_ids = seen_ids
 
     def append(self, event: EventIR) -> None:
         self.append_batch([event])
@@ -322,9 +327,24 @@ class EventLog:
         batch = list(events)
         if not batch:
             return
+        batch_ids: set[str] = set()
+        for event in batch:
+            if (
+                not isinstance(event, EventIR)
+                or not isinstance(event.event_id, str)
+                or not event.event_id
+                or not isinstance(event.payload, dict)
+            ):
+                raise KernelTransactionError("EventLog event is invalid")
+            if event.event_id in self._event_ids or event.event_id in batch_ids:
+                raise KernelTransactionError(
+                    f"EventLog contains duplicate event_id: {event.event_id}"
+                )
+            batch_ids.add(event.event_id)
         encoded = "".join(json.dumps(event.to_dict(), ensure_ascii=False) + "\n" for event in batch)
         if self.path is None:
             self.events.extend(batch)
+            self._event_ids.update(batch_ids)
             return
 
         start_offset = self.path.stat().st_size if self.path.exists() else 0
@@ -341,6 +361,7 @@ class EventLog:
                 pass
             raise KernelTransactionError("EventLog batch append failed") from exc
         self.events.extend(batch)
+        self._event_ids.update(batch_ids)
 
 
 class RuntimeModule(Protocol):
@@ -475,10 +496,127 @@ class WorldRuntime:
 
     @classmethod
     def from_package(cls, path: str | Path, event_log_path: str | Path | None = None) -> "WorldRuntime":
-        package = json.loads(Path(path).read_text(encoding="utf-8"))
-        if package.get("format") != "compilableworld.runtime-package/v0.1":
-            raise RuntimeErrorBase("不支援的 Runtime Package")
+        try:
+            package = json.loads(Path(path).read_text(encoding="utf-8"))
+        except (OSError, json.JSONDecodeError) as exc:
+            raise RuntimeErrorBase("Runtime Package 無法讀取或不是有效 JSON") from exc
+        cls._validate_runtime_package(package)
         return cls(package, event_log_path)
+
+    @staticmethod
+    def _validate_runtime_package(package: Any) -> None:
+        required = {
+            "format", "manifest", "world", "rooms", "exits", "entities",
+            "action_behaviors", "state_machines", "quests", "narrative",
+            "dialogues", "scenarios", "functions", "player_templates",
+            "initial_state", "schema_contracts", "source_checksums",
+        }
+        allowed = required | {"studio"}
+        if (
+            not isinstance(package, dict)
+            or set(package) - allowed
+            or required - set(package)
+            or package.get("format") != "compilableworld.runtime-package/v0.1"
+        ):
+            raise RuntimeErrorBase("Runtime Package 根契約無效")
+        for key in (
+            "rooms", "exits", "entities", "action_behaviors", "state_machines",
+            "quests", "player_templates", "initial_state",
+        ):
+            if not isinstance(package.get(key), list):
+                raise RuntimeErrorBase(f"Runtime Package {key} 型別無效")
+        for key in (
+            "manifest", "world", "narrative", "dialogues", "scenarios", "functions",
+            "schema_contracts", "source_checksums",
+        ):
+            if not isinstance(package.get(key), dict):
+                raise RuntimeErrorBase(f"Runtime Package {key} 型別無效")
+        manifest = package["manifest"]
+        manifest_required = {
+            "world_id", "world_version", "schema_version", "namespace",
+            "runtime_version", "modules",
+        }
+        if manifest_required - set(manifest):
+            raise RuntimeErrorBase("Runtime Package manifest 缺少必要欄位")
+        if any(
+            not isinstance(manifest.get(key), str) or not manifest[key]
+            for key in (
+                "world_id", "world_version", "schema_version", "namespace", "runtime_version",
+            )
+        ):
+            raise RuntimeErrorBase("Runtime Package manifest 文字欄位無效")
+        modules = manifest.get("modules")
+        if (
+            not isinstance(modules, list)
+            or not modules
+            or len(modules) != len(set(modules))
+            or any(not isinstance(module_id, str) or not module_id for module_id in modules)
+        ):
+            raise RuntimeErrorBase("Runtime Package manifest.modules 無效")
+        if package.get("schema_contracts") != schema_contracts():
+            raise RuntimeErrorBase("Runtime Package schema_contracts 不完整或版本不符")
+        checksums = package["source_checksums"]
+        if not checksums or any(
+            not isinstance(source, str)
+            or not source
+            or not isinstance(digest, str)
+            or re.fullmatch(r"[a-f0-9]{64}", digest) is None
+            for source, digest in checksums.items()
+        ):
+            raise RuntimeErrorBase("Runtime Package source_checksums 無效")
+        try:
+            room_ids = {
+                room["room_id"] for room in package["rooms"]
+                if isinstance(room, dict) and isinstance(room.get("room_id"), str)
+            }
+            region_ids = {
+                room["region"] for room in package["rooms"]
+                if isinstance(room, dict) and isinstance(room.get("region"), str)
+            }
+            entity_ids = {
+                entity["entity_id"] for entity in package["entities"]
+                if isinstance(entity, dict) and isinstance(entity.get("entity_id"), str)
+            }
+        except (KeyError, TypeError) as exc:
+            raise RuntimeErrorBase("Runtime Package world identity records 無效") from exc
+        if (
+            len(room_ids) != len(package["rooms"])
+            or len(entity_ids) != len(package["entities"])
+        ):
+            raise RuntimeErrorBase("Runtime Package rooms/entities ID 無效或重複")
+        dialogue_source = package["dialogues"]
+        if set(dialogue_source) - {"dialogues", "topic_aliases"}:
+            raise RuntimeErrorBase("Runtime Package dialogues 含未知欄位")
+        dialogue_entries = dialogue_source.get("dialogues")
+        topic_aliases = dialogue_source.get("topic_aliases", {})
+        if not isinstance(dialogue_entries, list) or not isinstance(topic_aliases, dict):
+            raise RuntimeErrorBase("Runtime Package dialogues 型別無效")
+        known_topics = {
+            entry.get("topic")
+            for entry in dialogue_entries
+            if isinstance(entry, dict) and isinstance(entry.get("topic"), str)
+        }
+        if len(topic_aliases) > 64 or any(
+            not isinstance(alias, str)
+            or not alias
+            or alias != alias.strip().lower()
+            or len(alias) > 64
+            or not isinstance(topic, str)
+            or topic not in known_topics
+            for alias, topic in topic_aliases.items()
+        ):
+            raise RuntimeErrorBase("Runtime Package dialogues.topic_aliases 無效")
+        try:
+            validate_compiled_state_machines(
+                package["state_machines"],
+                world_id=manifest["world_id"],
+                region_ids=region_ids,
+                room_ids=room_ids,
+                entity_ids=entity_ids,
+                enabled_modules=set(modules),
+            )
+        except ValueError as exc:
+            raise RuntimeErrorBase(f"Runtime Package StateIR 無效: {exc}") from exc
 
     def player_templates(self) -> list[dict[str, Any]]:
         """Return the AI-proposed starter templates exposed to clients."""
@@ -627,8 +765,10 @@ class WorldRuntime:
 
     def module_for(self, verb: str) -> RuntimeModule:
         candidates = [m for m in self.modules.values() if verb in m.contract.actions]
-        if len(candidates) != 1:
-            raise RuntimeErrorBase(f"行為 {verb} 的提供者數量不是 1: {len(candidates)}")
+        if not candidates:
+            raise RuntimeErrorBase(f"這個世界未提供「{verb}」行動；輸入 help 查看目前可用指令")
+        if len(candidates) > 1:
+            raise RuntimeErrorBase(f"行為 {verb} 的模組設定衝突")
         return candidates[0]
 
     def submit(self, action: ActionIR, delay: int = 0) -> ActionReceipt:
@@ -660,6 +800,7 @@ class WorldRuntime:
             delay = duration
         if delay > 0:
             runtime_record = self._new_action_runtime_record(action, behavior)
+            scheduler_counter_before = self.scheduler._counter
             entry = self.scheduler.schedule(action, delay)
             self.action_runtime[action.action_id] = runtime_record
             event = self._action_lifecycle_event("action.scheduled", action, behavior, due_tick=entry[0])
@@ -667,6 +808,7 @@ class WorldRuntime:
                 self.event_log.append(event)
             except KernelTransactionError:
                 self.scheduler.remove(action.action_id)
+                self.scheduler._counter = scheduler_counter_before
                 self.actions.pop(action.action_id, None)
                 self.action_runtime.pop(action.action_id, None)
                 action.status = ActionStatus.PARSED
@@ -2593,6 +2735,14 @@ class WorldRuntime:
             scheduler_payload = {"tick": payload.get("tick", 0), "counter": 0, "queue": []}
         next_scheduler = Scheduler()
         queued_actions = next_scheduler.import_state(scheduler_payload)
+        snapshot_tick = payload.get("tick")
+        if (
+            isinstance(snapshot_tick, bool)
+            or not isinstance(snapshot_tick, int)
+            or snapshot_tick < 0
+            or snapshot_tick != next_scheduler.tick
+        ):
+            raise RuntimeErrorBase("Snapshot tick 與 scheduler tick 不一致")
         next_actions = {action.action_id: action for action in queued_actions}
         next_due_ticks = {
             action.action_id: due_tick
@@ -2727,9 +2877,16 @@ class WorldRuntime:
         pending_actions: dict[str, tuple[int, int, ActionIR]] = {}
         pending_action_runtime: dict[str, dict[str, Any]] = {}
         lifecycle_seen = False
-        lifecycle_tick = 0
         lifecycle_order = 0
+        replay_tick = self.scheduler.tick
         for event in events:
+            if (
+                isinstance(event.timestamp_tick, bool)
+                or not isinstance(event.timestamp_tick, int)
+                or event.timestamp_tick < 0
+            ):
+                raise RuntimeErrorBase("EventLog timestamp_tick is invalid")
+            replay_tick = max(replay_tick, event.timestamp_tick)
             if event.event_type in {"fsm.transitioned", "fsm.completed", "fsm.failed"}:
                 self._validate_replayed_fsm_lifecycle(event)
             if event.event_type == "state.committed":
@@ -2814,7 +2971,6 @@ class WorldRuntime:
                 ):
                     raise RuntimeErrorBase("EventLog fsm.timer_elapsed violates authored timer")
                 lifecycle_seen = True
-                lifecycle_tick = max(lifecycle_tick, event.timestamp_tick)
             if event.event_type == "runtime.reaction_halted":
                 payload = event.payload
                 required_fields = {
@@ -2861,10 +3017,8 @@ class WorldRuntime:
                     "root_correlation_id": event.correlation_id,
                 }
                 lifecycle_seen = True
-                lifecycle_tick = max(lifecycle_tick, event.timestamp_tick)
             if event.event_type == "action.scheduled":
                 lifecycle_seen = True
-                lifecycle_tick = max(lifecycle_tick, event.timestamp_tick)
                 try:
                     action = ActionIR.from_dict(event.payload["action"])
                     due_tick = int(event.payload["due_tick"])
@@ -2962,7 +3116,6 @@ class WorldRuntime:
                     )
                 selections[phase_id] = branch_id
                 lifecycle_seen = True
-                lifecycle_tick = max(lifecycle_tick, event.timestamp_tick)
             elif event.event_type == "action.child_completed":
                 action_id = event.payload.get("parent_action_id")
                 step_id = event.payload.get("step_id")
@@ -3023,7 +3176,6 @@ class WorldRuntime:
                     )
                 completed_steps.append(step_id)
                 lifecycle_seen = True
-                lifecycle_tick = max(lifecycle_tick, event.timestamp_tick)
             elif event.event_type == "action.retry_scheduled":
                 action_id = event.payload.get("action_id")
                 entry = pending_actions.get(action_id) if isinstance(action_id, str) else None
@@ -3129,7 +3281,6 @@ class WorldRuntime:
                 ):
                     raise RuntimeErrorBase("EventLog action.retry_scheduled violates authored policy")
                 lifecycle_seen = True
-                lifecycle_tick = max(lifecycle_tick, event.timestamp_tick)
                 pending_actions[action_id] = (due_tick, entry[1], entry[2])
                 pending_action_runtime[action_id]["retries"][phase["phase_id"]] = {
                     "attempts": attempt,
@@ -3140,7 +3291,6 @@ class WorldRuntime:
                 }
             elif event.event_type == "action.progressed":
                 lifecycle_seen = True
-                lifecycle_tick = max(lifecycle_tick, event.timestamp_tick)
                 action_id = event.payload.get("action_id")
                 next_phase_id = event.payload.get("next_phase_id")
                 if not isinstance(action_id, str) or not isinstance(next_phase_id, str):
@@ -3271,11 +3421,9 @@ class WorldRuntime:
                                 "EventLog action.completed violates static terminal route"
                             )
                     lifecycle_seen = True
-                    lifecycle_tick = max(lifecycle_tick, event.timestamp_tick)
                     pending_actions.pop(action_id, None)
                     pending_action_runtime.pop(action_id, None)
         if lifecycle_seen:
-            self.scheduler.tick = lifecycle_tick
             self.scheduler._counter = lifecycle_order
             self.scheduler._queue = list(pending_actions.values())
             heapq.heapify(self.scheduler._queue)
@@ -3283,6 +3431,7 @@ class WorldRuntime:
                 action.action_id: action for _, _, action in pending_actions.values()
             }
             self.action_runtime = pending_action_runtime
+        self.scheduler.tick = replay_tick
 
     def diagnostics(self) -> dict[str, Any]:
         return {

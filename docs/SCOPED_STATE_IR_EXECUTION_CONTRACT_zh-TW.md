@@ -75,6 +75,8 @@ Compiler 除了確認 JSON 結構，也會驗證：
 
 未知欄位一律拒絕。因此 `guard`、`requirements`、`effects`、`reward`、任意 StateStore path 與 Python expression 都不會被悄悄執行。v0.1 來源若偷偷加入 `when`，或 v0.1／v0.2 來源加入 `after_ticks`，都會被拒絕；作者必須明確升級格式與 manifest schema ID。
 
+Compiler 成功不會被視為日後載入的永久信任。`WorldRuntime.from_package()` 會在建立 EntityRegistry、StateStore 或事件訂閱之前，再次檢查 Runtime Package 的必要區段、正式 `schema_contracts`、來源 checksum 記錄，以及 compiled StateIR 的 owner 引用、module authority、hierarchy、initial leaf、transition trigger、condition expression、所有 budget、狀態可達性與跨機器 reaction DAG。外部檔案若缺少 provenance、使用未知文字規則欄位或與已編譯契約不一致，整個 package 會在進入 Runtime 前被拒絕；Runtime 不會把缺少 `when` 解讀成無條件成立。
+
 ## 3. Runtime 選邊與提交
 
 收到 EventIR `E` 時，每台 StateIR 以目前 active leaf `Q` 選取符合下列條件的 transition：
@@ -146,8 +148,9 @@ StateIR 的 authoring visibility 會保守映射到 EventIR：
 - Compiler 在 Runtime Package 保留 authored `initial_state` 與 resolved `initial_leaf`，StateStore seed 只寫入 leaf。
 - Snapshot 保存每一個 scoped `fsm` active-leaf cell 與版本；ancestor path 由 package 推導。
 - Snapshot v0.6 透過既有 StateStore 一併保存 `fsm_runtime` entry tick，因此不需要新增 Snapshot 格式或第二份 timer queue。
-- EventLog 保存 reaction 的 `state.committed` 與 `fsm.*` EventIR。
-- Replay 使用已提交 Delta 還原結果，不重新抽樣或重跑自由文字。
+- Snapshot v0.6 的頂層 `tick` 與 `scheduler.tick` 是同一時鐘的重複一致性欄位；兩者不一致時，loader 在替換任何 live Runtime 結構前拒絕整份 Snapshot。
+- EventLog 保存 reaction 的 `state.committed` 與 `fsm.*` EventIR；append 會在寫入記憶體或檔案前拒絕既有 ID、同批重複 ID 與無效事件，並以 Kernel transaction failure 讓 reaction、排程建立／取消等外層交易走同一條原子回滾路徑，確保世界狀態與剛寫出的 log 一致且可重載。
+- Replay 使用已提交 Delta 還原結果，不重新抽樣或重跑自由文字；Runtime clock 由完整有序 EventLog 的非負 `timestamp_tick` 還原，不再只依賴 Action lifecycle 事件，因此非零 tick 的一般事件與後續 timer 仍維持決定性。
 - `package_overview()` 提供 hierarchy、initial path、機器、owner、states、transitions 與 diagnostics。
 - Studio transition projection 會顯示 source path、authored target、resolved target leaf、trigger kind、`on`／`after_ticks` 與完整 authored `when` 定義，供人工審查；它仍是唯讀投影。
 - `runtime_overview()` 額外提供每台機器的 `current_state`、`current_path`、`state_version`、`entered_tick` 與目前 leaf 的 pending timer／剩餘 tick。
@@ -166,4 +169,4 @@ Studio 投影仍是唯讀；正式修改必須回到 authoring source、Compiler
 - 自由回饋環、執行期動態新增依賴，或把 cascade budget 當成正常流程分支；
 - AI 自動採納草稿或直接改寫 Runtime State。
 
-驗證基線由 `tests/test_scoped_state_machine.py` 覆蓋五種 owner、compound target／initial entry、leaf-over-ancestor specificity、terminal 與 non-terminal 跨層 chaining、terminal FSM 到 Quest、可信 module source、hierarchy／reaction cycle 與 depth rejection、owner／actor leaf、`all`／`any`／`not` 三值語義、結構與 budget fail-closed、event／timer priority、v0.1–v0.5 來源相容、Snapshot、Replay lifecycle／leaf／timer validation、Studio expression／path／countdown projection、legacy seed 相容與 reaction rollback；`tests/test_event_bus.py` 覆蓋 batch FIFO、非遞迴有界停止、audit event 與 Replay tamper rejection。最新完整測試數以 `docs/RUNTIME_CAPABILITY_MATRIX.md` 的驗證列為準。
+驗證基線由 `tests/test_scoped_state_machine.py` 覆蓋五種 owner、compound target／initial entry、leaf-over-ancestor specificity、terminal 與 non-terminal 跨層 chaining、terminal FSM 到 Quest、可信 module source、hierarchy／reaction cycle 與 depth rejection、owner／verified actor leaf、`all`／`any`／`not` 三值語義、精確 node／leaf 上限、結構與 budget fail-closed、authoring→Compiler→Package→Runtime／Studio→Snapshot／Replay round-trip、Runtime Package 重載拒絕、event／timer priority、v0.1–v0.5 來源相容、Snapshot、Replay lifecycle／leaf／timer validation、Studio expression／path／countdown projection、legacy seed 相容與 reaction rollback；`tests/test_event_bus.py`、`tests/test_mcp_runtime_bindings.py` 與 `tests/test_runtime.py` 另覆蓋 batch FIFO、EventLog append-time ID 唯一性、Snapshot 雙 tick 一致性、非零 tick Replay、非遞迴有界停止、audit event 與 Replay lifecycle 驗證。最新完整測試數以 `docs/RUNTIME_CAPABILITY_MATRIX.md` 的驗證列為準。

@@ -1,5 +1,4 @@
 room_id,name,description,region
 room.south_gate,灰冠城南門,黑鐵城門在霧中矗立；一名守衛注視著來客。,region.gray_crown
-room.market,灰冠市集,石板路兩側仍有零星商販，北方是一道上鎖的舊門。,region.gray_crown
+room.market,灰冠市集,石板路兩側仍有零星商販；通往舊王室庫房的石階向下沒入陰影。,region.gray_crown
 room.vault,舊王室庫房,塵封的木箱與褪色徽記散落在昏暗庫房中。,region.gray_crown
-

@@ -1,4 +1,10 @@
 {
+  "topic_aliases": {
+    "工作": "work",
+    "差事": "work",
+    "搬柴": "work",
+    "job": "work"
+  },
   "dialogues": [
     {
       "dialogue_id": "dialogue.registration_clerk.default",
@@ -26,7 +32,7 @@
           "equals": "unstarted"
         }
       ],
-      "text": "巷子裡有一捆柴薪，替我送來，便算你今天做了第一件正經事。"
+      "text": "巷子裡有一捆柴薪，替我送來，我付你十五枚銅幣，便算你今天做了第一件正經事。"
     },
     {
       "dialogue_id": "dialogue.foreman_laotie.work.available",
@@ -40,7 +46,7 @@
           "equals": "available"
         }
       ],
-      "text": "柴薪還在巷子裡；帶來之後，我就給你結今天的工錢。"
+      "text": "柴薪還在巷子裡；帶來之後，我就給你結十五枚銅幣的工錢。"
     },
     {
       "dialogue_id": "dialogue.foreman_laotie.work.completed",
@@ -54,7 +60,7 @@
           "equals": "completed"
         }
       ],
-      "text": "柴薪和工錢都已交割。城裡的路，往後得靠你自己走。"
+      "text": "柴薪和十五枚銅幣的工錢都已交割。城裡的路，往後得靠你自己走。"
     },
     {
       "dialogue_id": "dialogue.foreman_laotie.default",
@@ -68,7 +74,7 @@
       "speaker_id": "npc.checkpoint_guard",
       "topic": "default",
       "when": [],
-      "text": "關卡以北不是新來者該去的地方。若要通行，先證明你有資格。"
+      "text": "臨時身份牌就是通行資格；有牌便自行打開鐵柵欄。只是北面的軍營不是觀光的地方，別惹事。"
     },
     {
       "dialogue_id": "dialogue.woerkan.default",

@@ -44,6 +44,21 @@ class RuntimeBindingTests(unittest.TestCase):
             with self.assertRaises(RuntimeErrorBase):
                 WorldRuntime.from_package(package, event_log)
 
+    def test_event_log_rejects_duplicate_ids_before_append(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            package = compile_world(EXAMPLE, Path(directory) / "build")
+            event_log = Path(directory) / "events.jsonl"
+            runtime = WorldRuntime.from_package(package, event_log)
+            event = EventIR("world.duplicate", "test", {}, event_id="event-duplicate")
+            runtime.event_log.append(event)
+            before = event_log.read_text(encoding="utf-8")
+
+            with self.assertRaises(RuntimeErrorBase):
+                runtime.event_log.append(event)
+
+            self.assertEqual([item.event_id for item in runtime.event_log.events], ["event-duplicate"])
+            self.assertEqual(event_log.read_text(encoding="utf-8"), before)
+
     def test_sqlite_binding_store_rehydrates_package_snapshot_and_event_log(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)

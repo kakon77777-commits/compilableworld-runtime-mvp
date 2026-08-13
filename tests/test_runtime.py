@@ -4,13 +4,14 @@ import json
 import shutil
 import tempfile
 import unittest
+from copy import deepcopy
 from pathlib import Path
 from unittest.mock import patch
 
 from compilableworld.compiler import CompileError, compile_world, validate_world
-from compilableworld.gateway import DeterministicIntentParser
+from compilableworld.gateway import DeterministicIntentParser, TerminalGateway
 from compilableworld.kernel import KernelTransactionError, StateStore, WorldRuntime
-from compilableworld.models import ActionIR, StateDelta
+from compilableworld.models import ActionIR, EventIR, StateDelta
 from compilableworld.modules import CombatModule, install_builtin_modules
 from compilableworld.player_generation import generate_character
 
@@ -66,6 +67,7 @@ class CompilerTests(unittest.TestCase):
             line = next(x for x in package["dialogues"]["dialogues"] if x["dialogue_id"] == "dialogue.foreman_laotie.work.available")
             self.assertEqual(line["speaker_id"], "npc.foreman_laotie")
             self.assertEqual(line["when"][0]["owner"], "$actor")
+            self.assertEqual(package["dialogues"]["topic_aliases"]["工作"], "work")
 
         with tempfile.TemporaryDirectory() as tmp:
             world = Path(tmp) / "world"
@@ -76,6 +78,25 @@ class CompilerTests(unittest.TestCase):
             dialogues_path.write_text(json.dumps(dialogues), encoding="utf-8")
             with self.assertRaisesRegex(CompileError, "引用不存在說話者"):
                 compile_world(world, Path(tmp) / "out")
+
+        with tempfile.TemporaryDirectory() as tmp:
+            world = Path(tmp) / "world"
+            shutil.copytree(PEACE_CITY, world)
+            dialogues_path = world / "dialogues.json"
+            dialogues = json.loads(dialogues_path.read_text(encoding="utf-8"))
+            dialogues["topic_aliases"]["未知"] = "not_a_real_topic"
+            dialogues_path.write_text(json.dumps(dialogues), encoding="utf-8")
+            with self.assertRaisesRegex(CompileError, "引用不存在話題"):
+                compile_world(world, Path(tmp) / "out")
+
+    def test_runtime_rejects_tampered_dialogue_topic_aliases(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            package_path = compile_world(PEACE_CITY, tmp)
+            package = json.loads(package_path.read_text(encoding="utf-8"))
+            package["dialogues"]["topic_aliases"]["錯誤"] = "not_a_real_topic"
+            package_path.write_text(json.dumps(package), encoding="utf-8")
+            with self.assertRaisesRegex(RuntimeError, "topic_aliases 無效"):
+                WorldRuntime.from_package(package_path)
 
     def test_quest_transitions_are_compiled_and_reject_ambiguous_dispatch(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -135,6 +156,62 @@ class RuntimeTests(unittest.TestCase):
         self.assertEqual(self.runtime.state.export(), before_state)
         self.assertEqual(self.runtime.event_log.events, [])
         self.assertEqual(action.status.value, "failed")
+
+    def test_reaction_rolls_back_when_event_log_rejects_batch(self) -> None:
+        existing = EventIR("world.existing", "test", {}, event_id="event-duplicate")
+        self.runtime.event_log.append(existing)
+        before_state = self.runtime.state.export()
+        duplicate = EventIR("quest.test", "quest.core", {}, event_id=existing.event_id)
+
+        with self.assertRaises(KernelTransactionError):
+            self.runtime.commit_reaction(
+                self.runtime.modules["quest.core"],
+                [StateDelta(
+                    "player.neo", "wallet", "currency", "set", 99,
+                    source_module="quest.core",
+                )],
+                [duplicate],
+            )
+
+        self.assertEqual(self.runtime.state.export(), before_state)
+        self.assertEqual(self.runtime.event_log.events, [existing])
+
+    def test_schedule_creation_rolls_back_when_event_log_rejects_event(self) -> None:
+        existing = EventIR("world.existing", "test", {}, event_id="event-duplicate")
+        self.runtime.event_log.append(existing)
+        action = ActionIR("player.neo", "move", args={"direction": "north"})
+        duplicate = EventIR("action.scheduled", "kernel", {}, event_id=existing.event_id)
+        before_scheduler = self.runtime.scheduler.export()
+
+        with patch.object(self.runtime, "_action_lifecycle_event", return_value=duplicate):
+            with self.assertRaises(KernelTransactionError):
+                self.runtime.submit(action, delay=2)
+
+        self.assertEqual(self.runtime.scheduler.export(), before_scheduler)
+        self.assertNotIn(action.action_id, self.runtime.actions)
+        self.assertNotIn(action.action_id, self.runtime.action_runtime)
+        self.assertEqual(action.status.value, "parsed")
+        self.assertEqual(self.runtime.event_log.events, [existing])
+
+    def test_schedule_cancel_rolls_back_when_event_log_rejects_event(self) -> None:
+        action = ActionIR("player.neo", "move", args={"direction": "north"})
+        scheduled = self.runtime.submit(action, delay=2)
+        self.assertEqual(scheduled.status.value, "scheduled")
+        existing = EventIR("world.existing", "test", {}, event_id="event-duplicate")
+        self.runtime.event_log.append(existing)
+        before_queue = self.runtime.scheduler.export()
+        before_runtime = deepcopy(self.runtime.action_runtime)
+        duplicate = EventIR("action.cancelled", "kernel", {}, event_id=existing.event_id)
+
+        with patch.object(self.runtime, "_action_lifecycle_event", return_value=duplicate):
+            with self.assertRaises(KernelTransactionError):
+                self.runtime.cancel_action("player.neo", action.action_id)
+
+        self.assertEqual(self.runtime.scheduler.export(), before_queue)
+        self.assertEqual(self.runtime.action_runtime, before_runtime)
+        self.assertIn(action.action_id, self.runtime.actions)
+        self.assertEqual(action.status.value, "scheduled")
+        self.assertEqual(self.runtime.event_log.events[-1], existing)
 
     def test_movement_inventory_door_and_replay(self) -> None:
         take = self.runtime.submit(ActionIR("player.neo", "take", "item.old_key"))
@@ -205,6 +282,22 @@ class RuntimeTests(unittest.TestCase):
         self.assertEqual(self.runtime.dynamic_entities, before_dynamic)
         self.assertEqual(self.runtime.player_profiles, before_profiles)
         self.assertEqual(self.runtime.active_player_id, before_active)
+        self.assertEqual(self.runtime.scheduler.export(), before_scheduler)
+
+    def test_snapshot_rejects_conflicting_tick_fields_atomically(self) -> None:
+        self.runtime.advance(1)
+        snapshot = Path(self.temp.name) / "tick-conflict-save.json"
+        self.runtime.save_snapshot(snapshot)
+        payload = json.loads(snapshot.read_text(encoding="utf-8"))
+        payload["tick"] = payload["scheduler"]["tick"] + 1
+        snapshot.write_text(json.dumps(payload), encoding="utf-8")
+        before_state = self.runtime.state.export()
+        before_scheduler = self.runtime.scheduler.export()
+
+        with self.assertRaisesRegex(RuntimeError, "tick 與 scheduler tick 不一致"):
+            self.runtime.load_snapshot(snapshot)
+
+        self.assertEqual(self.runtime.state.export(), before_state)
         self.assertEqual(self.runtime.scheduler.export(), before_scheduler)
 
     def test_snapshot_restores_scheduled_action(self) -> None:
@@ -288,6 +381,39 @@ class RuntimeTests(unittest.TestCase):
         observed = [event for event in self.runtime.event_log.events if event.event_type == "room.observed"][-1]
         self.assertEqual(observed.payload["description"], receipt.message)
 
+    def test_market_description_tracks_downward_vault_door_state(self) -> None:
+        self.runtime.submit(ActionIR("player.neo", "take", "item.old_key"))
+        self.runtime.submit(ActionIR("player.neo", "move", args={"direction": "north"}))
+        locked = self.runtime.submit(ActionIR("player.neo", "look"))
+        self.assertIn("石階向下", locked.message)
+        self.assertIn("仍然上鎖", locked.message)
+        self.assertNotIn("北方", locked.message)
+
+        self.runtime.submit(ActionIR("player.neo", "unlock", "door.old_vault"))
+        closed = self.runtime.submit(ActionIR("player.neo", "look"))
+        self.assertIn("已解鎖，但仍然關著", closed.message)
+        self.assertNotIn("仍然上鎖", closed.message)
+
+        self.runtime.submit(ActionIR("player.neo", "open", "door.old_vault"))
+        opened = self.runtime.submit(ActionIR("player.neo", "look"))
+        self.assertIn("已經敞開", opened.message)
+        self.assertNotIn("仍然關著", opened.message)
+
+    def test_terminal_tick_reports_world_events_separately_from_actions(self) -> None:
+        self.runtime.submit(ActionIR("player.neo", "take", "item.old_key"))
+        self.runtime.submit(ActionIR("player.neo", "move", args={"direction": "north"}))
+        self.runtime.submit(ActionIR("player.neo", "unlock", "door.old_vault"))
+        gateway = TerminalGateway(self.runtime, "player.neo")
+        with patch("builtins.input", side_effect=["tick 2", "quit"]), patch("builtins.print") as output:
+            gateway.run()
+        summaries = [
+            str(call.args[0]) for call in output.call_args_list
+            if call.args and str(call.args[0]).startswith("tick=")
+        ]
+        self.assertEqual(len(summaries), 1)
+        self.assertIn("actions_executed=0", summaries[0])
+        self.assertRegex(summaries[0], r"events_emitted=[1-9]")
+
     def test_bare_direction_word_parses_as_move(self) -> None:
         action = DeterministicIntentParser().parse("north", "player.neo", self.runtime)
         self.assertEqual(action.verb, "move")
@@ -364,6 +490,42 @@ class PeaceCityQuestTests(unittest.TestCase):
         self.assertEqual(self.runtime.state.get("item.firewood_bundle", "inventory", "carrier"), "npc.foreman_laotie")
         self.assertEqual(self.runtime.state.get(actor, "quest", "quest.find_work"), "completed")
         self.assertEqual(self.runtime.state.get(actor, "wallet", "currency"), 15)
+
+    def test_delivering_before_accepting_still_completes_and_pays_reward(self) -> None:
+        actor = "player.newcomer"
+        self.runtime.submit(ActionIR(actor, "move", args={"direction": "north"}))
+        self.runtime.submit(ActionIR(actor, "take", "item.firewood_bundle"))
+        self.runtime.submit(ActionIR(actor, "move", args={"direction": "west"}))
+        give = self.runtime.submit(
+            ActionIR(
+                actor,
+                "give",
+                "item.firewood_bundle",
+                args={"recipient": "npc.foreman_laotie"},
+            )
+        )
+        self.assertEqual(give.status.value, "completed")
+        self.assertEqual(self.runtime.state.get(actor, "quest", "quest.find_work"), "completed")
+        self.assertEqual(self.runtime.state.get(actor, "wallet", "currency"), 15)
+        completed = [e for e in self.runtime.event_log.events if e.event_type == "quest.completed"][-1]
+        self.assertEqual(completed.payload["transition_id"], "transition.find_work.complete_early")
+
+        reply = self.runtime.submit(ActionIR(actor, "talk", "npc.foreman_laotie", args={"topic": "工作"}))
+        self.assertEqual(reply.status.value, "completed")
+        self.assertIn("十五枚銅幣", reply.message)
+        response = [e for e in self.runtime.event_log.events if e.event_type == "dialogue.responded"][-1]
+        self.assertEqual(response.payload["topic"], "工作")
+        self.assertEqual(response.payload["resolved_topic"], "work")
+
+    def test_terminal_help_and_missing_action_follow_enabled_modules(self) -> None:
+        gateway = TerminalGateway(self.runtime, "player.newcomer")
+        help_text = gateway._help_text()
+        self.assertIn("look", help_text)
+        self.assertNotIn("search", help_text)
+        missing = self.runtime.submit(ActionIR("player.newcomer", "search"))
+        self.assertEqual(missing.status.value, "failed")
+        self.assertIn("這個世界未提供「search」行動", missing.message)
+        self.assertNotIn("提供者數量", missing.message)
 
     def test_give_rejected_when_recipient_is_not_a_character(self) -> None:
         actor = "player.newcomer"

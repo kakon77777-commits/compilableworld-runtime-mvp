@@ -467,7 +467,9 @@ class DialogueModule(BaseModule):
         if not runtime.state.get(speaker_id, "status", "alive", True):
             return TransitionResult(False, message="對方已無法回應")
 
-        topic = str(action.args.get("topic", "default")).strip().lower() or "default"
+        requested_topic = str(action.args.get("topic", "default")).strip().lower() or "default"
+        topic_aliases = runtime.package.get("dialogues", {}).get("topic_aliases", {})
+        topic = topic_aliases.get(requested_topic, requested_topic)
         line = select_dialogue(runtime, action.actor_id, speaker_id, topic)
         if line is None:
             return TransitionResult(False, message="這個話題暫時得不到回應")
@@ -475,7 +477,7 @@ class DialogueModule(BaseModule):
         event = self.event("dialogue.responded", action, {
             "speaker_id": speaker_id,
             "speaker_name": speaker.name,
-            "topic": topic,
+            "topic": requested_topic,
             "resolved_topic": line["topic"],
             "dialogue_id": line["dialogue_id"],
             "text": line["text"],
@@ -556,7 +558,9 @@ class StateMachineModule(BaseModule):
         assert runtime is not None
         if event.event_type.startswith("fsm.") and event.source != self.contract.module_id:
             return
-        actor_id = resolve_state_machine_actor(runtime, event)
+        actor_id = resolve_state_machine_actor(
+            runtime, event, require_action_causation=True,
+        )
         for machine in runtime.package.get("state_machines", []):
             self._apply_transition(machine, event, runtime, actor_id=actor_id)
 

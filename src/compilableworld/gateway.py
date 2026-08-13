@@ -170,12 +170,17 @@ class TerminalGateway:
             if text in {"quit", "exit"}:
                 break
             if text == "help":
-                print("look | search | n/s/e/w/north/south/east/west/up/down | go DIR | take/drop/open/unlock/attack 名稱或ID | talk/ask 對象 [topic] | give 物品 對象 | cast 法術名 | inventory | say TEXT | status | quests | tick [N] | pending | cancel ACTION_ID | events | diag | save FILE | load FILE")
+                print(self._help_text())
                 continue
             if text.startswith("tick"):
                 parts = text.split()
+                before_events = len(self.runtime.event_log.events)
                 receipts = self.runtime.advance(int(parts[1]) if len(parts) > 1 else 1)
-                print(f"tick={self.runtime.scheduler.tick}; executed={len(receipts)}")
+                emitted_events = len(self.runtime.event_log.events) - before_events
+                print(
+                    f"tick={self.runtime.scheduler.tick}; "
+                    f"actions_executed={len(receipts)}; events_emitted={emitted_events}"
+                )
                 continue
             if text == "events":
                 for event in self.runtime.event_log.events[-10:]:
@@ -204,6 +209,40 @@ class TerminalGateway:
                 print("Snapshot 已載入。")
                 continue
             self._execute(text)
+
+    def _help_text(self) -> str:
+        """Describe only the verbs provided by this Runtime Package."""
+        verbs = {
+            verb
+            for module in self.runtime.modules.values()
+            for verb in module.contract.actions
+        }
+        groups: list[str] = []
+        if "look" in verbs:
+            groups.append("look")
+        if "search" in verbs:
+            groups.append("search")
+        if "move" in verbs:
+            groups.append("n/s/e/w/north/south/east/west/up/down | go DIR")
+        object_verbs = [verb for verb in ("take", "drop", "open", "unlock", "attack") if verb in verbs]
+        if object_verbs:
+            groups.append(f"{'/'.join(object_verbs)} 名稱或ID")
+        if "talk" in verbs:
+            groups.append("talk/ask 對象 [topic]")
+        if "give" in verbs:
+            groups.append("give 物品 對象")
+        if "cast" in verbs:
+            groups.append("cast 法術名")
+        if "inventory" in verbs:
+            groups.append("inventory")
+        if "say" in verbs:
+            groups.append("say TEXT")
+        groups.extend(verb for verb in ("status", "quests") if verb in verbs)
+        groups.extend((
+            "tick [N]", "pending", "cancel ACTION_ID", "events", "diag",
+            "save FILE", "load FILE",
+        ))
+        return " | ".join(groups)
 
     def _execute(self, text: str) -> None:
         try:

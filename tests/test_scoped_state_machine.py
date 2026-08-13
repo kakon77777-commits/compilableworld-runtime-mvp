@@ -43,6 +43,22 @@ def condition_leaves(expression: object) -> list[dict]:
     return [leaf for child in children for leaf in condition_leaves(child)]
 
 
+def condition_expression_counts(expression: object) -> tuple[int, int]:
+    if isinstance(expression, list):
+        child_counts = [condition_expression_counts(child) for child in expression]
+        return sum(item[0] for item in child_counts), sum(item[1] for item in child_counts)
+    if not isinstance(expression, dict):
+        return 0, 0
+    if "condition_id" in expression:
+        return 1, 1
+    if "not" in expression:
+        nodes, leaves = condition_expression_counts(expression["not"])
+        return nodes + 1, leaves
+    children = expression.get("all", expression.get("any", []))
+    child_counts = [condition_expression_counts(child) for child in children]
+    return 1 + sum(item[0] for item in child_counts), sum(item[1] for item in child_counts)
+
+
 def use_legacy_condition_lists(source: dict) -> None:
     """Downgrade the v0.6 fixture's representable groups to v0.2-v0.5 AND lists."""
     inverse = {
@@ -402,6 +418,10 @@ class ScopedStateMachineTests(unittest.TestCase):
                 lambda package: None,
             ),
             (
+                "payload_actor_without_causation",
+                lambda package: None,
+            ),
+            (
                 "boolean_is_not_one",
                 lambda package: condition_leaves(
                     package["state_machines"][0]["transitions"][0]["when"]
@@ -415,9 +435,12 @@ class ScopedStateMachineTests(unittest.TestCase):
                 mutate(package)
                 runtime = WorldRuntime(package)
                 install_builtin_modules(runtime)
-                if label == "missing_actor":
+                if label in {"missing_actor", "payload_actor_without_causation"}:
+                    payload = {"door": "door.old_vault"}
+                    if label == "payload_actor_without_causation":
+                        payload["actor"] = "player.neo"
                     runtime.events.publish(EventIR(
-                        "door.unlocked", "test", {"door": "door.old_vault"},
+                        "door.unlocked", "test", payload,
                         target="door.old_vault",
                     ))
                 else:
@@ -481,6 +504,94 @@ class ScopedStateMachineTests(unittest.TestCase):
             "completed",
         )
 
+    def test_authored_any_not_round_trip_survives_studio_snapshot_and_replay(self) -> None:
+        with tempfile.TemporaryDirectory() as temp:
+            world = Path(temp) / "world"
+            shutil.copytree(GRAY_CROWN, world)
+            source_path = world / "state_machines.json"
+            source = json.loads(source_path.read_text(encoding="utf-8"))
+            transition = source["state_machines"][0]["transitions"][0]
+            stable, alive, not_negative = deepcopy(transition["when"]["all"])
+            stable_fallback = deepcopy(stable)
+            stable_fallback["condition_id"] = "world_is_stable_fallback"
+            authored_when = {
+                "all": [
+                    {"any": [stable, stable_fallback]},
+                    alive,
+                    not_negative,
+                ]
+            }
+            transition["when"] = authored_when
+            source_path.write_text(
+                json.dumps(source, ensure_ascii=False, indent=2) + "\n",
+                encoding="utf-8",
+            )
+            package_path = compile_world(world, Path(temp) / "build")
+            package = json.loads(package_path.read_text(encoding="utf-8"))
+            compiled_when = package["state_machines"][0]["transitions"][0]["when"]
+            self.assertEqual(compiled_when, authored_when)
+            self.assertEqual(
+                package_overview(package)["state_machines"][0]["transitions"][0]["when"],
+                authored_when,
+            )
+
+            runtime = WorldRuntime.from_package(package_path)
+            install_builtin_modules(runtime)
+            snapshot = Path(temp) / "before-unlock.snapshot.json"
+            runtime.save_snapshot(snapshot)
+            restored = WorldRuntime.from_package(package_path)
+            install_builtin_modules(restored)
+            restored.load_snapshot(snapshot)
+            unlock_old_vault(runtime)
+            unlock_old_vault(restored)
+            self.assertEqual(restored.state.export(), runtime.state.export())
+            self.assertEqual(
+                runtime.state.get("gray_crown_demo", "fsm", "fsm.world.vault_seal"),
+                "completed",
+            )
+
+            replayed = WorldRuntime.from_package(package_path)
+            replayed.replay(runtime.event_log.events)
+            self.assertEqual(replayed.state.export(), runtime.state.export())
+
+    def test_compiler_and_loader_accept_exact_condition_node_and_leaf_budgets(self) -> None:
+        with tempfile.TemporaryDirectory() as temp:
+            world = Path(temp) / "world"
+            shutil.copytree(GRAY_CROWN, world)
+            source_path = world / "state_machines.json"
+            source = json.loads(source_path.read_text(encoding="utf-8"))
+            base = deepcopy(
+                source["state_machines"][0]["transitions"][0]["when"]["all"][0]
+            )
+            root_children = []
+            leaf_index = 0
+            for group_index in range(16):
+                children = []
+                if group_index < 15:
+                    children.append({"all": []})
+                for _ in range(2):
+                    leaf = deepcopy(base)
+                    leaf["condition_id"] = f"budget_leaf_{leaf_index}"
+                    children.append(leaf)
+                    leaf_index += 1
+                root_children.append({"all": children})
+            exact_limit = {"all": root_children}
+            self.assertEqual(condition_expression_counts(exact_limit), (64, 32))
+            source["state_machines"][0]["transitions"][0]["when"] = exact_limit
+            source_path.write_text(
+                json.dumps(source, ensure_ascii=False, indent=2) + "\n",
+                encoding="utf-8",
+            )
+
+            package_path = compile_world(world, Path(temp) / "build")
+            runtime = WorldRuntime.from_package(package_path)
+            install_builtin_modules(runtime)
+            unlock_old_vault(runtime)
+            self.assertEqual(
+                runtime.state.get("gray_crown_demo", "fsm", "fsm.world.vault_seal"),
+                "completed",
+            )
+
     def test_runtime_fails_closed_on_malformed_or_overbudget_condition_groups(self) -> None:
         stable = deepcopy(condition_leaves(
             self.package["state_machines"][0]["transitions"][0]["when"]
@@ -527,6 +638,56 @@ class ScopedStateMachineTests(unittest.TestCase):
                     ),
                     "sealed",
                 )
+
+    def test_package_loader_rejects_invalid_stateir_and_missing_provenance(self) -> None:
+        def missing_when(package: dict) -> None:
+            package["state_machines"][0]["transitions"][0].pop("when")
+
+        def invalid_condition_id(package: dict) -> None:
+            condition_leaves(
+                package["state_machines"][0]["transitions"][0]["when"]
+            )[0]["condition_id"] = "Invalid Condition"
+
+        def extra_transition_field(field: str):
+            return lambda package: package["state_machines"][0]["transitions"][0].__setitem__(
+                field, "metadata only",
+            )
+
+        def missing_schema_contract(package: dict) -> None:
+            package["schema_contracts"].pop("runtime_package")
+
+        def missing_source_checksums(package: dict) -> None:
+            package["source_checksums"] = {}
+
+        def unknown_owner(package: dict) -> None:
+            package["state_machines"][2]["owner_id"] = "room.not_real"
+
+        def reaction_cycle(package: dict) -> None:
+            transition = package["state_machines"][1]["transitions"][0]
+            transition["event_match"] = {
+                "state_machine_id": "fsm.region.gray_crown.alert",
+                "transition_id": transition["transition_id"],
+            }
+
+        mutations = {
+            "missing_when": missing_when,
+            "invalid_condition_id": invalid_condition_id,
+            "guard_is_not_runtime_rule": extra_transition_field("guard"),
+            "instructions_are_not_runtime_rule": extra_transition_field("instructions"),
+            "responses_are_not_runtime_rule": extra_transition_field("responses"),
+            "missing_schema_contract": missing_schema_contract,
+            "missing_source_checksums": missing_source_checksums,
+            "unknown_owner": unknown_owner,
+            "reaction_cycle": reaction_cycle,
+        }
+        for label, mutate in mutations.items():
+            with self.subTest(label=label):
+                package = deepcopy(self.package)
+                mutate(package)
+                path = Path(self.temp.name) / f"{label}.package.json"
+                path.write_text(json.dumps(package), encoding="utf-8")
+                with self.assertRaises(RuntimeErrorBase):
+                    WorldRuntime.from_package(path)
 
     def test_highest_priority_transition_is_selected_only_after_conditions_match(self) -> None:
         with tempfile.TemporaryDirectory() as temp:
@@ -625,6 +786,29 @@ class ScopedStateMachineTests(unittest.TestCase):
         replayed.replay(self.runtime.event_log.events)
         self.assertEqual(replayed.state.export(), self.runtime.state.export())
         self.assertEqual(replayed.scheduler.tick, 2)
+
+    def test_replay_restores_nonzero_tick_before_timer_continuation(self) -> None:
+        runtime = WorldRuntime(deepcopy(self.package))
+        install_builtin_modules(runtime)
+        runtime.advance(5)
+        unlock_old_vault(runtime)
+        self.assertEqual(
+            runtime.state.get(
+                "system.security", "fsm_runtime", "fsm.system.security",
+            ),
+            5,
+        )
+
+        replayed = WorldRuntime(deepcopy(self.package))
+        install_builtin_modules(replayed)
+        replayed.replay(runtime.event_log.events)
+        self.assertEqual(replayed.scheduler.tick, 5)
+        self.assertEqual(replayed.state.export(), runtime.state.export())
+
+        runtime.advance(2)
+        replayed.advance(2)
+        self.assertEqual(replayed.scheduler.tick, 7)
+        self.assertEqual(replayed.state.export(), runtime.state.export())
 
     def test_timer_conditions_remain_eligible_and_priority_is_deterministic(self) -> None:
         with tempfile.TemporaryDirectory() as temp:

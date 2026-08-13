@@ -4,7 +4,7 @@
 - **Baseline source:** uploaded integrated local snapshot
 - **Runtime package version:** `0.1.1`
 - **Audit date:** 2026-08-13
-- **Verification:** `PYTHONPATH=src python -m pytest -q` — **336/336 passed, 76 subtests passed**
+- **Verification:** `PYTHONPATH=src python -m pytest -q -p no:cacheprovider` — **350/350 passed, 86 subtests passed**
 - **Purpose:** authoritative inventory for PIW-MCP integration planning
 
 > Status meanings: **Implemented** = code and tests exist; **Partial** = usable core exists but stated boundary remains; **Planned** = no production implementation found in this baseline.
@@ -14,7 +14,7 @@
 | Capability | Status | Primary implementation | Test evidence | PIW-MCP consequence |
 |---|---|---|---|---|
 | JSON/CSV/Manifest authoring layer | Implemented | `compiler.py`, example manifests | `CompilerTests` | MCP must not bypass compiler contracts |
-| Runtime Package compilation | Implemented | `compile_world()` | compiler and schema tests | MCP loads compiled packages, not raw prose |
+| Runtime Package compilation and load validation | Implemented | `compile_world()`, `WorldRuntime.from_package()` independent contract gate | compiler/schema tests plus invalid package, provenance, owner, reaction and condition reload matrix | MCP loads validated compiled packages, not raw prose or unchecked JSON |
 | Versioned external schemas | Implemented | `schemas/`, `schema_registry.py` | `SchemaContractTests` | MCP contracts should follow same versioned pattern |
 | Entity registry | Implemented | `EntityRegistry` | runtime integration tests | Actor/entity IDs are canonical boundaries |
 | State store | Implemented | `StateStore` | atomic permission failure test | Runtime state remains authoritative |
@@ -24,9 +24,9 @@
 | Module Contract | Implemented | `ModuleContract` | permission and module tests | MCP cannot widen module write scopes |
 | Atomic commit | Implemented | `WorldRuntime`, `StateStore` | `test_commit_is_atomic_on_permission_failure` | action result must be derived after commit |
 | Event bus and reactions | Implemented | synchronous FIFO committed batches, re-entrant queue, 4096-event root cascade limit, audit-only `runtime.reaction_halted`, `commit_reaction()` | ordering, halt, Replay tamper, dialogue→quest and quest reward tests | cross-module behavior remains event-driven and bounded; a halt preserves committed facts and stops pending delivery |
-| Event log | Implemented | `EventLog` | replay and AMK adapter tests | MCP recent-events tool can reuse this source |
-| Snapshot/save | Implemented | runtime snapshot methods | round-trip and legacy migration tests | checkpoint tool may wrap existing snapshot boundary |
-| Replay | Implemented | runtime replay path | movement/inventory/door replay tests | MCP session recovery can rely on replay, with version limits |
+| Event log | Implemented | `EventLog` with append/load ID uniqueness and transaction-class append rejection | append-time, reaction rollback, schedule create/cancel rollback, restart, replay and AMK adapter tests | MCP recent-events tool can reuse this source |
+| Snapshot/save | Implemented | runtime snapshot methods with atomic pre-commit validation | round-trip, conflicting tick rejection and legacy migration tests | checkpoint tool may wrap existing snapshot boundary |
+| Replay | Implemented | runtime replay path with full-log clock restoration | movement/inventory/door, StateIR timer and nonzero-tick continuation tests | MCP session recovery can rely on replay, with version limits |
 | Snapshot version validation | Implemented | runtime migration/version checks | unknown-version rejection test | MCP must return explicit version mismatch errors |
 | Cross-version migration registry | Partial | `compilableworld_mcp.migration_registry`, plus explicit legacy snapshot migration | coordination and legacy migration tests | generic registry exists; Kernel snapshot loader is still a separate adapter |
 | Scheduler | Implemented | `Scheduler`, Action behavior lifecycle | delay, cancellation, interruption, pending Replay and snapshot restore tests | composite actions remain under runtime authority |
@@ -49,7 +49,7 @@
 | Ranged/mental combat paths | Planned | Formula source exists but wiring is not present |
 | Multi-exchange channeling/interruption | Planned | Explicitly deferred |
 | Quests: simple requirements/rewards | Implemented | Reach and delivery completion |
-| Quests: event transitions | Implemented | action failure, movement, inventory, door, dialogue, combat, magic and terminal quest chaining share one bounded trigger contract |
+| Quests: event transitions | Implemented | action failure, movement, inventory, door, dialogue, combat, magic and terminal quest chaining share one bounded trigger contract; explicit alternate source-state edges preserve authored free action ordering |
 | Quests: branch/failure/priority | Implemented | deterministic priority, actor causation, event matching, requirements, graph reachability, terminal-state rejection, ambiguous dispatch rejection and exactly-once terminal reward; see `docs/WORLD_STATE_MACHINE_EXECUTION_CONTRACT_zh-TW.md` |
 | Scoped StateIR: World/Region/Scene/Entity/System | Implemented | v0.6 single-active-leaf compound hierarchy with 16-level bound, direct parent/initial-child validation, deterministic compound entry, priority-then-specificity ancestor transitions, leaf-only timers, authored/leaf lifecycle provenance, isolated `fsm.*` active leaf plus reserved `fsm_runtime.*` entry tick, bounded owner/verified-actor StateStore `all`/`any`/`not` expressions with 4 group levels, 16 children, 64 nodes, 32 leaves and three-valued `not(unknown)` fail-closed semantics, explicit source machine+transition non-terminal chaining, cycle rejection and 64-edge reaction limit, v0.1–v0.5 source compatibility, complete expression/hierarchy/path/countdown Studio projection, Snapshot v0.6 and leaf/timer/halt-aware Replay; no free guards, parallel/history/entry-exit effects, wall clock or implicit geographic routing; see `docs/SCOPED_STATE_IR_EXECUTION_CONTRACT_zh-TW.md` |
 | Action-scope state machines | Implemented | v0.7 compile-time validated static phase DAG, one sticky priority-selected active route, unique terminal, unknown/self/cycle/unreachable rejection, actual-path due convergence, non-recursive primitive child Actions, fail-closed actor/target State Cell AND gates, fixed-interval retry/deadline, atomic lifecycle, v0.1–v0.6 compatibility, cancellation, interruption, Snapshot v0.6 and route-aware pending Replay; dynamic/recursive/nested graph, resume, compensation, parallel/synchronizing join, free backoff/jitter and arbitrary guards remain pending; see `docs/ACTION_SCOPE_BEHAVIOR_EXECUTION_CONTRACT_zh-TW.md` |
@@ -60,11 +60,11 @@
 | Capability | Status | Primary implementation | Boundary |
 |---|---|---|---|
 | Deterministic intent parser | Implemented | `gateway.py` | AI adapter must emit the same Action IR |
-| Terminal gateway | Implemented | `TerminalGateway` | shared kernel |
+| Terminal gateway | Implemented | `TerminalGateway` | shared kernel; help follows installed verbs and tick distinguishes executed Actions from emitted Events |
 | Web gateway | Implemented | `WebGateway`, stdlib HTTP server | single browser actor/session assumption |
-| State-aware room narrative | Implemented | `narrative.py`, `narrative.json` | read-only projection; no state writes |
+| State-aware room narrative | Implemented | `narrative.py`, `narrative.json` | read-only projection; door/quest/actor state can update descriptions without state writes |
 | Data-driven dialogue | Implemented | `dialogue.py`, `DialogueModule` | emits `dialogue.responded`; does not mutate quests |
-| Dialogue topic fallback and conditions | Implemented | compiler/runtime selection rules | local-state projection only |
+| Dialogue topic fallback, aliases and conditions | Implemented | compiler/runtime selection rules | bounded exact aliases plus local-state projection; no free-text semantic execution |
 | Player template catalog | Implemented | `player_generation.py` | templates are suggestions, not canon characters |
 | Deterministic seeded generation | Implemented | seed and override logic | no second combat formula path |
 | Player snapshot persistence | Implemented | materialized generated actor | tested round-trip |
