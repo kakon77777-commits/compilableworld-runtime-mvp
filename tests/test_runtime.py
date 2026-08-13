@@ -238,6 +238,10 @@ class RuntimeTests(unittest.TestCase):
         self.assertEqual(saved["format"], "compilableworld.snapshot/v0.6")
         self.assertEqual(saved["snapshot_version"], 6)
         self.assertEqual(saved["action_runtime"], {})
+        self.assertEqual(
+            saved["static_entity_ids"],
+            sorted(entity.entity_id for entity in self.runtime.registry.values()),
+        )
         self.runtime.submit(ActionIR("player.neo", "move", args={"direction": "south"}))
         self.runtime.load_snapshot(snapshot)
         self.assertEqual(self.runtime.state.get("player.neo", "position", "room"), "room.market")
@@ -258,6 +262,18 @@ class RuntimeTests(unittest.TestCase):
         self.assertEqual(self.runtime.dynamic_entities, {actor})
         self.assertEqual(set(self.runtime.player_profiles), {actor})
         self.assertEqual(self.runtime.active_player_id, actor)
+
+        invalid_static = Path(self.temp.name) / "invalid-static-membership-save.json"
+        payload = json.loads(snapshot.read_text(encoding="utf-8"))
+        payload["static_entity_ids"] = ["entity.not_in_package"]
+        invalid_static.write_text(json.dumps(payload), encoding="utf-8")
+        before_entities = {entity.entity_id for entity in self.runtime.registry.values()}
+        with self.assertRaisesRegex(RuntimeError, "static_entity_ids"):
+            self.runtime.load_snapshot(invalid_static)
+        self.assertEqual(
+            {entity.entity_id for entity in self.runtime.registry.values()},
+            before_entities,
+        )
 
         invalid = Path(self.temp.name) / "invalid-scheduler-save.json"
         payload = json.loads(snapshot.read_text(encoding="utf-8"))

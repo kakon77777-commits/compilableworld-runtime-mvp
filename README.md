@@ -67,7 +67,7 @@ PYTHONPATH=src python3 -m compilableworld play build/mingyun_zhiyu_peace_city/wo
 
 第一版生成規則沿用整合文件與 Runtime 已驗證的公式：五維地板值為 10，預設 `attribute = 10 + cumulative_power × weight`（新手 cumulative power=15）；HP=`CON×8`、MP=`MAG×5`、FP=`(MAG+DEX)×2`。自訂值會被記錄為 override；隨機生成只改變模板選擇與 seed，不會另開一套戰鬥公式。若要完全沿用舊版固定實體，可加 `--legacy-default`，或明確指定 `--actor`。
 
-角色實體化現在會先由 Runtime 產生 private `player.materialized` 根事件，再以同一交易邊界寫入 EventLog；事件保存可重現 profile、動態 Entity、被替換玩家與攜帶物轉移資料。Replay 會重新驗證 seed／模板／公式結果與替換邊界後才重建 registry、`active_player_id`、profile 與初始 State，遭竄改或無法重現的角色事件會直接拒絕。Snapshot 仍保存完整 checkpoint；兩者是互補的恢復證據，不再只有 Snapshot 知道動態玩家存在。
+角色實體化現在會先由 Runtime 產生 private `player.materialized` 根事件，再以同一交易邊界寫入 EventLog；事件保存可重現 profile、動態 Entity、被替換玩家與攜帶物轉移資料。Replay 會重新驗證 seed／模板／公式結果與替換邊界後才重建 registry、`active_player_id`、profile 與初始 State，遭竄改或無法重現的角色事件會直接拒絕。Snapshot 也保存當下仍存在的 Package Entity membership，避免讀檔時讓已被 generated player 替換的預設角色重新出現；兩者是互補的恢復證據。
 
 網頁入口也提供 `/api/character/templates` 與 `POST /api/character/create`，建立後會替換目前瀏覽器 actor，並回傳完整生成資料與新的 View Model。
 

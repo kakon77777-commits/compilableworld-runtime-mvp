@@ -80,6 +80,11 @@ class PlayerGenerationTests(unittest.TestCase):
             restored = WorldRuntime.from_package(package_path)
             restored.load_snapshot(snapshot)
             self.assertTrue(restored.registry.contains(actor))
+            self.assertFalse(restored.registry.contains("player.newcomer"))
+            self.assertEqual(
+                {entity.entity_id for entity in restored.registry.values()},
+                {entity.entity_id for entity in runtime.registry.values()},
+            )
             self.assertEqual(restored.active_player_id, actor)
             self.assertEqual(restored.state.get(actor, "position", "room"), "room.registration_office")
             self.assertEqual(restored.player_profiles[actor]["seed"], 11)
@@ -108,6 +113,15 @@ class PlayerGenerationTests(unittest.TestCase):
             self.assertEqual(replayed.active_player_id, actor)
             self.assertEqual(replayed.player_profiles[actor], profile.to_dict())
             self.assertEqual(replayed.state.export(), runtime.state.export())
+
+            snapshot = Path(temp) / "generated-player.snapshot.json"
+            runtime.save_snapshot(snapshot)
+            restored = WorldRuntime.from_package(package_path)
+            restored.load_snapshot(snapshot)
+            self.assertEqual(
+                {entity.entity_id for entity in replayed.registry.values()},
+                {entity.entity_id for entity in restored.registry.values()},
+            )
 
     def test_tampered_player_materialization_fails_closed(self) -> None:
         with tempfile.TemporaryDirectory() as temp:

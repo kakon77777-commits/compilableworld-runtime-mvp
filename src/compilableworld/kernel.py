@@ -2779,6 +2779,9 @@ class WorldRuntime:
         pending_actions = {
             action.action_id: action for _, _, action in self.scheduler.entries()
         }
+        package_entity_ids = {
+            raw["entity_id"] for raw in self.package["entities"]
+        }
         payload = {
             "format": SNAPSHOT_FORMAT,
             "snapshot_version": SNAPSHOT_VERSION,
@@ -2788,6 +2791,14 @@ class WorldRuntime:
             "runtime_version": self.package["manifest"]["runtime_version"],
             "tick": self.scheduler.tick,
             "state": self.state.export(),
+            # Dynamic entities are serialized in full below. Package-backed
+            # entities only need their live membership recorded so a removed
+            # default player is not silently resurrected on load.
+            "static_entity_ids": sorted(
+                entity_id for entity_id in self.registry._entities
+                if entity_id in package_entity_ids
+                and entity_id not in self.dynamic_entities
+            ),
             "dynamic_entities": [
                 asdict(self.registry.get(entity_id)) for entity_id in sorted(self.dynamic_entities)
             ],
@@ -2846,7 +2857,10 @@ class WorldRuntime:
         dynamic_payload = payload.get("dynamic_entities", [])
         if not isinstance(dynamic_payload, list):
             raise RuntimeErrorBase("Snapshot dynamic_entities must be a list")
-        static_entity_ids = {raw["entity_id"] for raw in self.package["entities"]}
+        package_entities = {
+            raw["entity_id"]: Entity(**raw) for raw in self.package["entities"]
+        }
+        static_entity_ids = set(package_entities)
         snapshot_entities: dict[str, Entity] = {}
         try:
             for raw in dynamic_payload:
@@ -2878,6 +2892,39 @@ class WorldRuntime:
             not isinstance(active_player_id, str) or active_player_id not in snapshot_entities
         ):
             raise RuntimeErrorBase("Snapshot active_player_id references a missing entity")
+
+        static_ids_payload = payload.get("static_entity_ids")
+        if static_ids_payload is None:
+            # Snapshots written before live static membership was persisted
+            # assumed every Package entity still existed. Generated-player
+            # snapshots are the supported exception: create_player removes the
+            # default actor and its State owner, so infer that tombstone when
+            # the older payload contains enough evidence.
+            next_static_ids = set(static_entity_ids)
+            default_actor = self.package.get("world", {}).get("default_player_entity")
+            if (
+                active_player_id is not None
+                and active_player_id in next_profiles
+                and isinstance(default_actor, str)
+                and not any(
+                    path.startswith(f"{default_actor}::")
+                    for path in payload["state"]
+                )
+            ):
+                next_static_ids.discard(default_actor)
+        elif (
+            not isinstance(static_ids_payload, list)
+            or any(
+                not isinstance(entity_id, str)
+                or entity_id not in static_entity_ids
+                for entity_id in static_ids_payload
+            )
+            or static_ids_payload != sorted(static_ids_payload)
+            or len(static_ids_payload) != len(set(static_ids_payload))
+        ):
+            raise RuntimeErrorBase("Snapshot static_entity_ids is invalid")
+        else:
+            next_static_ids = set(static_ids_payload)
 
         next_state = StateStore()
         try:
@@ -2914,18 +2961,11 @@ class WorldRuntime:
             snapshot_version=snapshot_version,
         )
 
-        preserved_entities = {
-            entity_id: entity
-            for entity_id, entity in self.registry._entities.items()
-            if entity_id not in self.dynamic_entities
+        next_entities = {
+            entity_id: package_entities[entity_id]
+            for entity_id in next_static_ids
         }
-        conflicts = set(snapshot_entities).intersection(preserved_entities)
-        if conflicts:
-            raise RuntimeErrorBase(
-                "Snapshot dynamic_entities conflict with existing entities: "
-                + ", ".join(sorted(conflicts))
-            )
-        next_entities = {**preserved_entities, **snapshot_entities}
+        next_entities.update(snapshot_entities)
 
         # Commit the validated replacement as one state transition while
         # retaining object identity for StateStore/Scheduler references held by
