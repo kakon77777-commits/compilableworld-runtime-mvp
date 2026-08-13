@@ -69,6 +69,8 @@ PYTHONPATH=src python3 -m compilableworld play build/mingyun_zhiyu_peace_city/wo
 
 角色實體化現在會先由 Runtime 產生 private `player.materialized` 根事件，再以同一交易邊界寫入 EventLog；事件保存可重現 profile、動態 Entity、被替換玩家與攜帶物轉移資料。Replay 會重新驗證 seed／模板／公式結果與替換邊界後才重建 registry、`active_player_id`、profile 與初始 State，遭竄改或無法重現的角色事件會直接拒絕。Snapshot 也保存當下仍存在的 Package Entity membership，避免讀檔時讓已被 generated player 替換的預設角色重新出現；兩者是互補的恢復證據。
 
+Runtime 成功讀取 Snapshot 時也會留下 private `snapshot.restored` 邊界事件，內含已驗證 checkpoint。玩家若在存檔後改變世界再讀檔，完整 EventLog Replay 會在相同位置恢復 checkpoint，而不會錯把被讀檔撤銷的行動保留到最後；EventLog 寫入失敗時，讀檔不會留下半套 Runtime 狀態。
+
 網頁入口也提供 `/api/character/templates` 與 `POST /api/character/create`，建立後會替換目前瀏覽器 actor，並回傳完整生成資料與新的 View Model。
 
 ## 測試

@@ -981,10 +981,11 @@ class WorldRuntime:
         return self._execute(action)
 
     def _execute(self, action: ActionIR) -> ActionReceipt:
-        scheduled_behavior = self._action_behavior(action.verb) if action.status == ActionStatus.SCHEDULED else None
+        was_scheduled = action.status == ActionStatus.SCHEDULED
+        scheduled_behavior = self._action_behavior(action.verb) if was_scheduled else None
         started_event = (
             self._action_lifecycle_event("action.started", action, scheduled_behavior)
-            if scheduled_behavior else None
+            if was_scheduled else None
         )
         state_before = deepcopy(self.state.export())
         try:
@@ -993,7 +994,7 @@ class WorldRuntime:
             action.status = ActionStatus.EXECUTING
             result = module.evaluate(action, self)
             if not result.accepted:
-                return self._fail(action, result.message, lifecycle_started=scheduled_behavior is not None)
+                return self._fail(action, result.message, lifecycle_started=was_scheduled)
             applied = self.state.commit(result.deltas, module.contract.write)
             commit_event = EventIR(
                 event_type="state.committed", source=module.contract.module_id,
@@ -1003,7 +1004,7 @@ class WorldRuntime:
             )
             completed_event = (
                 self._action_lifecycle_event("action.completed", action, scheduled_behavior)
-                if scheduled_behavior else None
+                if was_scheduled else None
             )
             emitted = [
                 *([started_event] if started_event else []),
@@ -1024,7 +1025,7 @@ class WorldRuntime:
             raise
         except RuntimeErrorBase as exc:
             self.state.import_state(state_before)
-            return self._fail(action, str(exc), lifecycle_started=scheduled_behavior is not None)
+            return self._fail(action, str(exc), lifecycle_started=was_scheduled)
         action.status = ActionStatus.COMPLETED
         self.action_runtime.pop(action.action_id, None)
         self.metrics["actions_completed"] += 1
@@ -1042,13 +1043,13 @@ class WorldRuntime:
         behavior = self._action_behavior(action.verb)
         started = (
             self._action_lifecycle_event("action.started", action, behavior)
-            if lifecycle_started and behavior else None
+            if lifecycle_started else None
         )
         payload = {"verb": action.verb, "reason": message}
-        if behavior:
+        if behavior or lifecycle_started:
             payload.update({
                 "action_id": action.action_id,
-                "behavior_id": behavior["behavior_id"],
+                "behavior_id": behavior["behavior_id"] if behavior else None,
                 "actor": action.actor_id,
             })
         event = EventIR(
@@ -2821,6 +2822,14 @@ class WorldRuntime:
 
     def load_snapshot(self, path: str | Path) -> None:
         payload = json.loads(Path(path).read_text(encoding="utf-8"))
+        self._restore_snapshot_payload(payload, record_event=True)
+
+    def _restore_snapshot_payload(
+        self,
+        payload: Any,
+        *,
+        record_event: bool,
+    ) -> None:
         if not isinstance(payload, dict):
             raise RuntimeErrorBase("Snapshot 根資料格式無效")
         snapshot_format = payload.get("format")
@@ -2967,6 +2976,22 @@ class WorldRuntime:
         }
         next_entities.update(snapshot_entities)
 
+        if record_event:
+            restored_event = EventIR(
+                "snapshot.restored",
+                "kernel",
+                {"snapshot": deepcopy(payload)},
+                target=active_player_id,
+                timestamp_tick=next_scheduler.tick,
+                visibility="private",
+            )
+            restored_event.correlation_id = restored_event.event_id
+            # The EventLog record and the in-memory restore form one logical
+            # transition. Append only after the complete payload is validated,
+            # but before touching live Runtime objects, so an append failure
+            # leaves the current session unchanged.
+            self.event_log.append(restored_event)
+
         # Commit the validated replacement as one state transition while
         # retaining object identity for StateStore/Scheduler references held by
         # modules and adapters.
@@ -2980,6 +3005,23 @@ class WorldRuntime:
         self.scheduler._queue = next_scheduler._queue
         self.actions = next_actions
         self.action_runtime = next_action_runtime
+
+    def _apply_snapshot_restored_event(self, event: EventIR) -> None:
+        """Apply one durable Snapshot restore boundary during EventLog Replay."""
+        snapshot = event.payload.get("snapshot")
+        if (
+            event.source != "kernel"
+            or event.authority != "runtime"
+            or event.visibility != "private"
+            or event.causation_id is not None
+            or event.correlation_id != event.event_id
+            or set(event.payload) != {"snapshot"}
+            or not isinstance(snapshot, dict)
+            or event.target != snapshot.get("active_player_id")
+            or event.timestamp_tick != snapshot.get("tick")
+        ):
+            raise RuntimeErrorBase("EventLog snapshot.restored envelope is invalid")
+        self._restore_snapshot_payload(deepcopy(snapshot), record_event=False)
 
     def _validate_replayed_fsm_lifecycle(self, event: EventIR) -> None:
         payload = event.payload
@@ -3083,6 +3125,17 @@ class WorldRuntime:
                 or event.timestamp_tick < 0
             ):
                 raise RuntimeErrorBase("EventLog timestamp_tick is invalid")
+            if event.event_type == "snapshot.restored":
+                self._apply_snapshot_restored_event(event)
+                pending_actions = {
+                    action.action_id: (due_tick, order, action)
+                    for due_tick, order, action in self.scheduler.entries()
+                }
+                pending_action_runtime = deepcopy(self.action_runtime)
+                lifecycle_order = self.scheduler._counter
+                lifecycle_seen = True
+                replay_tick = self.scheduler.tick
+                continue
             replay_tick = max(replay_tick, event.timestamp_tick)
             if event.event_type in {"fsm.transitioned", "fsm.completed", "fsm.failed"}:
                 self._validate_replayed_fsm_lifecycle(event)

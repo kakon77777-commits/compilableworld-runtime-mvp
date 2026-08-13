@@ -4,7 +4,7 @@
 - **Baseline source:** uploaded integrated local snapshot
 - **Runtime package version:** `0.1.1`
 - **Audit date:** 2026-08-13
-- **Verification:** `PYTHONPATH=src python -m pytest -q -p no:cacheprovider` — **356/356 passed, 86 subtests passed**
+- **Verification:** `PYTHONPATH=src python -m pytest -q -p no:cacheprovider` — **360/360 passed, 86 subtests passed**
 - **Purpose:** authoritative inventory for PIW-MCP integration planning
 
 > Status meanings: **Implemented** = code and tests exist; **Partial** = usable core exists but stated boundary remains; **Planned** = no production implementation found in this baseline.
@@ -25,8 +25,8 @@
 | Atomic commit | Implemented | `WorldRuntime`, `StateStore` | `test_commit_is_atomic_on_permission_failure` | action result must be derived after commit |
 | Event bus and reactions | Implemented | synchronous FIFO committed batches, re-entrant queue, 4096-event root cascade limit, audit-only `runtime.reaction_halted`, `commit_reaction()` | ordering, halt, Replay tamper, dialogue→quest and quest reward tests | cross-module behavior remains event-driven and bounded; a halt preserves committed facts and stops pending delivery |
 | Event log | Implemented | `EventLog` with append/load ID uniqueness and transaction-class append rejection | append-time, reaction rollback, schedule create/cancel rollback, restart, replay and AMK adapter tests | MCP recent-events tool can reuse this source |
-| Snapshot/save | Implemented | runtime snapshot methods with atomic pre-commit validation and exact live Package Entity membership | round-trip, generated-player registry alignment, invalid membership, conflicting tick rejection and legacy migration tests | checkpoint tool may wrap existing snapshot boundary |
-| Replay | Implemented | runtime replay path with full-log clock restoration and private `player.materialized` reconstruction | movement/inventory/door, generated actor registry/profile/state, StateIR timer and nonzero-tick continuation tests | MCP session recovery can rely on replay, with version limits |
+| Snapshot/save | Implemented | runtime snapshot methods with atomic pre-commit validation, exact live Package Entity membership and durable private restore boundary | round-trip, post-save mutation rollback/replay, generated-player registry alignment, invalid membership, append rollback, conflicting tick rejection and legacy migration tests | checkpoint tool may wrap existing snapshot boundary |
+| Replay | Implemented | runtime replay path with full-log clock restoration plus private `player.materialized` and `snapshot.restored` reconstruction | movement/inventory/door, generated actor registry/profile/state, checkpoint rewind, StateIR timer and nonzero-tick continuation tests | MCP session recovery can rely on replay, with version limits |
 | Snapshot version validation | Implemented | runtime migration/version checks | unknown-version rejection test | MCP must return explicit version mismatch errors |
 | Cross-version migration registry | Partial | `compilableworld_mcp.migration_registry`, plus explicit legacy snapshot migration | coordination and legacy migration tests | generic registry exists; Kernel snapshot loader is still a separate adapter |
 | Scheduler | Implemented | `Scheduler`, Action behavior lifecycle | delay, cancellation, interruption, pending Replay and snapshot restore tests | composite actions remain under runtime authority |

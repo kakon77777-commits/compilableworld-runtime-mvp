@@ -246,6 +246,71 @@ class RuntimeTests(unittest.TestCase):
         self.runtime.load_snapshot(snapshot)
         self.assertEqual(self.runtime.state.get("player.neo", "position", "room"), "room.market")
 
+    def test_snapshot_restore_is_a_durable_replay_boundary(self) -> None:
+        self.runtime.submit(ActionIR("player.neo", "move", args={"direction": "north"}))
+        snapshot = Path(self.temp.name) / "replay-boundary-save.json"
+        self.runtime.save_snapshot(snapshot)
+        self.runtime.submit(ActionIR("player.neo", "move", args={"direction": "south"}))
+
+        self.runtime.load_snapshot(snapshot)
+
+        self.assertEqual(self.runtime.event_log.events[-1].event_type, "snapshot.restored")
+        self.assertEqual(self.runtime.state.get("player.neo", "position", "room"), "room.market")
+        replayed = WorldRuntime.from_package(Path(self.temp.name) / "world.package.json")
+        replayed.replay(self.runtime.event_log.events)
+        self.assertEqual(replayed.state.export(), self.runtime.state.export())
+        self.assertEqual(replayed.scheduler.export(), self.runtime.scheduler.export())
+
+    def test_snapshot_restore_rolls_back_when_event_log_append_fails(self) -> None:
+        snapshot = Path(self.temp.name) / "restore-rollback-save.json"
+        self.runtime.save_snapshot(snapshot)
+        self.runtime.submit(ActionIR("player.neo", "move", args={"direction": "north"}))
+        before_state = self.runtime.state.export()
+        before_events = list(self.runtime.event_log.events)
+
+        with patch.object(
+            self.runtime.event_log,
+            "append",
+            side_effect=KernelTransactionError("simulated restore event failure"),
+        ):
+            with self.assertRaises(KernelTransactionError):
+                self.runtime.load_snapshot(snapshot)
+
+        self.assertEqual(self.runtime.state.export(), before_state)
+        self.assertEqual(self.runtime.event_log.events, before_events)
+
+    def test_snapshot_restore_replays_pending_action_continuation(self) -> None:
+        scheduled = self.runtime.submit(
+            ActionIR("player.neo", "move", args={"direction": "north"}),
+            delay=2,
+        )
+        snapshot = Path(self.temp.name) / "pending-restore-save.json"
+        self.runtime.save_snapshot(snapshot)
+        self.runtime.cancel_action("player.neo", scheduled.action_id)
+
+        self.runtime.load_snapshot(snapshot)
+        receipts = self.runtime.advance(2)
+
+        self.assertEqual(receipts[0].status.value, "completed")
+        replayed = WorldRuntime.from_package(Path(self.temp.name) / "world.package.json")
+        replayed.replay(self.runtime.event_log.events)
+        self.assertEqual(replayed.state.export(), self.runtime.state.export())
+        self.assertEqual(replayed.scheduler.export(), self.runtime.scheduler.export())
+        self.assertEqual(replayed.action_runtime, self.runtime.action_runtime)
+
+    def test_delayed_primitive_failure_clears_replay_scheduler(self) -> None:
+        self.runtime.submit(
+            ActionIR("player.neo", "move", args={"direction": "west"}),
+            delay=1,
+        )
+        receipts = self.runtime.advance(1)
+
+        self.assertEqual(receipts[0].status.value, "failed")
+        replayed = WorldRuntime.from_package(Path(self.temp.name) / "world.package.json")
+        replayed.replay(self.runtime.event_log.events)
+        self.assertEqual(replayed.scheduler.export(), self.runtime.scheduler.export())
+        self.assertEqual(replayed.action_runtime, self.runtime.action_runtime)
+
     def test_snapshot_reconciles_dynamic_entities_and_rejects_invalid_atomically(self) -> None:
         actor = self.runtime.create_player(generate_character(seed=1, name="First"))
         snapshot = Path(self.temp.name) / "generated-save.json"
