@@ -22,3 +22,10 @@
 16. MCP Session 是外部連線中繼資料，不是 Runtime State；開啟、關閉或遺失 Session 不得產生世界事件。
 17. MCP 事件輸出必須先套用 `EventIR.visibility` 與 actor/role 過濾；未知 visibility 採 fail-closed，除非明確是 admin。
 18. 官方 MCP SDK 是可選傳輸依賴，核心 Runtime 與 transport-neutral service 必須在未安裝 SDK 時仍可 import、測試與執行。
+
+## 2026-09-10 起的開發節奏
+
+- 使用者要求每天一個可驗收進度；同一工作包可以涵蓋實作、測試、文件與整合，不能把每個小檔案都拆成一次「繼續」。
+- 本專案主力模型偏好 GPT-6（目前選用 `gpt-6-astra`）；實際模型以 host 設定為準，不宣稱 Agent 可以自行切換主模型。
+- 接手先閱讀 `docs/DEVELOPMENT_PROGRESS_zh-TW.md`，確認日期、工作樹、基線與下一個工作包。每日紀錄區分已驗收成果與未完成依賴；研究問題及未校準工期維持未知。
+- 每日節奏本身不建立排程。自動執行的時間與方式由使用者另行指定。

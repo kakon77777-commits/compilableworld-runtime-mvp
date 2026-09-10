@@ -1,6 +1,8 @@
-# CompilableWorld Runtime MVP v0.1.1
+# CompilableWorld Runtime MVP v0.1.2
 
 這是一套零第三方執行依賴的 Python 參考實作。CompilableWorld Runtime 將 JSON／CSV Authoring Layer 編譯為 Runtime Package，再由 MSSP 模組化世界核心透過終端機或網頁介面執行——兩者共用同一套 Kernel／Action IR／Module Contract，只是不同的 UI Adapter（見「架構邊界」）。原有 `compilableworld` Python import 與 `cw-runtime` CLI 保持相容。
+
+2026-09-10 起恢復開發，每天推進一個可驗收工作包，主力模型偏好 GPT-6。當前基線、每日成果與下一個工作包見 [施工進度](docs/DEVELOPMENT_PROGRESS_zh-TW.md)。
 
 ## 未來 CRDWS 架構基準
 

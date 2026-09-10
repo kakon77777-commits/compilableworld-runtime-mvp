@@ -32,6 +32,20 @@ class Entity:
 
 
 @dataclass(slots=True)
+class EntityDelta:
+    """One governed Runtime entity mutation.
+
+    v0.1 intentionally supports transaction-safe ``create`` only. Removal and
+    replacement need their own lifecycle semantics and are not implied here.
+    """
+
+    operation: str
+    entity: Entity
+    expected_absent: bool = True
+    source_module: str = ""
+
+
+@dataclass(slots=True)
 class StateCell:
     value: Any
     version: int = 0
@@ -103,6 +117,9 @@ class TransitionResult:
     deltas: list[StateDelta] = field(default_factory=list)
     events: list[EventIR] = field(default_factory=list)
     message: str = ""
+    # Keep this field after ``message`` so existing positional constructors
+    # TransitionResult(True, deltas, events, message) remain source-compatible.
+    entity_deltas: list[EntityDelta] = field(default_factory=list)
 
 
 @dataclass(slots=True)
@@ -112,6 +129,7 @@ class ActionReceipt:
     message: str
     event_ids: list[str] = field(default_factory=list)
     changed_paths: list[str] = field(default_factory=list)
+    changed_entities: list[str] = field(default_factory=list)
 
 
 @dataclass(slots=True)
