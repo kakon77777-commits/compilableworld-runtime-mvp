@@ -8,13 +8,14 @@
 
 ## Day 1 — 2026-09-10：施工基線合流
 
-**狀態：VERIFYING（最終驗收完成後更新）**
+**狀態：COMPLETE（限本日施工基線驗收）**
 
 ### 基線來源
 
 - 本機既有成果：`c151a9659a4152a8a30842c2df20bee02eca722a`，含 StateIR v0.6、玩家建立、entity membership 與 snapshot restore Replay 修正。
 - GitHub 主線來源：`cf37f539e0807499e8b337f80a5f152324c087f2`，含 create-only `EntityTransactionRuntime` 與原始測試。
 - 來源文件保存 commit：`9301bf3`，保留 5 篇 CRDWS paper、9 篇 RGGD 正文、總索引及來源 manifest。
+- 經驗證合流 commit：`89b6d71f48263482dbf4e887c01c203f2348ef09`；其 parents 為文件保存線與遠端 `cf37f53`。
 - 合作分支：`agent/crdws-day01-baseline`。既有主分支未被覆寫。
 
 ### 本日變更
@@ -33,7 +34,11 @@
 - 最小修正後 focused gate：entity transaction、EventBus、Action behavior → **60 passed**。
 - 修正後完整回歸：`python -B -m pytest -q -p no:cacheprovider` → **368 passed**（25.35 秒）。
 - Governing Twin 在修正後程式上提出 scoped **CONCUR**，另跑窄測試 **14 passed**；Kernel blob 與 `c151a96` 相同，實體交易擴充 blob 為 `33c44941a36a5ed805c06af0f36540c1ec3ca501`。
-- 來源文件與乾淨 checkout 重建：待回填。
+- 以 `89b6d71` 建立 detached Git worktree；15 份來源文件逐一核對 byte length 與 SHA-256 → **15 matched / 0 mismatches**，工作樹無修改。
+- 乾淨 checkout 的 `tests/test_entity_transaction.py tests/test_player_generation.py tests/test_event_bus.py` → **21 passed**；兩個 example 的 CLI `validate` 均回 `ok: true`。
+- 原始 paper 的 Markdown hard-break 空白保留；不為格式檢查更動來源正文。新增工程差異的 `git diff --check` 通過。
+
+完整測試與重建結果均綁定上述程式版本及本機 Python 環境；不宣稱遠端 CI、Linux 或其他 Python 版本也在本日重跑過。之後只有本進度文件的完成紀錄更新，Runtime／tests 未再變更。
 
 ### 本日驗收邊界
 
