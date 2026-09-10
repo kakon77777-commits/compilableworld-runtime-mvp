@@ -1,0 +1,74 @@
+{
+  "series": "RGGD — Recursive Generative Game Design",
+  "chinese_title": "遞迴生成式遊戲設計方法論",
+  "version": "v0.1",
+  "date": "2026-09-10",
+  "language": "zh-TW",
+  "encoding": "UTF-8",
+  "canonical_math_delimiters": [
+    "$...$",
+    "$$...$$"
+  ],
+  "documents": {
+    "00_MASTER_INDEX.md": {
+      "bytes": 3762,
+      "sha256": "aba36eecd3ce4964c8797cecfef0057690ddebf6e67d13601ec8f3b6ffba7ed7",
+      "utf8_validation": "PASS",
+      "math_delimiter_validation": "PASS"
+    },
+    "RGGD-01_從內容列舉到生成語法.md": {
+      "bytes": 5088,
+      "sha256": "0b4e5d0b0ada4d84ce3f78959ec47c10e4312b10018938d3cb52db23914a071e",
+      "utf8_validation": "PASS",
+      "math_delimiter_validation": "PASS"
+    },
+    "RGGD-02_Primitive_Type與Constraint.md": {
+      "bytes": 4175,
+      "sha256": "f40846cca7fc9eacdfd7c8259f194e88642822408e7a5143cc7e7a21c1f55bce",
+      "utf8_validation": "PASS",
+      "math_delimiter_validation": "PASS"
+    },
+    "RGGD-03_階層式組合與生成閉包.md": {
+      "bytes": 4157,
+      "sha256": "edb6c99adf1cd746f6dff69a2b70f3a215c12e2c7c3da0652a29c8f65cd11f06",
+      "utf8_validation": "PASS",
+      "math_delimiter_validation": "PASS"
+    },
+    "RGGD-04_遞迴回流與動態Grammar.md": {
+      "bytes": 4979,
+      "sha256": "668eddc07cd9488e8507023dff0a9e121b389bfc1f3f1f7b1dff8ed8d4688939",
+      "utf8_validation": "PASS",
+      "math_delimiter_validation": "PASS"
+    },
+    "RGGD-05_生成式物件世界.md": {
+      "bytes": 4296,
+      "sha256": "2950c313f17dff9a37926d01ec610b4f125186dca2ae536cf8fbcba7562b8f13",
+      "utf8_validation": "PASS",
+      "math_delimiter_validation": "PASS"
+    },
+    "RGGD-06_歷史回流與生成世界史.md": {
+      "bytes": 3584,
+      "sha256": "33c02d8d1c34c1db0dbfabb8c863e8484e87c190f1fb4e39b3464af225f8f93d",
+      "utf8_validation": "PASS",
+      "math_delimiter_validation": "PASS"
+    },
+    "RGGD-07_主體與文明作為生成器.md": {
+      "bytes": 4164,
+      "sha256": "15ad538a136aa70a8615ba58f6c72055bea3a724a4ff111bf80a3fba16058f66",
+      "utf8_validation": "PASS",
+      "math_delimiter_validation": "PASS"
+    },
+    "RGGD-08_組合爆炸品質控制與驗證.md": {
+      "bytes": 4382,
+      "sha256": "fd55a89016e7b6d924a98d9e62f5ca5939bc466b9d7e308a994f0b2c9bcd2c3a",
+      "utf8_validation": "PASS",
+      "math_delimiter_validation": "PASS"
+    },
+    "RGGD-09_RGGG_Runtime中間表示與MVP路線.md": {
+      "bytes": 5424,
+      "sha256": "7e9cc989d3a037eaece8d27c80be63c245664deb30b93d681be9e31075b71d66",
+      "utf8_validation": "PASS",
+      "math_delimiter_validation": "PASS"
+    }
+  }
+}

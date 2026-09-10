@@ -1,0 +1,32 @@
+{
+  "series": "Dynamic World Simulator Canonical Series v1",
+  "canonical_architecture_priority": 0,
+  "source_path": "C:/Users/kakon/Downloads/Dynamic World Simulator Canonical Series v1",
+  "received_date": "2026-09-10",
+  "received_file_count": 5,
+  "expected_by_series_numbering": [1, 2, 3, 4, 5, 6, 7, 8],
+  "received_papers": [1, 5, 6, 7, 8],
+  "missing_papers": [2, 3, 4],
+  "missing_paper_status": "MISSING_SOURCE_DO_NOT_RECONSTRUCT",
+  "files": [
+    {"path": "papers/01_What_Is_the_Composable_Recursive_Dynamic_World_Simulator.md", "bytes": 20594, "sha256": "E694882C7C5E57ED17207810CE169AFEBFD32368ED4C2CDC3D83B4CE152425FB"},
+    {"path": "papers/05_TMS_World_Capability_Module_Specification.md", "bytes": 38186, "sha256": "7D6CA0B91418BEEDE0CC743C58CF42064684DF024A953C50A6E1F049EC8FF766"},
+    {"path": "papers/06_Project_Lineage_Locator_and_Non_Confusion_Map.md", "bytes": 37488, "sha256": "0EEA46A5DCD34E7CB94AF065CDB341ECCEE1020817027AA7C9505CEAE45C676E"},
+    {"path": "papers/07_Current_Implementation_Baseline_and_Migration_Plan.md", "bytes": 57715, "sha256": "93FE64A3C1829E0023518A11813173F863D7F2A7CE6C01B3DB22B8FE011751A4"},
+    {"path": "papers/08_Frozen_Invariants_and_Future_Roadmap.md", "bytes": 35423, "sha256": "21E12AE884193B5390FBF05E61CB0CD8968DD3D1AE6FCC995EE7997DD576E99D"}
+  ],
+  "engineering_baseline": {
+    "repository": "kakon77777-commits/compilableworld-runtime-mvp",
+    "paper_07_audited_commit": "cf37f539e0807499e8b337f80a5f152324c087f2",
+    "remote_master_verified": true,
+    "paper_copy_implies_migration_complete": false
+  },
+  "soldnerschild": {
+    "role": "BENCHMARK_CANDIDATE",
+    "research_status": "NOT_RESEARCHED",
+    "evidence_status": "MISSING",
+    "verified_current_runtime_repository": false,
+    "allow_inference": false
+  }
+}
+

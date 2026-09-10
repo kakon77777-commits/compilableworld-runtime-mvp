@@ -1,0 +1,3 @@
+# Imported research sources must retain the bytes recorded by their manifests.
+/docs/crdws-canonical-series-v1/papers/** -text
+/docs/RGGD_Recursive_Generative_Game_Design_Series_v0.1_2026-09-10/** -text

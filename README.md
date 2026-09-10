@@ -2,6 +2,18 @@
 
 這是一套零第三方執行依賴的 Python 參考實作。CompilableWorld Runtime 將 JSON／CSV Authoring Layer 編譯為 Runtime Package，再由 MSSP 模組化世界核心透過終端機或網頁介面執行——兩者共用同一套 Kernel／Action IR／Module Contract，只是不同的 UI Adapter（見「架構邊界」）。原有 `compilableworld` Python import 與 `cw-runtime` CLI 保持相容。
 
+## 未來 CRDWS 架構基準
+
+2026-09-10 起，未來世界模擬擴張以 [Dynamic World Simulator Canonical Series v1](docs/crdws-canonical-series-v1/README.md) 為最高架構基準，並遵守 `KeepTheKernel; ExpandTheWorld`。CompilableWorld 是可執行 Runtime foundation，不等於完整 CRDWS；複製論文不表示 Domain Graph、TMS vNext、FDCS、多速率或結構演化已經實作。
+
+本次實際收到 Paper 01、05、06、07、08；Paper 02–04 保持 `MISSING_SOURCE`。《傭兵之盾》目前只標為未來 benchmark candidate，解析狀態為 `NOT_RESEARCHED`。
+
+## RGGD 生成式開發方法論
+
+2026-09-10 收到的 [RGGD — Recursive Generative Game Design v0.1](docs/RGGD_Recursive_Generative_Game_Design_Series_v0.1_2026-09-10/00_MASTER_INDEX.md) 已保存為未來生成式內容與規則工程的方法論來源。RGGD／RGGG 補充「有限 Primitive、Type、Constraint、Grammar、Recipe 與 History 如何產生可重播世界內容」；它不取代 CRDWS 架構基準，也不表示相應 Runtime 已經實作。
+
+CompilableWorld 的整合判定、現有能力對照、第一個 `Material → Item → History → VisualRecipe` 切片及工作量影響，見 [RGGD 與 CompilableWorld 整合分析](docs/RGGD_COMPILABLEWORLD_INTEGRATION_zh-TW.md)。
+
 ## 快速開始
 
 不安裝也可直接執行：
