@@ -46,8 +46,14 @@
 
 CRDWS Paper 02–04 仍缺；傭兵之盾仍為 `NOT_RESEARCHED`。Domain Graph、FDCS、多速率、通用 RGGG、動態 Grammar 與完整示範遊戲仍是後續工作。
 
+## 2026-09-11 方法交接：下次施工採用 GCT
+
+使用者交付 GCT v1.0 與 Global-First Completion 技能包，指定明天施工時採用。原文、技能與來源雜湊已保存於 [方法採用記錄](methods/gct-v1.0/ADOPTION.md)。這次只完成方法交接，未將 Day 2 功能標為已完成，也未建立自動排程。
+
+下一個工作包按 GCT 先實作完整路徑，再整體驗證與批次修復；採用相稱的測試，直接完成已授權範圍內的剩餘工作。
+
 ## 下一個工作包：通用實體的保存與 Replay
 
-先以 create-only `EntityDelta` 建立一個普通物件，驗證 Snapshot 與完整 EventLog Replay 重建同一 entity membership、state 與 lineage，並可繼續執行 Action。先用正反例確認目前缺口，再處理所需的 Runtime／版本契約；不在同一工作包加入 Domain Graph 或動態 Grammar。
+整個交付範圍是：以 create-only `EntityDelta` 建立一個普通物件，接通 Snapshot 與完整 EventLog Replay，重建同一 entity membership、state 與 lineage，並可繼續執行 Action。把所需 Runtime／版本契約、保存與重播路徑、失敗處理及正反例一起完成後驗證；共通失敗按根因批次修復。不在同一工作包加入 Domain Graph 或動態 Grammar。
 
 通過後再安排 `Material → Item → Event/History → 下一次生成` 的最小 Object Re-entry 閉環。VisualRecipe 是同一 state 的唯讀投影，不需要等待完整視覺客戶端。
