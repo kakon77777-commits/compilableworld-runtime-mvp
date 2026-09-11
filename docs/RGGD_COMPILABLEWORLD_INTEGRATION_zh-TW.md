@@ -44,7 +44,7 @@ RGGD 不取代 CRDWS 或 CompilableWorld。它補上的是「如何避免每個 
 | History 具有因果與 provenance | EventIR、EventLog、causation、Snapshot、Replay | 可擴充 |
 | 同 seed 可重建 | 玩家生成已有本地 seeded PRNG 與 Replay 驗證 | 可抽象化 |
 | 組合與遞迴必須 bounded | StateIR／Action behavior 已有深度、節點與 cascade 上限 | 可沿用設計原則 |
-| 生成物能進入世界 | 遠端 `cf37f53` 提供 `EntityTransactionRuntime`；初版分析的本機 `c151a96` 沒有此類別，Day 1 才合流 | create-only 底座；通用生成物 Replay 尚未驗收 |
+| 生成物能進入世界 | 遠端 `cf37f53` 提供 `EntityTransactionRuntime`；初版分析的本機 `c151a96` 沒有此類別，Day 1 才合流；Day 2 接通 Snapshot／Replay／後續 Action | create-only 持久化底座；依施工進度中的實際驗收，尚非 RGGG 生成器 |
 | 視覺是 projection | Studio／Web projection 不擁有 Runtime State | 可直接保留 |
 | 版本、migration、rollback | Schema registry、package validation、snapshot migration | 可擴充 |
 

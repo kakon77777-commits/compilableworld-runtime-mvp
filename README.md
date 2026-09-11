@@ -4,6 +4,8 @@
 
 2026-09-10 起恢復開發，每天推進一個可驗收工作包，主力模型偏好 GPT-6。當前基線、每日成果與下一個工作包見 [施工進度](docs/DEVELOPMENT_PROGRESS_zh-TW.md)。
 
+通用實體的建立、Snapshot、EventLog Replay 與重啟後行動可用離線範例體驗：設定 `PYTHONPATH=src` 後執行 `python -B examples/entity_lifecycle_demo.py`。此例使用編譯後的灰冠世界與 create-only 擴充，詳見 [Entity Transaction 契約](docs/ENTITY_TRANSACTION_V0_1.md)。
+
 ## 未來 CRDWS 架構基準
 
 2026-09-10 起，未來世界模擬擴張以 [Dynamic World Simulator Canonical Series v1](docs/crdws-canonical-series-v1/README.md) 為最高架構基準，並遵守 `KeepTheKernel; ExpandTheWorld`。CompilableWorld 是可執行 Runtime foundation，不等於完整 CRDWS；複製論文不表示 Domain Graph、TMS vNext、FDCS、多速率或結構演化已經實作。

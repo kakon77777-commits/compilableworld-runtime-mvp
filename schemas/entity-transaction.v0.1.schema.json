@@ -1,0 +1,38 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "compilableworld.schema/entity-transaction/v0.1",
+  "title": "Entity transaction v0.1 committed payload",
+  "description": "Existing create-only EventIR v1 payload. Replay also verifies the paired state.committed envelope and registered creator capability. Snapshot v0.6 reuses the entity shape without a format change.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["applied"],
+  "properties": {
+    "applied": {
+      "type": "array",
+      "minItems": 1,
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["operation", "entity"],
+        "properties": {
+          "operation": {"const": "create"},
+          "entity": {"$ref": "#/$defs/entity"}
+        }
+      }
+    }
+  },
+  "$defs": {
+    "entity": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["entity_id", "entity_type", "name", "components", "metadata"],
+      "properties": {
+        "entity_id": {"type": "string", "pattern": "^[a-z][a-z0-9_.-]*$"},
+        "entity_type": {"type": "string", "minLength": 1},
+        "name": {"type": "string", "minLength": 1},
+        "components": {"type": "array", "items": {"type": "string", "minLength": 1}},
+        "metadata": {"type": "object"}
+      }
+    }
+  }
+}

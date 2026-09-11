@@ -9,6 +9,8 @@
 
 > Status meanings: **Implemented** = code and tests exist; **Partial** = usable core exists but stated boundary remains; **Planned** = no production implementation found in this baseline.
 
+> 2026-09-11 Day 2 addendum: the original audit above remains historical. The opt-in `EntityTransactionRuntime` now supplies generic create-only entity Snapshot/Replay and continuation; current verification is recorded in `docs/DEVELOPMENT_PROGRESS_zh-TW.md`. This does not add general spawning grammars or entity removal.
+
 ## 1. Core compilation and runtime
 
 | Capability | Status | Primary implementation | Test evidence | PIW-MCP consequence |
@@ -53,7 +55,7 @@
 | Quests: branch/failure/priority | Implemented | deterministic priority, actor causation, event matching, requirements, graph reachability, terminal-state rejection, ambiguous dispatch rejection and exactly-once terminal reward; see `docs/WORLD_STATE_MACHINE_EXECUTION_CONTRACT_zh-TW.md` |
 | Scoped StateIR: World/Region/Scene/Entity/System | Implemented | v0.6 single-active-leaf compound hierarchy with 16-level bound, direct parent/initial-child validation, deterministic compound entry, priority-then-specificity ancestor transitions, leaf-only timers, authored/leaf lifecycle provenance, isolated `fsm.*` active leaf plus reserved `fsm_runtime.*` entry tick, bounded owner/verified-actor StateStore `all`/`any`/`not` expressions with 4 group levels, 16 children, 64 nodes, 32 leaves and three-valued `not(unknown)` fail-closed semantics, explicit source machine+transition non-terminal chaining, cycle rejection and 64-edge reaction limit, v0.1–v0.5 source compatibility, complete expression/hierarchy/path/countdown Studio projection, Snapshot v0.6 and leaf/timer/halt-aware Replay; no free guards, parallel/history/entry-exit effects, wall clock or implicit geographic routing; see `docs/SCOPED_STATE_IR_EXECUTION_CONTRACT_zh-TW.md` |
 | Action-scope state machines | Implemented | v0.7 compile-time validated static phase DAG, one sticky priority-selected active route, unique terminal, unknown/self/cycle/unreachable rejection, actual-path due convergence, non-recursive primitive child Actions, fail-closed actor/target State Cell AND gates, fixed-interval retry/deadline, atomic lifecycle, v0.1–v0.6 compatibility, cancellation, interruption, Snapshot v0.6 and route-aware pending Replay; dynamic/recursive/nested graph, resume, compensation, parallel/synchronizing join, free backoff/jitter and arbitrary guards remain pending; see `docs/ACTION_SCOPE_BEHAVIOR_EXECUTION_CONTRACT_zh-TW.md` |
-| Runtime-generated items/entities | Partial | generated player exists; generic runtime entity spawning remains bounded |
+| Runtime-generated items/entities | Partial | Generated players plus opt-in create-only EntityTransactionRuntime; dynamic entity fields, JSON recipe metadata, lineage State cells, Snapshot v0.6, paired entity/state EventIR Replay, rewind/recreate and subsequent Actions are covered. Creator contracts must be registered for Replay; remove/despawn, automatic ID allocation, Action-child creation and generative grammars remain outside the contract. |
 
 ## 3. Narrative, dialogue and player entry
 

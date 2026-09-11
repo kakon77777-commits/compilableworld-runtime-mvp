@@ -3112,13 +3112,25 @@ class WorldRuntime:
                 f"EventLog {event.event_type} violates authored StateIR lifecycle"
             )
 
+    def _validate_replay_support(self, events: list[EventIR]) -> None:
+        if any(event.event_type == "entity.committed" for event in events):
+            raise RuntimeErrorBase("entity.committed Replay requires EntityTransactionRuntime")
+
+    def _apply_replayed_entity_commit(self, event: EventIR, previous: EventIR | None) -> None:
+        raise RuntimeErrorBase("entity.committed Replay requires EntityTransactionRuntime")
+
     def replay(self, events: Iterable[EventIR]) -> None:
+        events = list(events)
+        self._validate_replay_support(events)
         pending_actions: dict[str, tuple[int, int, ActionIR]] = {}
         pending_action_runtime: dict[str, dict[str, Any]] = {}
         lifecycle_seen = False
         lifecycle_order = 0
         replay_tick = self.scheduler.tick
+        previous_event: EventIR | None = None
         for event in events:
+            preceding_event = previous_event
+            previous_event = event
             if (
                 isinstance(event.timestamp_tick, bool)
                 or not isinstance(event.timestamp_tick, int)
@@ -3141,6 +3153,8 @@ class WorldRuntime:
                 self._validate_replayed_fsm_lifecycle(event)
             if event.event_type == "player.materialized":
                 self._apply_player_materialized_event(event)
+            if event.event_type == "entity.committed":
+                self._apply_replayed_entity_commit(event, preceding_event)
             if event.event_type == "state.committed":
                 for item in event.payload.get("applied", []):
                     self.state.seed(

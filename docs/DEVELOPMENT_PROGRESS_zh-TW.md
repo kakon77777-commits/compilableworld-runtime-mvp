@@ -52,8 +52,36 @@ CRDWS Paper 02–04 仍缺；傭兵之盾仍為 `NOT_RESEARCHED`。Domain Graph�
 
 下一個工作包按 GCT 先實作完整路徑，再整體驗證與批次修復；採用相稱的測試，直接完成已授權範圍內的剩餘工作。
 
-## 下一個工作包：通用實體的保存與 Replay
+## Day 2 — 2026-09-11：通用實體的保存與 Replay
+
+**狀態：COMPLETE（限 create-only 物件的保存、Replay 與繼續行動）**
+
+起點 `6ba1b3e`，合作分支 `agent/day02-entity-replay`。採 GCT 將 Runtime 還原、例外回復、持久 log 重開、測試與離線示範一起接通，再集中驗證。沒有開啟自動排程或付費模型調用。
 
 整個交付範圍是：以 create-only `EntityDelta` 建立一個普通物件，接通 Snapshot 與完整 EventLog Replay，重建同一 entity membership、state 與 lineage，並可繼續執行 Action。把所需 Runtime／版本契約、保存與重播路徑、失敗處理及正反例一起完成後驗證；共通失敗按根因批次修復。不在同一工作包加入 Domain Graph 或動態 Grammar。
 
-通過後再安排 `Material → Item → Event/History → 下一次生成` 的最小 Object Re-entry 閉環。VisualRecipe 是同一 state 的唯讀投影，不需要等待完整視覺客戶端。
+本次沿用 Snapshot v0.6 與既有 EventIR v1 payload，補上 create-only Replay 的 creator binding、交易配對與原子失敗回復。舊格式不因增加解碼器而改寫；原始來源世界不被修改。
+
+### 完成內容與驗收
+
+- 生成物的完整 Entity、JSON recipe metadata、lineage State cells 與版本值，能經 Snapshot 或完整 EventLog 重建，再執行拾取／放下。
+- 支援 checkpoint 回退後合法重建、動態物件與 generated player 共存、未完成排程恢復，以及既有 Snapshot 可選欄位的預設值。
+- 非法版本、錯誤交易配對、缺 creator binding、重複 live ID 與無法保存的 Entity 資料會拒絕；extension Replay 失敗回復整次操作的記憶體狀態。重播不追加 log、不發布事件，也不重新執行生成器。
+- 普通 `WorldRuntime` 先拒絕不支援的 entity log；`EntityTransactionRuntime` 在 delayed Action 執行前重查 actor，且始終保留 Package-backed ID，避免成功成果與還原規則不一致。
+- 提供 `examples/entity_lifecycle_demo.py`，以真正編譯的灰冠世界、持久 log 重開及兩次重啟驗證完整流程。
+
+### 實際驗證紀錄
+
+環境為 Windows／Python 3.14.5；命令設定 `PYTHONPATH=src`，停用 bytecode 與 pytest cache。新增 17 個測試方法，另以 subtests 覆蓋不同錯誤資料及合法對照。
+
+1. 全流程第一版完整測試：**378 passed / 3 failed**。三個失敗同屬示範物件 `portable` 欄位放錯，集中修正為既有 Inventory 所讀取的 metadata。
+2. 受影響的 persistence／transaction／player-generation 測試：**34 passed**；離線 demo 回 `ok: true`，證明 snapshot 後行動及 durable log 兩次重啟。
+3. 修正後完整測試曾為 **383 passed**。獨立審查另重現「排程 actor 被替換」及「已移除 Package ID 被重用」兩個新問題，因此增加對應回歸與一致的前置條件。
+4. 最後一批修正後，persistence／transaction／player／Runtime 測試：**95 passed**；審查者獨立複驗新增的兩個案例 **2 passed**，兩項 CHALLENGE 均關閉為 scoped CONCUR。
+5. 最終命令 `python -B -m pytest -q -p no:cacheprovider` → **385 passed**（27.11 秒）；`git diff --check` 通過。
+
+本工作包完整路徑與已知必要修正均已驗收。Day 2 的成功不擴張為 Grammar 生成、remove/despawn、Action-child creation、ID allocator 或任意新 Domain 已完成。Replay 需由 host 註冊相容 creator contract；既有 log 不含 module-version receipt，因此仍由 host 固定相容版本。未另宣稱跨平台 CI 或長期大規模效能已量測。
+
+## 下一個工作包：最小 Object Re-entry 閉環
+
+`Material → Item → Event/History → 下一次生成`：在固定 Grammar 中讓既有物件／歷史確實改變下一次生成的合法性或性能；VisualRecipe 是同一 state 的唯讀投影，不需要等待完整視覺客戶端。
