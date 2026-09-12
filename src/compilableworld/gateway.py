@@ -55,6 +55,20 @@ class DeterministicIntentParser:
             return ActionIR(actor_id, "say", args={"text": " ".join(parts[1:])})
         if verb == "cast":
             return ActionIR(actor_id, "cast", args={"spell": parts[1] if len(parts) > 1 else ""})
+        if verb == "use_tool":
+            if len(parts) != 2:
+                raise ValueError("用法: use_tool 工具名稱或ID")
+            return ActionIR(actor_id, verb, self._resolve(parts[1], actor_id, runtime))
+        if verb == "craft":
+            if not 3 <= len(parts) <= 6:
+                raise ValueError("用法: craft 配方ID 材料ID [工具ID或-] [seed] [成品ID]")
+            target = self._resolve(parts[3], actor_id, runtime) if len(parts) > 3 and parts[3] != "-" else None
+            args = {"recipe_id": parts[1], "material_id": parts[2]}
+            if len(parts) > 4:
+                args["seed"] = int(parts[4])
+            if len(parts) > 5:
+                args["output_id"] = parts[5]
+            return ActionIR(actor_id, verb, target, args)
         raise ValueError(f"無法解析指令: {verb}")
 
     @staticmethod
@@ -267,6 +281,10 @@ class TerminalGateway:
             groups.append("give 物品 對象")
         if "cast" in verbs:
             groups.append("cast 法術名")
+        if "craft" in verbs:
+            groups.append("craft 配方ID 材料ID [工具ID或-] [seed] [成品ID]")
+        if "use_tool" in verbs:
+            groups.append("use_tool 工具名稱或ID")
         if "inventory" in verbs:
             groups.append("inventory")
         if "say" in verbs:

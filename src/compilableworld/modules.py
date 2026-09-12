@@ -1019,6 +1019,16 @@ class QuestModule(BaseModule):
 
 
 def install_builtin_modules(runtime: WorldRuntime) -> None:
+    from .object_reentry import MODULE_ID as object_reentry_id
+    object_reentry_module = None
+    if object_reentry_id in runtime.package["manifest"]["modules"]:
+        from .entity_transaction import EntityTransactionRuntime
+        from .object_reentry_module import ObjectReentryModule
+        if not isinstance(runtime, EntityTransactionRuntime):
+            raise ValueError("object_reentry.core requires EntityTransactionRuntime")
+        object_reentry_module = ObjectReentryModule(
+            runtime.package.get("object_reentry"), runtime.package["source_checksums"],
+        )
     runtime.bind_action_interrupts()
     available = {
         module.contract.module_id: module for module in [
@@ -1027,6 +1037,8 @@ def install_builtin_modules(runtime: WorldRuntime) -> None:
             StateMachineModule(), QuestModule(),
         ]
     }
+    if object_reentry_module is not None:
+        available[object_reentry_id] = object_reentry_module
     for module_id in runtime.package["manifest"]["modules"]:
         if module_id not in available:
             raise ValueError(f"Runtime Package 要求未知模組: {module_id}")

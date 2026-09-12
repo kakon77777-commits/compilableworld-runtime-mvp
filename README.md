@@ -6,6 +6,8 @@
 
 通用實體的建立、Snapshot、EventLog Replay 與重啟後行動可用離線範例體驗：設定 `PYTHONPATH=src` 後執行 `python -B examples/entity_lifecycle_demo.py`。此例使用編譯後的灰冠世界與 create-only 擴充，詳見 [Entity Transaction 契約](docs/ENTITY_TRANSACTION_V0_1.md)。
 
+固定 Grammar 的物件／歷史回流示範：`python -B examples/object_reentry_demo.py`（同樣設定 `PYTHONPATH=src`）。相同材料與 seed 下，工具磨耗會改變下一件成品的性能，並可保存、重播及繼續生成；詳見 [Object Re-entry v0.1](docs/OBJECT_REENTRY_V0_1.md)。
+
 ## 未來 CRDWS 架構基準
 
 2026-09-10 起，未來世界模擬擴張以 [Dynamic World Simulator Canonical Series v1](docs/crdws-canonical-series-v1/README.md) 為最高架構基準，並遵守 `KeepTheKernel; ExpandTheWorld`。CompilableWorld 是可執行 Runtime foundation，不等於完整 CRDWS；複製論文不表示 Domain Graph、TMS vNext、FDCS、多速率或結構演化已經實作。

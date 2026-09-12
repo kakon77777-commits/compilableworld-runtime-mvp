@@ -45,6 +45,7 @@ from .action_behavior import (
     ACTION_BEHAVIOR_SCHEMA_ID_V6,
 )
 from .functions import FunctionDefinitionError, FunctionRegistry, validate_function_source
+from .object_reentry import MODULE_ID as OBJECT_REENTRY_MODULE, ObjectReentryError, compile_grammar
 from .player_generation import template_records
 from .schema_registry import SchemaContractError, csv_schema_columns, schema_contracts
 from .state_machine import (
@@ -227,6 +228,19 @@ def compile_world(
         resolved["state_machines"] = _safe_source(root, str(sources["state_machines"]))
     if "action_behaviors" in sources:
         resolved["action_behaviors"] = _safe_source(root, str(sources["action_behaviors"]))
+    if "object_reentry" in sources:
+        resolved["object_reentry"] = _safe_source(root, str(sources["object_reentry"]))
+    object_reentry = None
+    if "object_reentry" in resolved:
+        path = resolved["object_reentry"]
+        try:
+            object_reentry = compile_grammar(_load_json(path), str(path.relative_to(root)), _sha256(path))
+        except ObjectReentryError as exc:
+            raise CompileError(f"object_reentry invalid: {exc}") from exc
+        if OBJECT_REENTRY_MODULE not in manifest.get("modules", []):
+            raise CompileError("object_reentry source requires object_reentry.core in manifest.modules")
+    elif OBJECT_REENTRY_MODULE in manifest.get("modules", []):
+        raise CompileError("object_reentry.core requires an authoring source")
     world = _load_json(resolved["world"])
     rooms = _load_csv(resolved["rooms"], "rooms")
     exits = _load_csv(resolved["exits"], "exits")
@@ -302,7 +316,7 @@ def compile_world(
     except FunctionDefinitionError as exc:
         raise CompileError(f"functions.json invalid: {exc}") from exc
     try:
-        contract_ids = schema_contracts(verify=True)
+        contract_ids = schema_contracts(verify=True, include=("object_reentry",) if object_reentry else ())
     except SchemaContractError as exc:
         raise CompileError(f"schema contracts invalid: {exc}") from exc
     declared_source_schemas = manifest.get("source_schemas", {})
@@ -346,7 +360,7 @@ def compile_world(
         key: contract_ids[key]
         for key in (
             "rooms", "exits", "entities", "items", "functions", "scenarios",
-            "state_machines", "action_behaviors",
+            "state_machines", "action_behaviors", "object_reentry",
         )
         if key in sources
     }
@@ -521,6 +535,8 @@ def compile_world(
             for path in [manifest_path, *resolved.values()]
         },
     }
+    if object_reentry is not None:
+        package["object_reentry"] = object_reentry
     if package_metadata is not None:
         if not isinstance(package_metadata, dict):
             raise CompileError("package_metadata 必須是物件")

@@ -38,6 +38,7 @@ from .player_generation import (
     GeneratedPlayer, actor_id_for_player, generate_character, template_records,
 )
 from .schema_registry import schema_contracts
+from .object_reentry import MODULE_ID as OBJECT_REENTRY_MODULE, SCHEMA_ID as OBJECT_REENTRY_SCHEMA, validate_compiled_grammar
 from .state_machine import (
     state_machine_is_active_leaf,
     state_machine_resolve_leaf,
@@ -503,6 +504,10 @@ class WorldRuntime:
         except (OSError, json.JSONDecodeError) as exc:
             raise RuntimeErrorBase("Runtime Package 無法讀取或不是有效 JSON") from exc
         cls._validate_runtime_package(package)
+        if cls is WorldRuntime and "object_reentry" in package:
+            # The validated package explicitly requires the create-only capability.
+            from .entity_transaction import EntityTransactionRuntime
+            return EntityTransactionRuntime(package, event_log_path)
         return cls(package, event_log_path)
 
     @staticmethod
@@ -513,7 +518,7 @@ class WorldRuntime:
             "dialogues", "scenarios", "functions", "player_templates",
             "initial_state", "schema_contracts", "source_checksums",
         }
-        allowed = required | {"studio"}
+        allowed = required | {"studio", "object_reentry"}
         if (
             not isinstance(package, dict)
             or set(package) - allowed
@@ -555,7 +560,10 @@ class WorldRuntime:
             or any(not isinstance(module_id, str) or not module_id for module_id in modules)
         ):
             raise RuntimeErrorBase("Runtime Package manifest.modules 無效")
-        if package.get("schema_contracts") != schema_contracts():
+        has_object_reentry = "object_reentry" in package
+        if has_object_reentry != (OBJECT_REENTRY_MODULE in modules):
+            raise RuntimeErrorBase("Runtime Package object_reentry module/source binding mismatch")
+        if package.get("schema_contracts") != schema_contracts(include=("object_reentry",) if has_object_reentry else ()):
             raise RuntimeErrorBase("Runtime Package schema_contracts 不完整或版本不符")
         checksums = package["source_checksums"]
         if not checksums or any(
@@ -566,6 +574,13 @@ class WorldRuntime:
             for source, digest in checksums.items()
         ):
             raise RuntimeErrorBase("Runtime Package source_checksums 無效")
+        if has_object_reentry:
+            try:
+                validate_compiled_grammar(package["object_reentry"], checksums)
+                if manifest.get("source_schemas", {}).get("object_reentry") != OBJECT_REENTRY_SCHEMA:
+                    raise ValueError("object_reentry source schema mismatch")
+            except (ValueError, TypeError, AttributeError) as exc:
+                raise RuntimeErrorBase(f"Runtime Package object_reentry invalid: {exc}") from exc
         try:
             room_ids = {
                 room["room_id"] for room in package["rooms"]

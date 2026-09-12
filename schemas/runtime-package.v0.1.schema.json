@@ -53,11 +53,13 @@
       },
       "additionalProperties": true
     },
+    "object_reentry": {"$ref": "object-reentry.v0.1.schema.json#/$defs/compiled"},
     "schema_contracts": {
       "type": "object",
       "additionalProperties": false,
       "required": ["action_behaviors", "functions", "scenarios", "state_machines", "runtime_package", "rooms", "exits", "entities", "items", "studio_world_ir", "studio_mapping"],
       "properties": {
+        "object_reentry": {"const": "compilableworld.schema/object-reentry/v0.1"},
         "action_behaviors": { "const": "compilableworld.schema/action-behaviors/v0.7" },
         "functions": { "const": "compilableworld.schema/functions/v0.1" },
         "scenarios": { "const": "compilableworld.schema/scenarios/v0.1" },
@@ -95,6 +97,7 @@
           "type": "object",
           "additionalProperties": false,
           "properties": {
+            "object_reentry": {"const": "compilableworld.schema/object-reentry/v0.1"},
             "action_behaviors": {
               "enum": [
                 "compilableworld.schema/action-behaviors/v0.1",

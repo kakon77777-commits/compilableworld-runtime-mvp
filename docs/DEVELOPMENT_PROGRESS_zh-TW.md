@@ -82,6 +82,35 @@ CRDWS Paper 02–04 仍缺；傭兵之盾仍為 `NOT_RESEARCHED`。Domain Graph�
 
 本工作包完整路徑與已知必要修正均已驗收。Day 2 的成功不擴張為 Grammar 生成、remove/despawn、Action-child creation、ID allocator 或任意新 Domain 已完成。Replay 需由 host 註冊相容 creator contract；既有 log 不含 module-version receipt，因此仍由 host 固定相容版本。未另宣稱跨平台 CI 或長期大規模效能已量測。
 
-## 下一個工作包：最小 Object Re-entry 閉環
+## Day 3 — 2026-09-12：最小 Object Re-entry 閉環
+
+**狀態：COMPLETE（限固定、bounded Grammar 的 Object Re-entry）**
+
+起點 `0e8633f`，分支 `agent/day03-object-reentry`。採 GCT 同批建立 optional Authoring Schema、Compiler／Runtime 載入、固定生成能力、一般文字指令入口、離線對照示範、保存重播與唯讀 VisualRecipe。
 
 `Material → Item → Event/History → 下一次生成`：在固定 Grammar 中讓既有物件／歷史確實改變下一次生成的合法性或性能；VisualRecipe 是同一 state 的唯讀投影，不需要等待完整視覺客戶端。
+
+本日限定固定 Grammar 的 Object Re-entry；不加入材料庫存經濟、Grammar 自我修改、Domain Graph、AI 生成或完整視覺編輯器。詳細契約見 [Object Re-entry v0.1](OBJECT_REENTRY_V0_1.md)。
+
+### 本日交付
+
+- Authoring 的材料／配方／限制先通過版本化 Schema 與 Compiler，產生帶來源 checksum 與內容 hash 的 optional compiled grammar；Runtime 自行重驗，而非只信任編譯成功。
+- `craft` 與 `use_tool` 經 ActionIR 和 ModuleContract 執行。生成新物件、父工具磨耗與歷史引用在同一交易提交；失敗不留下成品或消耗工具。
+- 成品配方保存 grammar 版本、固定 seed 演算法、實際 seed、材料、父工具當時的 power／condition／depth、State 版本及 history event 引用。
+- 讀檔回退後可重建同一配方；持久 log Replay 後可繼續生成。一般 `play`／`serve` 載入有該能力的 Package 時，自選 create-only Runtime；文字 parser 支援 craft／use_tool。
+- 提供唯讀 VisualRecipe，以及可執行的 `examples/object_reentry_demo.py`。同材料、seed=23：工具 condition=100 時成品 power=57；真實使用後 condition=75 時 power=49。配方中的 history 引用被保留。
+
+### 驗證紀錄
+
+- 第一輪完整回歸：**400 passed**（28.93 秒）。其後補固定 seed 向量、重算 hash 仍須拒絕非法語義的負例，以及 bool／int 配方型別區別，共新增 18 個測試方法。
+- Object Re-entry／Schema 的中途聚焦驗證：**21 passed**（2.10 秒）。同時執行 demo，Snapshot 後再次生成、Replay 後繼續生成皆回 `matched`。
+- 真正舊包相容性：在 detached `0e8633f` checkout 用當時 Compiler 編譯 Gray Crown，再交給今日 loader，成功以普通 `WorldRuntime` 載入 10 個既有模組。舊包 SHA-256：`91F91BF47E07B4B44720659284A8DBDC233B16D65DDA2ACEC0FF9BE7182FCAC7`。
+- 獨立 reviewer 對 bounded 候選及最後小差異給出 scoped CONCUR；未宣稱他重跑主 AI 的完整 suite。
+- 最終 `PYTHONPATH=src python -B -m pytest -q -p no:cacheprovider`：**403 passed**（27.79 秒），Windows／Python 3.14.5。`git diff --check` 通過。
+- 固定向量：示範 grammar hash `a867763e56f75a1597ffc3f244f396139794183fef2c17a83a6e72c6e8f0ca94`，make_tool／iron 的 seed 0、7、23、4294967295 對應 bonus 2、1、2、0。忽略 condition 的生成器會被反事實驗收拒絕。
+
+本日完成「物件與其使用歷史影響下一次生成」這個完整閉環，並未將局部工坊等同於完整 RGGG／CRDWS。
+
+## 下一個工作包：CRDWS 靜態 Domain Graph 與能力對應
+
+將既有工坊與 Runtime 能力掛到可編譯、可驗證、可檢視的靜態 Domain Graph，明確區分 Domain 與 TMS／Module。沿用 Canonical Series 的 additive 路線，先完成世界結構與能力對應，不在同一工作包加入 FDCS、多速率或動態 Domain 變更。

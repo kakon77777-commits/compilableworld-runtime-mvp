@@ -1,0 +1,15 @@
+{
+  "format": "compilableworld.object-reentry/v0.1",
+  "grammar_id": "workshop.object_reentry_demo",
+  "version": "0.1.0",
+  "materials": [
+    {"material_id": "material.iron", "name": "鐵製", "power": 20, "palette": "#a6aab0"},
+    {"material_id": "material.bronze", "name": "青銅", "power": 12, "palette": "#b78f4d"}
+  ],
+  "recipes": [
+    {"recipe_id": "workshop.make_tool", "name": "鍛錘", "output_kind": "tool", "input_kind": "none", "material_ids": ["material.iron", "material.bronze"], "power": 8},
+    {"recipe_id": "workshop.reforge_tool", "name": "複合鍛錘", "output_kind": "tool", "input_kind": "tool", "material_ids": ["material.iron"], "power": 4},
+    {"recipe_id": "workshop.make_blade", "name": "刀胚", "output_kind": "item", "input_kind": "tool", "material_ids": ["material.iron", "material.bronze"], "power": 6}
+  ],
+  "limits": {"max_depth": 3, "bonus_max": 3, "wear_per_use": 25, "min_tool_condition": 25}
+}

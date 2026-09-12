@@ -1,0 +1,61 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "compilableworld.schema/object-reentry/v0.1",
+  "title": "Bounded static Object Re-entry grammar v0.1",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["format", "grammar_id", "version", "materials", "recipes", "limits"],
+  "properties": {
+    "format": {"const": "compilableworld.object-reentry/v0.1"},
+    "grammar_id": {"$ref": "#/$defs/id"},
+    "version": {"type": "string", "minLength": 1, "maxLength": 64},
+    "materials": {"type": "array", "minItems": 1, "maxItems": 64, "items": {"$ref": "#/$defs/material"}},
+    "recipes": {"type": "array", "minItems": 1, "maxItems": 64, "items": {"$ref": "#/$defs/recipe"}},
+    "limits": {
+      "type": "object", "additionalProperties": false,
+      "required": ["max_depth", "bonus_max", "wear_per_use", "min_tool_condition"],
+      "properties": {
+        "max_depth": {"type": "integer", "minimum": 1, "maximum": 8},
+        "bonus_max": {"type": "integer", "minimum": 0, "maximum": 20},
+        "wear_per_use": {"type": "integer", "minimum": 1, "maximum": 100},
+        "min_tool_condition": {"type": "integer", "minimum": 1, "maximum": 100}
+      }
+    }
+  },
+  "$defs": {
+    "id": {"type": "string", "pattern": "^[a-z][a-z0-9_.-]*$", "maxLength": 128},
+    "material": {
+      "type": "object", "additionalProperties": false,
+      "required": ["material_id", "name", "power", "palette"],
+      "properties": {
+        "material_id": {"$ref": "#/$defs/id"},
+        "name": {"type": "string", "minLength": 1, "maxLength": 128},
+        "power": {"type": "integer", "minimum": 0, "maximum": 1000},
+        "palette": {"type": "string", "pattern": "^#[0-9a-fA-F]{6}$"}
+      }
+    },
+    "recipe": {
+      "type": "object", "additionalProperties": false,
+      "required": ["recipe_id", "name", "output_kind", "input_kind", "material_ids", "power"],
+      "properties": {
+        "recipe_id": {"$ref": "#/$defs/id"},
+        "name": {"type": "string", "minLength": 1, "maxLength": 128},
+        "output_kind": {"enum": ["tool", "item"]},
+        "input_kind": {"enum": ["none", "tool"]},
+        "material_ids": {"type": "array", "minItems": 1, "maxItems": 64, "uniqueItems": true, "items": {"$ref": "#/$defs/id"}},
+        "power": {"type": "integer", "minimum": 0, "maximum": 1000}
+      }
+    },
+    "compiled": {
+      "type": "object", "additionalProperties": false,
+      "required": ["format", "source_path", "source_checksum", "grammar_hash", "grammar"],
+      "properties": {
+        "format": {"const": "compilableworld.compiled-object-reentry/v0.1"},
+        "source_path": {"type": "string", "minLength": 1},
+        "source_checksum": {"type": "string", "pattern": "^[a-f0-9]{64}$"},
+        "grammar_hash": {"type": "string", "pattern": "^[a-f0-9]{64}$"},
+        "grammar": {"$ref": "#"}
+      }
+    }
+  }
+}

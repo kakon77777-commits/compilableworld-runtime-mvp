@@ -62,6 +62,8 @@ KeepTheKernel
 
 目前不能把 RGGD 標成已完成的 Runtime capability。下列為全方法論的缺口清單，不是最小切片必須先全部建完的前置條件：
 
+2026-09-12 更新：Day 3 已完成固定、bounded 的 Object Re-entry，涵蓋 optional 材料／配方來源、Compiler、Runtime 獨立驗證、seeded derivation、真實磨耗回流與保存／重播。這是以下能力的第一個具體子集，仍不等於通用 RGGG 或動態 Grammar；實際對照為相同 seed 下 power 57 → 49，完整測試 403 passed。
+
 1. 通用 `Primitive`／`Type` registry；
 2. versioned `Grammar` 與 typed composition contract；
 3. hard constraint、soft preference 與 constraint propagation；
@@ -166,4 +168,4 @@ RGGD 很適合 CompilableWorld，而且比「每個 Domain 個別生成大量文
 
 它的真正作用不是讓 AI 一口氣把世界寫完，而是把 AI 與程序生成都限制在可組合、可驗證、可重播、可晉升、可回滾的結構內。對本專案最重要的改變，是未來不只編譯一個既定世界，也能編譯與執行「產生合法世界內容的 Grammar」。
 
-候選生成切片是 bounded、static、deterministic、history-aware 的物品閉環；開工順序先修復與驗證通用實體的保存／重播接點，最新下一步以施工進度為準。
+通用實體保存／重播與第一個 bounded、static、deterministic、history-aware 物件閉環，已分別於 Day 2／Day 3 驗收。下一步回到 CRDWS 靜態 Domain Graph 與能力對應；最新工作包以施工進度為準。

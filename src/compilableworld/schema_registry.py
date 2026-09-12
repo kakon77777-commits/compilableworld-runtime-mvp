@@ -85,20 +85,37 @@ _SCHEMAS: dict[str, dict[str, str]] = {
     },
 }
 
+_OPTIONAL_SCHEMAS: dict[str, dict[str, str]] = {
+    "object_reentry": {
+        "schema_id": "compilableworld.schema/object-reentry/v0.1",
+        "filename": "object-reentry.v0.1.schema.json", "version": "v0.1", "kind": "json",
+    },
+}
+
 
 class SchemaContractError(ValueError):
     """Raised when a checked-in schema contract is missing or inconsistent."""
 
 
-def schema_contracts(*, verify: bool = False) -> dict[str, str]:
+def _selected_schemas(include: tuple[str, ...]) -> dict[str, dict[str, str]]:
+    selected = dict(_SCHEMAS)
+    for key in include:
+        if key not in _OPTIONAL_SCHEMAS:
+            raise SchemaContractError(f"unknown optional schema: {key}")
+        selected[key] = _OPTIONAL_SCHEMAS[key]
+    return selected
+
+
+def schema_contracts(*, verify: bool = False, include: tuple[str, ...] = ()) -> dict[str, str]:
     """Return stable package-field to JSON-Schema-ID mappings.
 
     ``verify=True`` is used by the compiler and tests.  Keeping verification
     opt-in lets lightweight tooling inspect the mapping even while packaging
     metadata is being assembled.
     """
+    selected = _selected_schemas(include)
     if verify:
-        for key, metadata in _SCHEMAS.items():
+        for key, metadata in selected.items():
             path = _SCHEMA_ROOT / metadata["filename"]
             try:
                 document = json.loads(path.read_text(encoding="utf-8"))
@@ -108,13 +125,13 @@ def schema_contracts(*, verify: bool = False) -> dict[str, str]:
                 raise SchemaContractError(
                     f"schema contract ID mismatch for {key}: {document.get('$id')}"
                 )
-    return {key: metadata["schema_id"] for key, metadata in _SCHEMAS.items()}
+    return {key: metadata["schema_id"] for key, metadata in selected.items()}
 
 
 def schema_document(key: str) -> dict[str, Any]:
     """Load one checked-in schema document by its package/source key."""
     try:
-        metadata = _SCHEMAS[key]
+        metadata = {**_SCHEMAS, **_OPTIONAL_SCHEMAS}[key]
     except KeyError as exc:
         raise SchemaContractError(f"unknown schema contract: {key}") from exc
     path = _SCHEMA_ROOT / metadata["filename"]
@@ -140,10 +157,10 @@ def csv_schema_columns(key: str) -> list[dict[str, Any]]:
     return [dict(column) for column in columns]
 
 
-def schema_catalog() -> dict[str, Any]:
+def schema_catalog(*, include: tuple[str, ...] = ()) -> dict[str, Any]:
     """Return read-only schema metadata suitable for Studio discovery."""
     records: list[dict[str, Any]] = []
-    for key, metadata in _SCHEMAS.items():
+    for key, metadata in _selected_schemas(include).items():
         path = _SCHEMA_ROOT / metadata["filename"]
         record: dict[str, Any] = {
             "key": key,
